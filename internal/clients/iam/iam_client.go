@@ -3,21 +3,22 @@
 
 // Package iam — adapter-клиент к kacho-registry-консумируемым RPC kacho-iam.
 // Реализует порт registry.IAMClient: cross-domain валидация project'а на Create
-// (ProjectService.Get) + owner-tuple lifecycle через fga-proxy
-// (InternalIAMService.RegisterResource/UnregisterResource, Internal :9091, mTLS,
-// идемпотентно).
-//
-// Отделён от internal/check (authz-Check-интерсептор) — это разные консумируемые
-// поверхности iam. Тела вызовов (маппинг port→grpc, propagate outgoing ctx)
-// наполняет rpc-implementer; здесь — скелет-адаптер с сигнатурами порта.
+// (ProjectService.Get). Owner-tuple lifecycle (RegisterResource/UnregisterResource)
+// живёт в register_applier.go (drainer-half), а per-RPC authz-Check — в
+// internal/check — это разные консумируемые поверхности kacho-iam.
 package iam
 
 import (
 	"context"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
-	registry "github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/api/registry"
+	"github.com/PRO-Robotech/kacho-corelib/auth"
+	"github.com/PRO-Robotech/kacho-corelib/retry"
+	iamv1 "github.com/PRO-Robotech/kacho-iam/proto/gen/go/kacho/cloud/iam/v1"
+
 	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
 )
 
@@ -26,8 +27,8 @@ type Client struct {
 	conn grpc.ClientConnInterface
 }
 
-// New оборачивает grpc-conn (к kacho-iam :9091 — ProjectService.Get и
-// InternalIAMService.Register/Unregister). nil conn → методы отвечают Unavailable.
+// New оборачивает grpc-conn (к kacho-iam :9091 — ProjectService.Get). nil conn →
+// методы отвечают Unavailable (мутация fail-closed).
 func New(conn grpc.ClientConnInterface) *Client { return &Client{conn: conn} }
 
 // ready — conn к kacho-iam обязан быть подан (иначе fail-closed Unavailable).
@@ -38,30 +39,38 @@ func (c *Client) ready() error {
 	return nil
 }
 
-// ProjectExists валидирует project-владельца на Create через ProjectService.Get
-// (не найдено → ErrInvalidArg; iam недоступен → ErrUnavailable). Реализует rpc-implementer.
+// ProjectExists валидирует project-владельца на Create через ProjectService.Get.
+// Семантика ошибок (existence-hiding: tenant не различает "нет" и "нет доступа"):
+//
+//	NotFound / PermissionDenied / InvalidArgument → ErrInvalidArg ("project not found")
+//	Unavailable / DeadlineExceeded                → ErrUnavailable (мутация fail-closed)
+//
+// Исходящий ctx оборачивается auth.PropagateOutgoing — iam-side ProjectService.Get
+// проходит per-RPC Check от реального вызывающего (не SystemPrincipal-fallback).
 func (c *Client) ProjectExists(ctx context.Context, projectID string) error {
 	if err := c.ready(); err != nil {
 		return err
 	}
-	return regerrors.ErrUnimplemented
-}
-
-// RegisterResource пишет owner/project owner-tuple созданного реестра через
-// InternalIAMService.RegisterResource (идемпотентно). Реализует rpc-implementer.
-func (c *Client) RegisterResource(ctx context.Context, registryID, projectID, subjectID string) error {
-	if err := c.ready(); err != nil {
-		return err
+	if projectID == "" {
+		return regerrors.ErrInvalidArg
 	}
-	return regerrors.ErrUnimplemented
-}
-
-// UnregisterResource снимает owner-tuple удалённого реестра. Реализует rpc-implementer.
-func (c *Client) UnregisterResource(ctx context.Context, registryID string) error {
-	if err := c.ready(); err != nil {
-		return err
+	cli := iamv1.NewProjectServiceClient(c.conn)
+	err := retry.OnUnavailable(ctx, func(ctx context.Context) error {
+		_, gerr := cli.Get(auth.PropagateOutgoing(ctx), &iamv1.GetProjectRequest{ProjectId: projectID})
+		return gerr
+	})
+	if err == nil {
+		return nil
 	}
-	return regerrors.ErrUnimplemented
+	st, ok := status.FromError(err)
+	if !ok {
+		return regerrors.ErrInternal
+	}
+	switch st.Code() {
+	case codes.NotFound, codes.PermissionDenied, codes.InvalidArgument:
+		return regerrors.ErrInvalidArg
+	case codes.Unavailable, codes.DeadlineExceeded:
+		return regerrors.ErrUnavailable
+	}
+	return regerrors.ErrInternal
 }
-
-var _ registry.IAMClient = (*Client)(nil)

@@ -1,0 +1,226 @@
+// Copyright (c) PRO-Robotech
+// SPDX-License-Identifier: BUSL-1.1
+
+package registry_test
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+
+	"google.golang.org/genproto/googleapis/rpc/status"
+	"google.golang.org/protobuf/types/known/anypb"
+
+	"github.com/PRO-Robotech/kacho-corelib/operations"
+
+	registry "github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/api/registry"
+	"github.com/PRO-Robotech/kacho-registry/internal/domain"
+	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
+)
+
+// ---- mock RegistryReader / RegistryWriter (CQRS-порты) --------------------
+
+type mockRepo struct {
+	mu sync.Mutex
+
+	getFn    func(ctx context.Context, id string) (*domain.Registry, error)
+	listFn   func(ctx context.Context, q registry.ListQuery) ([]*domain.Registry, string, error)
+	insertFn func(ctx context.Context, r *domain.Registry, intent domain.RegisterIntent) (*domain.Registry, error)
+	updateFn func(ctx context.Context, spec registry.UpdateSpec, mirror func(*domain.Registry) domain.RegisterIntent) (*domain.Registry, error)
+	markFn   func(ctx context.Context, id string) (*domain.Registry, error)
+	deleteFn func(ctx context.Context, id string, intent domain.RegisterIntent) error
+
+	// Записанные вызовы для ассертов.
+	insertIntent domain.RegisterIntent
+	insertReg    *domain.Registry
+	updateSpec   registry.UpdateSpec
+	deleteIntent domain.RegisterIntent
+}
+
+func (m *mockRepo) Get(ctx context.Context, id string) (*domain.Registry, error) {
+	if m.getFn != nil {
+		return m.getFn(ctx, id)
+	}
+	return nil, regerrors.ErrNotFound
+}
+
+func (m *mockRepo) List(ctx context.Context, q registry.ListQuery) ([]*domain.Registry, string, error) {
+	if m.listFn != nil {
+		return m.listFn(ctx, q)
+	}
+	return nil, "", nil
+}
+
+func (m *mockRepo) Insert(ctx context.Context, r *domain.Registry, intent domain.RegisterIntent) (*domain.Registry, error) {
+	m.mu.Lock()
+	m.insertReg = r
+	m.insertIntent = intent
+	m.mu.Unlock()
+	if m.insertFn != nil {
+		return m.insertFn(ctx, r, intent)
+	}
+	return r, nil
+}
+
+func (m *mockRepo) Update(ctx context.Context, spec registry.UpdateSpec, mirror func(*domain.Registry) domain.RegisterIntent) (*domain.Registry, error) {
+	m.mu.Lock()
+	m.updateSpec = spec
+	m.mu.Unlock()
+	if m.updateFn != nil {
+		return m.updateFn(ctx, spec, mirror)
+	}
+	return &domain.Registry{ID: spec.RegistryID, Status: domain.RegistryStatusActive}, nil
+}
+
+func (m *mockRepo) MarkDeleting(ctx context.Context, id string) (*domain.Registry, error) {
+	if m.markFn != nil {
+		return m.markFn(ctx, id)
+	}
+	return &domain.Registry{ID: id, ProjectID: "prj-P", Status: domain.RegistryStatusDeleting}, nil
+}
+
+func (m *mockRepo) Delete(ctx context.Context, id string, intent domain.RegisterIntent) error {
+	m.mu.Lock()
+	m.deleteIntent = intent
+	m.mu.Unlock()
+	if m.deleteFn != nil {
+		return m.deleteFn(ctx, id, intent)
+	}
+	return nil
+}
+
+// ---- mock ZotClient (только RemoveNamespace задействован в Delete-worker'е) ---
+
+type mockZot struct {
+	mu             sync.Mutex
+	removeFn       func(ctx context.Context, registryID string) error
+	removedNS      []string
+	namespaceEmpty bool
+}
+
+func (z *mockZot) ListRepositories(ctx context.Context, q registry.RepoListQuery) ([]*domain.Repository, string, error) {
+	return nil, "", nil
+}
+func (z *mockZot) ListTags(ctx context.Context, q registry.TagListQuery) ([]*domain.Tag, string, error) {
+	return nil, "", nil
+}
+func (z *mockZot) DeleteTag(ctx context.Context, registryID, repository, tag string) error {
+	return nil
+}
+func (z *mockZot) NamespaceEmpty(ctx context.Context, registryID string) (bool, error) {
+	return z.namespaceEmpty, nil
+}
+func (z *mockZot) RemoveNamespace(ctx context.Context, registryID string) error {
+	z.mu.Lock()
+	z.removedNS = append(z.removedNS, registryID)
+	z.mu.Unlock()
+	if z.removeFn != nil {
+		return z.removeFn(ctx, registryID)
+	}
+	return nil
+}
+func (z *mockZot) TriggerGC(ctx context.Context, registryID string) error { return nil }
+func (z *mockZot) Stats(ctx context.Context, registryID string) (*domain.RegistryStats, error) {
+	return &domain.RegistryStats{RegistryID: registryID}, nil
+}
+
+// ---- mock IAMClient (ProjectExists) --------------------------------------
+
+type mockIAM struct {
+	projectFn func(ctx context.Context, projectID string) error
+	called    bool
+}
+
+func (i *mockIAM) ProjectExists(ctx context.Context, projectID string) error {
+	i.called = true
+	if i.projectFn != nil {
+		return i.projectFn(ctx, projectID)
+	}
+	return nil
+}
+
+// ---- in-memory operations.Repo + AwaitOpDone -----------------------------
+
+type memOps struct {
+	mu  sync.Mutex
+	ops map[string]*operations.Operation
+}
+
+func newMemOps() *memOps { return &memOps{ops: map[string]*operations.Operation{}} }
+
+func (m *memOps) put(op operations.Operation) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := op
+	m.ops[op.ID] = &cp
+}
+
+func (m *memOps) Create(ctx context.Context, op operations.Operation) error { m.put(op); return nil }
+func (m *memOps) CreateWithPrincipal(ctx context.Context, op operations.Operation, p operations.Principal) error {
+	op.Principal = p
+	m.put(op)
+	return nil
+}
+func (m *memOps) Get(ctx context.Context, id string) (*operations.Operation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	op, ok := m.ops[id]
+	if !ok {
+		return nil, operations.ErrNotFound
+	}
+	cp := *op
+	return &cp, nil
+}
+func (m *memOps) List(ctx context.Context, f operations.ListFilter) ([]operations.Operation, string, error) {
+	return nil, "", nil
+}
+func (m *memOps) MarkDone(ctx context.Context, id string, response *anypb.Any) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	op, ok := m.ops[id]
+	if !ok {
+		return operations.ErrNotFound
+	}
+	op.Done = true
+	op.Response = response
+	return nil
+}
+func (m *memOps) MarkError(ctx context.Context, id string, errStatus *status.Status) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	op, ok := m.ops[id]
+	if !ok {
+		return operations.ErrNotFound
+	}
+	op.Done = true
+	op.Error = errStatus
+	return nil
+}
+func (m *memOps) Cancel(ctx context.Context, id string) error { return nil }
+
+// awaitOpDone детерминированно дожидается завершения LRO-worker'а (poll, не sleep).
+func awaitOpDone(t *testing.T, ops *memOps, id string) *operations.Operation {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		op, err := ops.Get(context.Background(), id)
+		if err == nil && op.Done {
+			return op
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("operation %s did not complete in time", id)
+	return nil
+}
+
+// newUC собирает UseCase поверх mock-портов + in-memory ops.
+func newUC(repo *mockRepo, zot *mockZot, iam *mockIAM, ops *memOps) *registry.UseCase {
+	return registry.New(repo, repo, zot, iam, ops, "registry.kacho.local")
+}
+
+// aliceCtx — ctx с аутентифицированным principal (owner-tuple → user:usr-alice).
+func aliceCtx() context.Context {
+	return operations.WithPrincipal(context.Background(),
+		operations.Principal{Type: "user", ID: "usr-alice", DisplayName: "alice"})
+}

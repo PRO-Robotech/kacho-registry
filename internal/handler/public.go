@@ -34,7 +34,7 @@ func (h *RegistryHandler) Get(ctx context.Context, req *registryv1.GetRegistryRe
 	if err != nil {
 		return nil, mapErr(err)
 	}
-	return toProtoRegistry(r), nil
+	return h.uc.ProtoRegistry(r), nil
 }
 
 // List возвращает реестры project'а (sync, cursor-пагинация; listauthz-фильтр).
@@ -50,7 +50,7 @@ func (h *RegistryHandler) List(ctx context.Context, req *registryv1.ListRegistri
 	}
 	resp := &registryv1.ListRegistriesResponse{NextPageToken: next}
 	for _, r := range items {
-		resp.Registries = append(resp.Registries, toProtoRegistry(r))
+		resp.Registries = append(resp.Registries, h.uc.ProtoRegistry(r))
 	}
 	return resp, nil
 }
@@ -71,10 +71,9 @@ func (h *RegistryHandler) Create(ctx context.Context, req *registryv1.CreateRegi
 
 // Update запускает async-смену mutable-полей (labels/description) и возвращает Operation.
 func (h *RegistryHandler) Update(ctx context.Context, req *registryv1.UpdateRegistryRequest) (*operationProto, error) {
-	desc := req.GetDescription()
 	op, err := h.uc.Update(ctx, registry.UpdateSpec{
 		RegistryID:  req.GetRegistryId(),
-		Description: &desc,
+		Description: req.GetDescription(),
 		Labels:      req.GetLabels(),
 		Mask:        req.GetUpdateMask().GetPaths(),
 	})

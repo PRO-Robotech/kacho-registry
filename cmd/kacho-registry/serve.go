@@ -21,6 +21,7 @@ import (
 	"github.com/PRO-Robotech/kacho-corelib/grpcsrv"
 	"github.com/PRO-Robotech/kacho-corelib/observability"
 	"github.com/PRO-Robotech/kacho-corelib/operations"
+	"github.com/PRO-Robotech/kacho-corelib/outbox/drainer"
 	operationpb "github.com/PRO-Robotech/kacho-corelib/proto/gen/go/kacho/cloud/operation"
 
 	registryv1 "github.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1"
@@ -30,6 +31,7 @@ import (
 	"github.com/PRO-Robotech/kacho-registry/internal/check"
 	iamclient "github.com/PRO-Robotech/kacho-registry/internal/clients/iam"
 	zotclient "github.com/PRO-Robotech/kacho-registry/internal/clients/zot"
+	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 	"github.com/PRO-Robotech/kacho-registry/internal/handler"
 	"github.com/PRO-Robotech/kacho-registry/internal/repo/kacho/pg"
 )
@@ -89,7 +91,28 @@ func runServe(cfg config.Config) error {
 	iamAdapter := iamclient.New(iamConn)
 
 	// ── use-case (CQRS repo + zot + iam + LRO) ──
-	registryUC := registry.New(registryRepo, registryRepo, zotAdapter, iamAdapter, opsRepo)
+	registryUC := registry.New(registryRepo, registryRepo, zotAdapter, iamAdapter, opsRepo, cfg.EndpointBase)
+
+	// ── register-drainer: owner-tuple register/unregister intent из registry_outbox
+	// применяется через kacho-iam fga-proxy (:9091, mTLS, идемпотентно, at-least-once,
+	// exactly-once claim FOR UPDATE SKIP LOCKED между репликами). iam недоступен →
+	// intent durable + retry (owner-tuple не теряется). Без него созданные реестры не
+	// получат owner/project-tuple → невидимы в authz-filtered List.
+	regDrainer, derr := drainer.New[domain.RegisterIntent](
+		pool,
+		drainer.Config{Table: "kacho_registry.registry_outbox", Channel: "kacho_registry_outbox"},
+		iamclient.DecodeRegisterIntent,
+		iamclient.NewRegisterApplier(iamclient.NewRegisterResourceClient(iamConn)),
+		logger,
+	)
+	if derr != nil {
+		return fmt.Errorf("build register-drainer: %w", derr)
+	}
+	go func() {
+		if rerr := regDrainer.Run(ctx); rerr != nil && !errors.Is(rerr, context.Canceled) {
+			logger.Error("register-drainer stopped", "err", rerr)
+		}
+	}()
 
 	// ── authz: per-RPC OpenFGA Check на ОБОИХ листенерах (AuthN+AuthZ везде —
 	// internal :9091 НЕ освобождён, security.md). Check обязателен —

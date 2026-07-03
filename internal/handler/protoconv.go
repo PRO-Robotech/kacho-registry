@@ -19,23 +19,10 @@ import (
 // gRPC-стабы RegistryService мутаций (совпадает с corelib operation proto).
 type operationProto = operationpb.Operation
 
-// toProtoRegistry конвертирует domain.Registry → registryv1.Registry (created_at
-// усекается до секунд; endpoint/repository_count — output-only проекции,
-// заполняются наполняющим слоем rpc-implementer).
-func toProtoRegistry(r *domain.Registry) *registryv1.Registry {
-	if r == nil {
-		return nil
-	}
-	return &registryv1.Registry{
-		Id:          r.ID,
-		ProjectId:   r.ProjectID,
-		CreatedAt:   ts(r.CreatedAt),
-		Name:        r.Name,
-		Description: r.Description,
-		Labels:      r.Labels,
-		Status:      registryv1.RegistryStatus(r.Status),
-	}
-}
+// Проекция domain.Registry → registryv1.Registry (с output-only endpoint) —
+// единый источник в use-case (UseCase.ProtoRegistry), т.к. endpoint зависит от
+// конфигурируемой base. Handler зовёт h.uc.ProtoRegistry, отдельного конвертера
+// Registry в transport-слое нет.
 
 // toProtoRepository конвертирует domain.Repository → registryv1.Repository.
 func toProtoRepository(r *domain.Repository) *registryv1.Repository {

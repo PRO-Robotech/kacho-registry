@@ -5,14 +5,13 @@
 //
 // Use-case слой чистой архитектуры: импортирует domain + порты + corelib
 // operations; НЕ тянет pgx/grpc/transport. Здесь объявлены port-интерфейсы
-// (RegistryReader/RegistryWriter — CQRS, ZotClient, IAMClient) — это АНКЕРЫ для
-// rpc-implementer: сигнатуры зафиксированы, тела наполняются строгим TDD.
+// (RegistryReader/RegistryWriter — CQRS, ZotClient, IAMClient) и общая часть
+// UseCase; тела мутаций — в create.go / update.go / delete.go.
 //
 // Формы RPC (api-conventions.md): Get/List/ListRepositories/ListTags — sync;
-// Create/Update/Delete/DeleteTag — async через operation.Operation. Мутации в
-// скелете возвращают codes.Unimplemented (ErrUnimplemented) — LRO-оркестрация
-// (id-gen, project-валидация через iam, worker с проброшенным principal,
-// owner-tuple в registry_outbox) реализуется rpc-implementer'ом.
+// Create/Update/Delete/DeleteTag — async через operation.Operation. Read-часть
+// (Get/List) — sync pass-through к репозиторию; мутации sync-валидируют вход и
+// project-existence, затем LRO-worker (с проброшенным principal) финализирует.
 package registry
 
 import (
@@ -56,13 +55,17 @@ type CreateSpec struct {
 	Labels      map[string]string
 }
 
-// UpdateSpec — mutable-поля Update (name/project immutable — в spec не входят).
-// Description/Labels — nil означает «поле не в update_mask» (partial PATCH).
+// UpdateSpec — вход Update. name/project immutable (в spec не входят). Handler
+// подаёт сырые Description/Labels + Mask; use-case после mask-discipline выставляет
+// ApplyDescription/ApplyLabels — по ним репозиторий строит частичный UPDATE
+// (пустая карта Labels при ApplyLabels=true реально очищает метки).
 type UpdateSpec struct {
-	RegistryID  string
-	Description *string
-	Labels      map[string]string
-	Mask        []string
+	RegistryID       string
+	Description      string
+	Labels           map[string]string
+	Mask             []string
+	ApplyDescription bool
+	ApplyLabels      bool
 }
 
 // ---- Порты (АНКЕРЫ для rpc-implementer; CQRS-разделение read/write) ----------
@@ -78,17 +81,21 @@ type RegistryReader interface {
 
 // RegistryWriter — write-порт таблицы registries. Мутации атомарны на DB-уровне
 // (INSERT/UPDATE ... RETURNING, CAS-переход ACTIVE→DELETING) и пишут owner-tuple
-// intent в registry_outbox в той же writer-tx. Никакого software check-then-act.
+// intent в registry_outbox в ТОЙ ЖЕ writer-tx. Никакого software check-then-act.
 type RegistryWriter interface {
-	// Insert создаёт реестр (partial UNIQUE(project_id,name) WHERE status<>'DELETING').
-	Insert(ctx context.Context, r *domain.Registry) (*domain.Registry, error)
-	// Update применяет mutable-поля (description/labels) одним UPDATE ... RETURNING.
-	Update(ctx context.Context, spec UpdateSpec) (*domain.Registry, error)
+	// Insert создаёт реестр + register-intent в registry_outbox одной tx. partial
+	// UNIQUE(project_id,name) WHERE status<>'DELETING' → 23505 → ErrAlreadyExists.
+	Insert(ctx context.Context, r *domain.Registry, intent domain.RegisterIntent) (*domain.Registry, error)
+	// Update применяет mutable-поля (по Apply*-флагам) одним UPDATE ... RETURNING;
+	// mirror register-intent строится callback'ом ИЗ обновлённой строки (нужны
+	// её project_id + новые labels) и эмитится в ТОЙ ЖЕ tx (без Get/TOCTOU).
+	Update(ctx context.Context, spec UpdateSpec, mirror func(*domain.Registry) domain.RegisterIntent) (*domain.Registry, error)
 	// MarkDeleting — атомарный CAS ACTIVE→DELETING (UPDATE ... WHERE status='ACTIVE'
-	// RETURNING); 0 rows → ErrNotFound/idempotent. DELETING терминальный (forward-only).
+	// RETURNING); 0 rows → ErrNotFound (уже DELETING/удалён — идемпотентно).
+	// DELETING терминальный (forward-only): revert в ACTIVE невозможен.
 	MarkDeleting(ctx context.Context, id string) (*domain.Registry, error)
-	// Delete удаляет строку реестра (после снятия zot-namespace) + Unregister-intent.
-	Delete(ctx context.Context, id string) error
+	// Delete удаляет строку реестра + unregister-intent в registry_outbox одной tx.
+	Delete(ctx context.Context, id string, intent domain.RegisterIntent) error
 }
 
 // RegistryRepo — композитный CQRS-порт (read+write) для composition root.
@@ -117,32 +124,42 @@ type ZotClient interface {
 }
 
 // IAMClient — порт к kacho-iam: cross-domain валидация project (ProjectService.Get)
-// на Create + запись/снятие owner-tuple через fga-proxy (RegisterResource /
-// UnregisterResource, Internal :9091, идемпотентно).
+// на Create. Owner-tuple lifecycle идёт НЕ отсюда, а через registry_outbox +
+// register-drainer (fga-proxy) — чтобы атомарно с DML и at-least-once.
 type IAMClient interface {
 	// ProjectExists валидирует project-владельца на Create (не найдено →
 	// ErrInvalidArg; iam недоступен → ErrUnavailable, мутация fail-closed).
 	ProjectExists(ctx context.Context, projectID string) error
-	// RegisterResource пишет owner/project owner-tuple созданного реестра.
-	RegisterResource(ctx context.Context, registryID, projectID, subjectID string) error
-	// UnregisterResource снимает owner-tuple удалённого реестра.
-	UnregisterResource(ctx context.Context, registryID string) error
 }
 
 // UseCase — бизнес-логика Registry поверх портов (CQRS repo + zot + iam) и
 // LRO-стека operations.
 type UseCase struct {
-	reader RegistryReader
-	writer RegistryWriter
-	zot    ZotClient
-	iam    IAMClient
-	ops    operations.Repo
+	reader       RegistryReader
+	writer       RegistryWriter
+	zot          ZotClient
+	iam          IAMClient
+	ops          operations.Repo
+	endpointBase string
 }
 
 // New собирает UseCase. reader/writer — одна pg-реализация (CQRS-разделение на
-// уровне портов); ops — corelib LRO-репозиторий (async-мутации).
-func New(reader RegistryReader, writer RegistryWriter, zot ZotClient, iam IAMClient, ops operations.Repo) *UseCase {
-	return &UseCase{reader: reader, writer: writer, zot: zot, iam: iam, ops: ops}
+// уровне портов); ops — corelib LRO-репозиторий; endpointBase — tenant-facing
+// база для output-only Registry.endpoint ("<base>/<id>").
+func New(reader RegistryReader, writer RegistryWriter, zot ZotClient, iam IAMClient, ops operations.Repo, endpointBase string) *UseCase {
+	if endpointBase == "" {
+		endpointBase = "registry.kacho.local"
+	}
+	return &UseCase{reader: reader, writer: writer, zot: zot, iam: iam, ops: ops, endpointBase: endpointBase}
+}
+
+// EndpointFor возвращает tenant-facing OCI-endpoint реестра ("<base>/<id>").
+// Output-only проекция; используется handler'ом (Get/List) и worker'ом (Create).
+func (u *UseCase) EndpointFor(id string) string {
+	if id == "" {
+		return ""
+	}
+	return u.endpointBase + "/" + id
 }
 
 // assertWired — defensive-гейт: composition root обязан подать все коллабораторы.
@@ -159,15 +176,33 @@ func (u *UseCase) Get(ctx context.Context, id string) (*domain.Registry, error) 
 	if err := u.assertWired(); err != nil {
 		return nil, err
 	}
-	return u.reader.Get(ctx, id)
+	if err := validateRegistryID(id); err != nil {
+		return nil, err
+	}
+	r, err := u.reader.Get(ctx, id)
+	if err != nil {
+		return nil, mapRepoErr(err)
+	}
+	return r, nil
 }
 
 // List возвращает реестры project'а (listauthz-фильтр выполняет handler).
+// Sync: валидирует page_size (0→default 50, max 1000; вне диапазона →
+// InvalidArgument), затем cursor-запрос; garbage page_token → InvalidArgument.
 func (u *UseCase) List(ctx context.Context, q ListQuery) ([]*domain.Registry, string, error) {
 	if err := u.assertWired(); err != nil {
 		return nil, "", err
 	}
-	return u.reader.List(ctx, q)
+	size, err := validatePageSize(q.PageSize)
+	if err != nil {
+		return nil, "", err
+	}
+	q.PageSize = size
+	items, next, err := u.reader.List(ctx, q)
+	if err != nil {
+		return nil, "", mapRepoErr(err)
+	}
+	return items, next, nil
 }
 
 // ListRepositories возвращает проекцию repos namespace из zot.
@@ -194,35 +229,8 @@ func (u *UseCase) Stats(ctx context.Context, registryID string) (*domain.Registr
 	return u.zot.Stats(ctx, registryID)
 }
 
-// Create — async создание реестра. Реализует rpc-implementer (id-gen prefix "reg",
-// domain-валидация, ProjectExists через iam, LRO-worker с проброшенным principal,
-// RegisterResource owner-tuple в registry_outbox).
-func (u *UseCase) Create(ctx context.Context, spec CreateSpec) (*operations.Operation, error) {
-	if err := u.assertWired(); err != nil {
-		return nil, err
-	}
-	return nil, regerrors.ErrUnimplemented
-}
-
-// Update — async смена mutable-полей (labels/description). Реализует rpc-implementer.
-func (u *UseCase) Update(ctx context.Context, spec UpdateSpec) (*operations.Operation, error) {
-	if err := u.assertWired(); err != nil {
-		return nil, err
-	}
-	return nil, regerrors.ErrUnimplemented
-}
-
-// Delete — async удаление реестра (CAS ACTIVE→DELETING, снятие zot-namespace,
-// UnregisterResource). Реализует rpc-implementer.
-func (u *UseCase) Delete(ctx context.Context, registryID string) (*operations.Operation, error) {
-	if err := u.assertWired(); err != nil {
-		return nil, err
-	}
-	return nil, regerrors.ErrUnimplemented
-}
-
-// DeleteTag — async удаление тега/манифеста в zot (единственный destructive-путь
-// для образов; data-plane DELETE отвергается 405). Реализует rpc-implementer.
+// DeleteTag — async удаление тега/манифеста в zot (data-plane проекция, следующая
+// фаза). Пока не в scope control-plane CRUD → Unimplemented.
 func (u *UseCase) DeleteTag(ctx context.Context, registryID, repository, tag string) (*operations.Operation, error) {
 	if err := u.assertWired(); err != nil {
 		return nil, err
@@ -230,7 +238,8 @@ func (u *UseCase) DeleteTag(ctx context.Context, registryID, repository, tag str
 	return nil, regerrors.ErrUnimplemented
 }
 
-// TriggerGC — async garbage collection namespace в zot (Internal admin). Реализует rpc-implementer.
+// TriggerGC — async garbage collection namespace в zot (Internal admin, zot-backed,
+// следующая фаза) → Unimplemented.
 func (u *UseCase) TriggerGC(ctx context.Context, registryID string) (*operations.Operation, error) {
 	if err := u.assertWired(); err != nil {
 		return nil, err

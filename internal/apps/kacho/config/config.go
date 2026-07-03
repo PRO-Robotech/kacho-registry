@@ -56,6 +56,11 @@ type Config struct {
 	// никогда не публично достижим; клиент ходит на cluster-internal endpoint.
 	ZotAddr string `envconfig:"KACHO_REGISTRY_ZOT_ADDR" default:""`
 
+	// EndpointBase — tenant-facing base OCI-endpoint namespace. Output-only поле
+	// Registry.endpoint = "<EndpointBase>/<id>". Это tenant-facing ingress-host;
+	// инфра-адрес zot наружу не раскрывается (security.md §инфра-данные).
+	EndpointBase string `envconfig:"KACHO_REGISTRY_ENDPOINT_BASE" default:"registry.kacho.local"`
+
 	// ===== per-edge mTLS =====
 
 	// IAMAuthzMTLS — client-creds для ребра registry→iam (:9091): Check + fga-proxy.
