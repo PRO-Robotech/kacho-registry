@@ -1,0 +1,259 @@
+// Copyright (c) PRO-Robotech
+// SPDX-License-Identifier: BUSL-1.1
+
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"google.golang.org/grpc"
+
+	coredb "github.com/PRO-Robotech/kacho-corelib/db"
+	"github.com/PRO-Robotech/kacho-corelib/grpcclient"
+	"github.com/PRO-Robotech/kacho-corelib/grpcsrv"
+	"github.com/PRO-Robotech/kacho-corelib/observability"
+	"github.com/PRO-Robotech/kacho-corelib/operations"
+	operationpb "github.com/PRO-Robotech/kacho-corelib/proto/gen/go/kacho/cloud/operation"
+
+	registryv1 "github.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1"
+
+	registry "github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/api/registry"
+	"github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/config"
+	"github.com/PRO-Robotech/kacho-registry/internal/check"
+	iamclient "github.com/PRO-Robotech/kacho-registry/internal/clients/iam"
+	zotclient "github.com/PRO-Robotech/kacho-registry/internal/clients/zot"
+	"github.com/PRO-Robotech/kacho-registry/internal/handler"
+	"github.com/PRO-Robotech/kacho-registry/internal/repo/kacho/pg"
+)
+
+// runServe — composition root: единственное место wiring, без глобальных синглтонов.
+func runServe(cfg config.Config) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+
+	logger := observability.NewSlogger(os.Stdout)
+	slog.SetDefault(logger)
+
+	if err := validateAuthMode(cfg, logger); err != nil {
+		return err
+	}
+	// Secure-by-default: per-RPC authz Check и mTLS на ОБОИХ листенерах
+	// обязательны. Единственный способ запустить без авторизации и mTLS —
+	// аварийный KACHO_REGISTRY_AUTHZ_BREAKGLASS=true.
+	if err := validateSecurityConfig(cfg); err != nil {
+		return err
+	}
+
+	pool, err := coredb.NewPool(ctx, cfg.DSN())
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	// ── LRO-стек: общая operations-таблица (corelib) каталога kacho_registry.
+	opsRepo := operations.NewRepo(pool, "kacho_registry")
+
+	// ── ребро registry→iam (:9091, mTLS): один conn на per-RPC authz Check и на
+	// клиента ProjectService.Get / fga-proxy Register/Unregister. При breakglass
+	// conn может быть nil (интерсептор пропускает всё; клиенты отвечают Unavailable).
+	var authzConn *grpc.ClientConn
+	if cfg.AuthZIAMGRPCAddr != "" {
+		authzCreds, cerr := grpcclient.TLSClientTransportCreds(cfg.IAMAuthzMTLS)
+		if cerr != nil {
+			return fmt.Errorf("registry→iam mTLS creds: %w", cerr)
+		}
+		authzConn, err = grpc.NewClient(cfg.AuthZIAMGRPCAddr,
+			grpc.WithTransportCredentials(authzCreds),
+			grpcclient.KeepaliveDialOption(true))
+		if err != nil {
+			return fmt.Errorf("dial kacho-iam: %w", err)
+		}
+		defer authzConn.Close()
+	}
+
+	// ── adapters (порты use-case): pgx-repo, zot data/registry-API, iam-клиент ──
+	var iamConn grpc.ClientConnInterface
+	if authzConn != nil {
+		iamConn = authzConn
+	}
+	registryRepo := pg.NewRegistryRepo(pool)
+	zotAdapter := zotclient.New(cfg.ZotAddr)
+	iamAdapter := iamclient.New(iamConn)
+
+	// ── use-case (CQRS repo + zot + iam + LRO) ──
+	registryUC := registry.New(registryRepo, registryRepo, zotAdapter, iamAdapter, opsRepo)
+
+	// ── authz: per-RPC OpenFGA Check на ОБОИХ листенерах (AuthN+AuthZ везде —
+	// internal :9091 НЕ освобождён, security.md). Check обязателен —
+	// validateSecurityConfig уже гарантировал наличие адреса kacho-iam без breakglass.
+	authzIntr, aerr := check.NewInterceptor(check.Options{
+		ServiceName: "kacho-registry",
+		IAMConn:     authzConn,
+		Breakglass:  cfg.AuthZBreakglass,
+		Logger:      logger,
+	})
+
+	// ── цепочки интерсепторов ──
+	// Public (:9090): principal-extract → authz Check.
+	publicUnary := []grpc.UnaryServerInterceptor{grpcsrv.UnaryPrincipalExtract()}
+	publicStream := []grpc.StreamServerInterceptor{grpcsrv.StreamPrincipalExtract()}
+	// Internal (:9091): cert-identity → trusted-principal (anti-spoof) → authz Check.
+	// ТОТ ЖЕ per-RPC authz, что и на public — internal не доверенный.
+	internalUnary := []grpc.UnaryServerInterceptor{
+		grpcsrv.UnaryCertIdentityExtract(),
+		grpcsrv.UnaryTrustedPrincipalExtract(),
+	}
+	internalStream := []grpc.StreamServerInterceptor{
+		grpcsrv.StreamCertIdentityExtract(),
+		grpcsrv.StreamTrustedPrincipalExtract(),
+	}
+
+	switch {
+	case aerr == nil && authzIntr != nil:
+		publicUnary = append(publicUnary, authzIntr.Unary())
+		publicStream = append(publicStream, authzIntr.Stream())
+		internalUnary = append(internalUnary, authzIntr.Unary())
+		internalStream = append(internalStream, authzIntr.Stream())
+		if cfg.AuthZBreakglass {
+			logger.Warn("BREAKGLASS active: per-RPC authz Check bypassed on BOTH listeners (emergency mode)")
+		} else {
+			logger.Info("authz interceptor enabled",
+				"iam_endpoint", cfg.AuthZIAMGRPCAddr,
+				"listeners", "public+internal")
+		}
+	case errors.Is(aerr, check.ErrIAMConnNotConfigured):
+		// Недостижимо при штатной конфигурации: validateSecurityConfig уже отказал
+		// бы старту. Defensive fail-closed.
+		return errors.New("authz Check required: set KACHO_REGISTRY_AUTHZ_IAM_GRPC_ADDR (or KACHO_REGISTRY_AUTHZ_BREAKGLASS=true to bypass)")
+	case aerr != nil:
+		return fmt.Errorf("build authz interceptor: %w", aerr)
+	}
+
+	// ── server-creds (mTLS обязателен на обоих листенерах, кроме breakglass) ──
+	publicCreds, err := cfg.PublicServerCreds()
+	if err != nil {
+		return fmt.Errorf("public listener tls creds: %w", err)
+	}
+	internalCreds, err := cfg.InternalServerCreds()
+	if err != nil {
+		return fmt.Errorf("internal listener tls creds: %w", err)
+	}
+
+	grpcSrv := grpcsrv.NewServer(
+		publicCreds,
+		grpc.ChainUnaryInterceptor(publicUnary...),
+		grpc.ChainStreamInterceptor(publicStream...),
+	)
+	internalSrv := grpcsrv.NewServer(
+		internalCreds,
+		grpc.ChainUnaryInterceptor(internalUnary...),
+		grpc.ChainStreamInterceptor(internalStream...),
+	)
+
+	// Публичный control-plane RegistryService на :9090.
+	registryv1.RegisterRegistryServiceServer(grpcSrv, handler.NewRegistryHandler(registryUC))
+	// Admin InternalRegistryService ТОЛЬКО на cluster-internal :9091 (ban #6).
+	registryv1.RegisterInternalRegistryServiceServer(internalSrv, handler.NewInternalRegistryHandler(registryUC))
+	// OperationService (LRO poll) на ОБОИХ листенерах: async-мутации идут на public
+	// и internal, клиент поллит результат через тот же mux. Read-RPC гейтятся authz.
+	opHandler := handler.NewOperationHandler(opsRepo)
+	operationpb.RegisterOperationServiceServer(grpcSrv, opHandler)
+	operationpb.RegisterOperationServiceServer(internalSrv, opHandler)
+
+	listener, err := net.Listen("tcp", ":"+cfg.GrpcPort)
+	if err != nil {
+		return err
+	}
+	internalListener, err := net.Listen("tcp", ":"+cfg.InternalGrpcPort)
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
+	logger.Info("kacho-registry listening",
+		"public_mtls", cfg.PublicServerMTLS.Enable,
+		"internal_mtls", cfg.InternalServerMTLS.Enable,
+		"public_port", cfg.GrpcPort,
+		"internal_port", cfg.InternalGrpcPort,
+		"zot_addr", cfg.ZotAddr)
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		<-ctx.Done()
+		internalSrv.GracefulStop()
+		grpcSrv.GracefulStop()
+		// Дренируем in-flight LRO-worker'ы: SIGTERM не должен оставить async-мутацию
+		// done=false навсегда (клиент завис бы в polling). Свежий ctx — request-ctx
+		// уже отменён возвратом Operation клиенту.
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancelDrain()
+		if werr := operations.Wait(drainCtx); werr != nil {
+			logger.Warn("LRO workers did not finish before shutdown timeout",
+				"err", werr, "active", operations.Active())
+		}
+	}()
+
+	go func() {
+		if serr := internalSrv.Serve(internalListener); serr != nil && !errors.Is(serr, grpc.ErrServerStopped) {
+			logger.Error("internal grpc server stopped", "err", serr)
+		}
+	}()
+
+	serveErr := grpcSrv.Serve(listener)
+	cancel()
+	<-shutdownDone
+	return serveErr
+}
+
+// validateAuthMode разбирает KACHO_REGISTRY_AUTH_MODE (whitelist) и строгость
+// DB-SSL. Режим не управляет authz/mTLS — ими управляет breakglass (см.
+// validateSecurityConfig). `production-strict` дополнительно требует SSL до БД.
+func validateAuthMode(cfg config.Config, logger *slog.Logger) error {
+	switch cfg.AuthMode {
+	case "dev":
+		if cfg.DBSSLMode == "" || cfg.DBSSLMode == "disable" {
+			logger.Warn("KACHO_REGISTRY_DB_SSLMODE=disable — DB plaintext (dev only)")
+		}
+		return nil
+	case "production":
+		return nil
+	case "production-strict":
+		switch cfg.DBSSLMode {
+		case "require", "verify-ca", "verify-full":
+		default:
+			return fmt.Errorf("production-strict mode: KACHO_REGISTRY_DB_SSLMODE must be one of require|verify-ca|verify-full (got %q)", cfg.DBSSLMode)
+		}
+		logger.Warn("AuthMode=production-strict: DB SSL strictly validated")
+		return nil
+	default:
+		return fmt.Errorf("unknown KACHO_REGISTRY_AUTH_MODE=%q (allowed: dev, production, production-strict)", cfg.AuthMode)
+	}
+}
+
+// validateSecurityConfig — secure-by-default: операции без авторизации и mTLS
+// запрещены. Per-RPC authz Check (адрес kacho-iam) и mTLS на ОБОИХ листенерах
+// обязательны; единственный способ запустить без них — аварийный
+// KACHO_REGISTRY_AUTHZ_BREAKGLASS=true.
+//
+// ⚠ ВНИМАНИЕ: breakglass=true — ПОЛНЫЙ обход authz+mTLS (emergency-only). Включать
+// ТОЛЬКО при инциденте.
+func validateSecurityConfig(cfg config.Config) error {
+	if cfg.AuthZBreakglass {
+		return nil
+	}
+	if cfg.AuthZIAMGRPCAddr == "" {
+		return errors.New("authz Check required on both listeners: set KACHO_REGISTRY_AUTHZ_IAM_GRPC_ADDR (or KACHO_REGISTRY_AUTHZ_BREAKGLASS=true to bypass)")
+	}
+	if !cfg.PublicServerMTLS.Enable || !cfg.InternalServerMTLS.Enable {
+		return errors.New("mTLS required on both listeners: set KACHO_REGISTRY_PUBLIC_SERVER_MTLS_ENABLE and KACHO_REGISTRY_INTERNAL_SERVER_MTLS_ENABLE=true (or KACHO_REGISTRY_AUTHZ_BREAKGLASS=true to bypass)")
+	}
+	return nil
+}

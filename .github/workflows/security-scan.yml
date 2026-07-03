@@ -1,0 +1,93 @@
+# Copyright (c) PRO-Robotech
+# SPDX-License-Identifier: BUSL-1.1
+
+name: security-scan
+
+# Security-scan gate для kacho-registry:
+#   - gosec: Go static analysis (zero HIGH → merge blocked)
+#   - govulncheck: vuln scan (advisory → Security tab)
+# Outputs SARIF → GitHub Security tab.
+
+on:
+  push:
+    branches: [main, "KAC-*", "feat/*"]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+
+defaults:
+  run:
+    working-directory: kacho-registry
+
+jobs:
+  gosec:
+    name: gosec (Go static analysis)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with: { path: kacho-registry }
+      - uses: actions/setup-go@v6
+        with: { go-version-file: kacho-registry/go.mod }
+
+      - name: install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+      - name: run gosec
+        run: |
+          set +e
+          "$(go env GOPATH)/bin/gosec" -fmt sarif -out gosec.sarif ./...
+          if jq -e . gosec.sarif >/dev/null 2>&1; then
+            jq '(.runs[].tool.driver.rules[]?.properties.tags) |= (if . then unique else . end)' \
+              gosec.sarif > gosec.sanitized.sarif && mv gosec.sanitized.sarif gosec.sarif
+          else
+            printf '%s' '{"version":"2.1.0","$schema":"https://json.schemastore.org/sarif-2.1.0.json","runs":[{"tool":{"driver":{"name":"gosec","rules":[]}},"results":[]}]}' > gosec.sarif
+          fi
+          exit 0
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: kacho-registry/gosec.sarif
+          category: gosec
+
+      - name: fail on HIGH / CRITICAL
+        run: |
+          if [[ ! -f gosec.sarif ]]; then exit 0; fi
+          err=$(jq '[.runs[].results[] | select(.level == "error")] | length' gosec.sarif)
+          echo "gosec HIGH count: $err"
+          if (( err > 0 )); then
+            echo "::error::gosec found $err HIGH-severity issues. See Security tab."
+            exit 1
+          fi
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with: { path: kacho-registry }
+      - uses: actions/setup-go@v6
+        with: { go-version-file: kacho-registry/go.mod }
+
+      - name: install + run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" -mode=source -format=sarif ./... > govulncheck.sarif || true
+          if jq -e . govulncheck.sarif >/dev/null 2>&1; then
+            jq '(.runs[].tool.driver.rules[]?.properties.tags) |= (if . then unique else . end)' \
+              govulncheck.sarif > govulncheck.sanitized.sarif && mv govulncheck.sanitized.sarif govulncheck.sarif
+          else
+            echo "govulncheck produced no/invalid SARIF — substituting empty document"
+            printf '%s' '{"version":"2.1.0","$schema":"https://json.schemastore.org/sarif-2.1.0.json","runs":[{"tool":{"driver":{"name":"govulncheck","rules":[]}},"results":[]}]}' > govulncheck.sarif
+          fi
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: kacho-registry/govulncheck.sarif
+          category: govulncheck

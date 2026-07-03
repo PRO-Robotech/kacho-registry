@@ -1,0 +1,60 @@
+# Copyright (c) PRO-Robotech
+# SPDX-License-Identifier: BUSL-1.1
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# kacho-registry собирается из своего репо. В локальной polyrepo-разработке go.mod
+# держит `replace kacho-corelib => ../kacho-corelib`; для single-repo CI зависимости
+# резолвятся как versioned-модули с GitHub (переключается на публикационной фазе,
+# см. Dockerfile NOTE и .claude/rules/publication-readiness.md фаза 9).
+
+defaults:
+  run:
+    working-directory: kacho-registry
+
+jobs:
+  build-vet-test:
+    name: build + vet + test (unit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with: { path: kacho-registry }
+      - uses: actions/setup-go@v6
+        with: { go-version-file: kacho-registry/go.mod, cache-dependency-path: kacho-registry/go.sum }
+      - run: go mod download
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race -short -count=1 -timeout 5m ./...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with: { path: kacho-registry }
+      - uses: actions/setup-go@v6
+        with: { go-version-file: kacho-registry/go.mod, cache-dependency-path: kacho-registry/go.sum }
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          working-directory: kacho-registry
+          args: --timeout 5m
+
+  govuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with: { path: kacho-registry }
+      - uses: actions/setup-go@v6
+        with: { go-version-file: kacho-registry/go.mod, cache-dependency-path: kacho-registry/go.sum }
+      - run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+        continue-on-error: true

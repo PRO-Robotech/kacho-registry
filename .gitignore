@@ -1,3 +1,25 @@
-/bin/
+# Go build
+*.exe
+*.test
+*.out
+bin/
+dist/
+coverage.out
+coverage-full.out
+/kacho-registry
+/kacho-migrator
+
+# Logs / OS
 *.log
 .DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Local polyrepo override (not committed — используется для standalone-сборки)
+go.work
+go.work.sum
+
+# Синканная AI-оснастка (управляется ./sync-tooling.sh)
+.claude/

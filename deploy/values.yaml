@@ -1,0 +1,12 @@
+# Copyright (c) PRO-Robotech
+# SPDX-License-Identifier: BUSL-1.1
+
+# Значения Helm для kacho-registry. Полный сервисный sub-chart (Deployment/Service/
+# ConfigMap/Secret/ServiceMonitor + pg-registry + zot StatefulSet + registry.kacho.local
+# ingress) живёт в umbrella-чарте kacho-deploy. Здесь — анкер: базовые порты/образ.
+image:
+  repository: prorobotech/kacho-registry
+  tag: dev
+service:
+  grpcPort: 9090
+  internalGrpcPort: 9091

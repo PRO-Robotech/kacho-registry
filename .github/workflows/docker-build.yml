@@ -1,0 +1,87 @@
+# Copyright (c) PRO-Robotech
+# SPDX-License-Identifier: BUSL-1.1
+
+# docker-build — multi-arch DockerHub image build & push для kacho-registry.
+#
+# ONE `buildx build --platform linux/amd64,linux/arm64 --push` job (не per-arch +
+# manifest-combine), чтобы не жечь DockerHub pull-бюджет: base/buildkit/binfmt
+# берутся с mirror.gcr.io; `push` не считается против pull-лимита. Dockerfile —
+# cross-compile-aware (FROM --platform=$BUILDPLATFORM golang + GOARCH=$TARGETARCH).
+#
+# Требуемые секреты: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN. Теги: <branch>-<sha8>.
+
+name: docker-build
+
+on:
+  push:
+    branches:
+      - main
+      - "KAC-*"
+      - "feat/*"
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+rc[0-9]+"
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: kacho-registry
+
+jobs:
+  docker-build:
+    name: build & push multiarch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: kacho-registry }
+
+      - uses: benjlevesque/short-sha@v3.0
+        id: short-sha
+        with: { length: 8 }
+
+      - name: Create sanitized branch name
+        id: sanitize
+        run: echo "branch=$(echo "${GITHUB_REF_NAME}" | sed 's/\//-/g')" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Enable QEMU emulation
+        uses: docker/setup-qemu-action@v3
+        with:
+          image: mirror.gcr.io/tonistiigi/binfmt:latest
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+
+      - name: Configure Buildx cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.ref_name }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Build and push (multiarch)
+        uses: docker/build-push-action@v6
+        with:
+          context: kacho-registry
+          file: ./kacho-registry/Dockerfile
+          push: true
+          provenance: false
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.sanitize.outputs.branch }}-${{ steps.short-sha.outputs.sha }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      - name: Move new cache
+        if: always()
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache 2>/dev/null || true
