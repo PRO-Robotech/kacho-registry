@@ -1,0 +1,25 @@
+// Copyright (c) PRO-Robotech
+// SPDX-License-Identifier: BUSL-1.1
+
+syntax = "proto3";
+
+package kacho.cloud.api;
+
+import "google/protobuf/descriptor.proto";
+
+option go_package = "github.com/PRO-Robotech/kacho-corelib/proto/gen/go/kacho/cloud/api;apiv1";
+
+extend google.protobuf.MethodOptions { Operation operation = 87334; }
+
+// Operation is annotation for rpc that returns longrunning operation, describes
+// message types that will be returned in metadata [google.protobuf.Any], and
+// in response [google.protobuf.Any] (for successful operation).
+message Operation {
+  // Optional. If present, rpc returns operation which metadata field will
+  // contains message of specified type.
+  string metadata = 1; // Optional.
+
+  // Required. rpc returns operation, in case of success response will contains message of
+  // specified field.
+  string response = 2; // Required.
+}

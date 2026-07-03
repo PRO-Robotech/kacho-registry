@@ -1,0 +1,117 @@
+Business Source License 1.1
+
+License text copyright (c) 2020 MariaDB Corporation Ab, All Rights Reserved.
+"Business Source License" is a trademark of MariaDB Corporation Ab.
+
+-----------------------------------------------------------------------------
+
+Parameters
+
+Licensor:             PRO-Robotech
+
+Licensed Work:        Kachō Geography (kacho-geo) and all source code, configuration,
+                      documentation, and other materials in this repository.
+                      The Licensed Work is (c) PRO-Robotech.
+
+Additional Use Grant: You are granted the right to use, copy, modify, create
+                      derivative works of, and redistribute the Licensed Work,
+                      including for production use, free of charge and without
+                      restriction, PROVIDED THAT such use does not, directly or
+                      indirectly, generate revenue or commercial profit for any
+                      company, organization, or other commercial entity.
+
+                      By way of example and not limitation, the following uses
+                      are NOT covered by this grant and require a separate
+                      commercial license from the Licensor:
+
+                        (a) offering the Licensed Work, or any derivative or
+                            hosted version of it, to third parties as a paid or
+                            otherwise revenue-generating product or service;
+
+                        (b) embedding or incorporating the Licensed Work into a
+                            commercial product or service that is sold, licensed,
+                            subscribed to, or otherwise monetized; and
+
+                        (c) any internal use by a commercial entity in which the
+                            Licensed Work materially contributes to that entity's
+                            revenue or profit.
+
+                      Personal, educational, academic, research, evaluation, and
+                      other genuinely non-commercial use is permitted without
+                      restriction. To obtain rights for commercial or
+                      revenue-generating use, contact the Licensor.
+
+Change Date:          None. This License does not convert to another license.
+
+Change License:       None (not applicable). See the Licensor's Note below.
+
+For information about alternative licensing arrangements for the Licensed Work,
+please contact the Licensor.
+
+-----------------------------------------------------------------------------
+
+Terms
+
+The Licensor hereby grants you the right to copy, modify, create derivative
+works, redistribute, and make non-production use of the Licensed Work. The
+Licensor makes an Additional Use Grant, above, permitting limited production
+use subject to the conditions stated there.
+
+Licensor's Note on the Change Date. The Change Date for the Licensed Work is
+"None". Accordingly, the rights granted in the paragraph above and in the
+Additional Use Grant do NOT terminate on any fixed date, no Change License
+takes effect, and the Licensed Work does not automatically convert to an open
+source or any other license. The terms of this License apply to each version
+of the Licensed Work in perpetuity, subject only to the Licensor's right to
+release future versions of the Licensed Work under different terms. Because the
+Change Date is "None", any reference in these Terms to the Change Date or the
+Change License has no operative effect.
+
+If your use of the Licensed Work does not comply with the requirements
+currently in effect as described in this License, you must purchase a
+commercial license from the Licensor, its affiliated entities, or authorized
+resellers, or you must refrain from using the Licensed Work.
+
+All copies of the original and modified Licensed Work, and derivative works of
+the Licensed Work, are subject to this License. This License applies separately
+for each version of the Licensed Work.
+
+You must conspicuously display this License on each original or modified copy
+of the Licensed Work. If you receive the Licensed Work in original or modified
+form from a third party, the terms and conditions set forth in this License
+apply to your use of that work.
+
+Any use of the Licensed Work in violation of this License will automatically
+terminate your rights under this License for the current and all other versions
+of the Licensed Work.
+
+This License does not grant you any right in any trademark or logo of Licensor
+or its affiliates (provided that you may use a trademark or logo of Licensor as
+expressly required by this License).
+
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON AN
+"AS IS" BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS, EXPRESS
+OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND TITLE.
+
+-----------------------------------------------------------------------------
+
+Covenants of Licensor
+
+This License is adapted from the Business Source License 1.1 published by
+MariaDB Corporation Ab. The standard Covenants of Licensor that accompany the
+Business Source License contemplate a Change Date and a GPL-compatible Change
+License. The Licensor has intentionally modified those Parameters (Change Date:
+None) so that the Licensed Work remains source-available under the terms above
+and does not convert to another license. This document therefore constitutes a
+modified, source-available license based on the Business Source License 1.1;
+references to "Business Source License" describe its origin and structure and
+are not a claim of conformance with MariaDB's trademark covenants.
+
+-----------------------------------------------------------------------------
+
+Notice
+
+The Business Source License (this document) is not an Open Source license.
+However, the Licensed Work may be used freely under the terms above for any
+use that does not directly or indirectly generate commercial revenue or profit.

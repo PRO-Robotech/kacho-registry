@@ -1,0 +1,204 @@
+// Copyright (c) PRO-Robotech
+// SPDX-License-Identifier: BUSL-1.1
+
+syntax = "proto3";
+
+package kacho.cloud.registry.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/field_mask.proto";
+import "kacho/cloud/api/operation.proto";
+import "kacho/cloud/operation/operation.proto";
+import "kacho/cloud/registry/v1/registry.proto";
+import "kacho/iam/authz/v1/authz_options.proto";
+
+option go_package = "github.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1;registryv1";
+
+// RegistryService — control-plane реестра (public :9090 → api-gateway REST).
+// Read — sync; мутации (Create/Update/Delete/DeleteTag) — async через Operation
+// (api-conventions.md §9). Data-plane pull/push — отдельная OCI v2-поверхность,
+// НЕ здесь. Каждый RPC проходит per-RPC InternalIAMService.Check (security.md).
+service RegistryService {
+  // Get — sync-чтение одного реестра. v_get на registry_registry.
+  rpc Get(GetRegistryRequest) returns (Registry) {
+    option (google.api.http) = {get: "/registry/v1/registries/{registry_id}"};
+    option (kacho.iam.authz.v1.permission) = "registry.registries.get";
+    option (kacho.iam.authz.v1.required_relation) = "v_get";
+    option (kacho.iam.authz.v1.scope_extractor) = {
+      object_type: "registry_registry"
+      from_request_field: "registry_id"
+    };
+    option (kacho.iam.authz.v1.required_acr_min) = "2";
+  }
+
+  // List — sync-список реестров project'а. Scope-filtered (handler фильтрует
+  // через iam ListObjects viewer∪v_list) → gateway <exempt>, authn остаётся.
+  rpc List(ListRegistriesRequest) returns (ListRegistriesResponse) {
+    option (google.api.http) = {get: "/registry/v1/registries"};
+    option (kacho.iam.authz.v1.permission) = "<exempt>";
+  }
+
+  // Create — async. create-child = editor-tier на parent-project (Check на
+  // iam_project, объекта registry ещё нет). Owner-tuple эмитится в outbox.
+  rpc Create(CreateRegistryRequest) returns (operation.Operation) {
+    option (google.api.http) = {
+      post: "/registry/v1/registries"
+      body: "*"
+    };
+    option (kacho.cloud.api.operation) = {
+      metadata: "CreateRegistryMetadata"
+      response: "Registry"
+    };
+    option (kacho.iam.authz.v1.permission) = "registry.registries.create";
+    option (kacho.iam.authz.v1.required_relation) = "editor";
+    option (kacho.iam.authz.v1.scope_extractor) = {
+      object_type: "project"
+      from_request_field: "project_id"
+    };
+    option (kacho.iam.authz.v1.required_acr_min) = "2";
+  }
+
+  // Update — async, mutable labels/description (name/project immutable). v_update.
+  rpc Update(UpdateRegistryRequest) returns (operation.Operation) {
+    option (google.api.http) = {
+      patch: "/registry/v1/registries/{registry_id}"
+      body: "*"
+    };
+    option (kacho.cloud.api.operation) = {
+      metadata: "UpdateRegistryMetadata"
+      response: "Registry"
+    };
+    option (kacho.iam.authz.v1.permission) = "registry.registries.update";
+    option (kacho.iam.authz.v1.required_relation) = "v_update";
+    option (kacho.iam.authz.v1.scope_extractor) = {
+      object_type: "registry_registry"
+      from_request_field: "registry_id"
+    };
+    option (kacho.iam.authz.v1.required_acr_min) = "2";
+  }
+
+  // Delete — async, forward-only (DELETING терминальный). v_delete. Снимает
+  // zot-namespace + UnregisterResource owner/repo-tuple.
+  rpc Delete(DeleteRegistryRequest) returns (operation.Operation) {
+    option (google.api.http) = {delete: "/registry/v1/registries/{registry_id}"};
+    option (kacho.cloud.api.operation) = {
+      metadata: "DeleteRegistryMetadata"
+      response: "google.protobuf.Empty"
+    };
+    option (kacho.iam.authz.v1.permission) = "registry.registries.delete";
+    option (kacho.iam.authz.v1.required_relation) = "v_delete";
+    option (kacho.iam.authz.v1.scope_extractor) = {
+      object_type: "registry_registry"
+      from_request_field: "registry_id"
+    };
+    option (kacho.iam.authz.v1.required_acr_min) = "2";
+  }
+
+  // ListRepositories — sync-проекция repos из zot. Per-repo listauthz: handler
+  // = call-gate (доступ к namespace) + row-filter по registry_repository v_list.
+  // → gateway <exempt>, authz полностью в handler'е.
+  rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse) {
+    option (google.api.http) = {get: "/registry/v1/registries/{registry_id}/repositories"};
+    option (kacho.iam.authz.v1.permission) = "<exempt>";
+  }
+
+  // ListTags — sync-проекция тегов repo из zot. Per-repo Check v_list на
+  // registry_repository в handler'е → gateway <exempt>.
+  rpc ListTags(ListTagsRequest) returns (ListTagsResponse) {
+    option (google.api.http) = {get: "/registry/v1/registries/{registry_id}/repositories/{repository}/tags"};
+    option (kacho.iam.authz.v1.permission) = "<exempt>";
+  }
+
+  // DeleteTag — async, единственный destructive-путь для образов (data-plane
+  // DELETE отвергается 405). Per-repo v_delete Check синхронно в handler'е ДО
+  // создания Operation → gateway <exempt>.
+  rpc DeleteTag(DeleteTagRequest) returns (operation.Operation) {
+    option (google.api.http) = {delete: "/registry/v1/registries/{registry_id}/repositories/{repository}/tags/{tag}"};
+    option (kacho.cloud.api.operation) = {
+      metadata: "DeleteTagMetadata"
+      response: "google.protobuf.Empty"
+    };
+    option (kacho.iam.authz.v1.permission) = "<exempt>";
+  }
+}
+
+message GetRegistryRequest {
+  string registry_id = 1;
+}
+
+message ListRegistriesRequest {
+  string project_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+  string filter = 4;
+}
+
+message ListRegistriesResponse {
+  repeated Registry registries = 1;
+  string next_page_token = 2;
+}
+
+message CreateRegistryRequest {
+  string project_id = 1;
+  string name = 2;
+  string description = 3;
+  map<string, string> labels = 4;
+}
+
+message CreateRegistryMetadata {
+  string registry_id = 1;
+}
+
+message UpdateRegistryRequest {
+  string registry_id = 1;
+  string description = 2;
+  map<string, string> labels = 3;
+  google.protobuf.FieldMask update_mask = 4;
+}
+
+message UpdateRegistryMetadata {
+  string registry_id = 1;
+}
+
+message DeleteRegistryRequest {
+  string registry_id = 1;
+}
+
+message DeleteRegistryMetadata {
+  string registry_id = 1;
+}
+
+message ListRepositoriesRequest {
+  string registry_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListRepositoriesResponse {
+  repeated Repository repositories = 1;
+  string next_page_token = 2;
+}
+
+message ListTagsRequest {
+  string registry_id = 1;
+  string repository = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListTagsResponse {
+  repeated Tag tags = 1;
+  string next_page_token = 2;
+}
+
+message DeleteTagRequest {
+  string registry_id = 1;
+  string repository = 2;
+  string tag = 3;
+}
+
+message DeleteTagMetadata {
+  string registry_id = 1;
+  string repository = 2;
+  string tag = 3;
+}
