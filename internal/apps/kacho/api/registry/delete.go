@@ -39,6 +39,17 @@ func (u *UseCase) Delete(ctx context.Context, registryID string) (*operations.Op
 		return nil, err
 	}
 
+	// REG-08 precondition (secure-by-default, НЕ cascade): непустой namespace нельзя
+	// молча стереть. Проверка читает zot синхронно ДО перехода в DELETING; zot
+	// недоступен → Unavailable (fail-closed — НЕ «считаем пустым и удаляем»).
+	empty, err := u.zot.NamespaceEmpty(ctx, registryID)
+	if err != nil {
+		return nil, mapRepoErr(err)
+	}
+	if !empty {
+		return nil, status.Error(codes.FailedPrecondition, "registry is not empty")
+	}
+
 	op, err := operations.NewFromContext(ctx,
 		ids.PrefixOperationReg,
 		fmt.Sprintf("Delete Registry %s", registryID),

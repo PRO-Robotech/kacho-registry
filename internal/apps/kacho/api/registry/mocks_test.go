@@ -90,13 +90,32 @@ func (m *mockRepo) Delete(ctx context.Context, id string, intent domain.Register
 	return nil
 }
 
-// ---- mock ZotClient (только RemoveNamespace задействован в Delete-worker'е) ---
+// ---- mock ZotClient -------------------------------------------------------
+
+// deleteTagCall — записанный вызов DeleteTag с principal из worker-ctx (проверка
+// проброса principal, REG-27).
+type deleteTagCall struct {
+	registryID string
+	repository string
+	tag        string
+	principal  operations.Principal
+}
 
 type mockZot struct {
-	mu             sync.Mutex
-	removeFn       func(ctx context.Context, registryID string) error
-	removedNS      []string
-	namespaceEmpty bool
+	mu       sync.Mutex
+	removeFn func(ctx context.Context, registryID string) error
+
+	removedNS []string
+	// namespaceEmpty — значение, возвращаемое NamespaceEmpty (default false = НЕ пуст);
+	// namespaceEmptyErr — инъекция ошибки (zot недоступен, fail-closed).
+	namespaceEmpty    bool
+	namespaceEmptyErr error
+
+	deleteTagErr  error
+	deleteTagCall []deleteTagCall
+
+	triggerGCErr   error
+	triggerGCCalls []string
 }
 
 func (z *mockZot) ListRepositories(ctx context.Context, q registry.RepoListQuery) ([]*domain.Repository, string, error) {
@@ -106,9 +125,18 @@ func (z *mockZot) ListTags(ctx context.Context, q registry.TagListQuery) ([]*dom
 	return nil, "", nil
 }
 func (z *mockZot) DeleteTag(ctx context.Context, registryID, repository, tag string) error {
-	return nil
+	z.mu.Lock()
+	z.deleteTagCall = append(z.deleteTagCall, deleteTagCall{
+		registryID: registryID, repository: repository, tag: tag,
+		principal: operations.PrincipalFromContext(ctx),
+	})
+	z.mu.Unlock()
+	return z.deleteTagErr
 }
 func (z *mockZot) NamespaceEmpty(ctx context.Context, registryID string) (bool, error) {
+	if z.namespaceEmptyErr != nil {
+		return false, z.namespaceEmptyErr
+	}
 	return z.namespaceEmpty, nil
 }
 func (z *mockZot) RemoveNamespace(ctx context.Context, registryID string) error {
@@ -120,7 +148,12 @@ func (z *mockZot) RemoveNamespace(ctx context.Context, registryID string) error 
 	}
 	return nil
 }
-func (z *mockZot) TriggerGC(ctx context.Context, registryID string) error { return nil }
+func (z *mockZot) TriggerGC(ctx context.Context, registryID string) error {
+	z.mu.Lock()
+	z.triggerGCCalls = append(z.triggerGCCalls, registryID)
+	z.mu.Unlock()
+	return z.triggerGCErr
+}
 func (z *mockZot) Stats(ctx context.Context, registryID string) (*domain.RegistryStats, error) {
 	return &domain.RegistryStats{RegistryID: registryID}, nil
 }

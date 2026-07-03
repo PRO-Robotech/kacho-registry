@@ -181,8 +181,17 @@ func runServe(cfg config.Config) error {
 		grpc.ChainStreamInterceptor(internalStream...),
 	)
 
+	// per-repo authz-Check для ScopeFiltered RPC (ListRepositories/ListTags/DeleteTag):
+	// interceptor их пропускает, handler сам Check'ает (call-gate + row-filter +
+	// existence-hiding). Тот же conn к iam :9091, что и per-RPC interceptor.
+	// authzConn==nil (breakglass) → nil authorizer → handler bypass (как interceptor).
+	var listAuthz handler.Authorizer
+	if authzConn != nil {
+		listAuthz = check.NewIAMCheckClient(authzConn)
+	}
+
 	// Публичный control-plane RegistryService на :9090.
-	registryv1.RegisterRegistryServiceServer(grpcSrv, handler.NewRegistryHandler(registryUC))
+	registryv1.RegisterRegistryServiceServer(grpcSrv, handler.NewRegistryHandler(registryUC, listAuthz))
 	// Admin InternalRegistryService ТОЛЬКО на cluster-internal :9091 (ban #6).
 	registryv1.RegisterInternalRegistryServiceServer(internalSrv, handler.NewInternalRegistryHandler(registryUC))
 	// OperationService (LRO poll) на ОБОИХ листенерах: async-мутации идут на public

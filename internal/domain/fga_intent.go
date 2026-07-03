@@ -23,6 +23,12 @@ import (
 // domain-binding без moduleObjectDomain-mapping (в отличие от граблей nlb→lb).
 const FGAObjectTypeRegistry = "registry_registry"
 
+// FGAObjectTypeRepository — FGA object-type конкретного репозитория (parent =
+// registry_registry). object-id — "<registryID>/<repo>". Per-repo verb-relations
+// развязаны от namespace-tier (anti-#241): доступ к repo требует отдельного
+// verb-tuple, namespace-viewer НЕ видит все repos автоматически.
+const FGAObjectTypeRepository = "registry_repository"
+
 // FGA relation-строки owner-hierarchy tuple'ов registry_registry. `project`
 // линкует ресурс к project-у (cascade tier'ов); `owner` — creator-tuple
 // (обязателен: модель несёт relation owner, иначе creator-intent застрял бы unsent

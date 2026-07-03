@@ -255,7 +255,7 @@ func TestRegistry_REG36_Update_MutableFields(t *testing.T) {
 // REG-07 — Delete happy: Operation → poll до done без error; zot-namespace снят;
 // unregister-intent (project-tuple) эмитится.
 func TestRegistry_REG07_Delete_HappyPath(t *testing.T) {
-	zot := &mockZot{}
+	zot := &mockZot{namespaceEmpty: true} // пустой namespace → Delete проходит precondition
 	repo := &mockRepo{
 		markFn: func(_ context.Context, id string) (*domain.Registry, error) {
 			return &domain.Registry{ID: id, ProjectID: "prj-P", Status: domain.RegistryStatusDeleting}, nil
@@ -283,7 +283,7 @@ func TestRegistry_REG09_Delete_Idempotent(t *testing.T) {
 		deleteFn: func(context.Context, string, domain.RegisterIntent) error { deleted = true; return nil },
 	}
 	ops := newMemOps()
-	uc := newUC(repo, &mockZot{}, &mockIAM{}, ops)
+	uc := newUC(repo, &mockZot{namespaceEmpty: true}, &mockIAM{}, ops)
 
 	op, err := uc.Delete(aliceCtx(), validRegID)
 	require.NoError(t, err)

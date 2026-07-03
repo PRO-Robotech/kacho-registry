@@ -228,21 +228,3 @@ func (u *UseCase) Stats(ctx context.Context, registryID string) (*domain.Registr
 	}
 	return u.zot.Stats(ctx, registryID)
 }
-
-// DeleteTag — async удаление тега/манифеста в zot (data-plane проекция, следующая
-// фаза). Пока не в scope control-plane CRUD → Unimplemented.
-func (u *UseCase) DeleteTag(ctx context.Context, registryID, repository, tag string) (*operations.Operation, error) {
-	if err := u.assertWired(); err != nil {
-		return nil, err
-	}
-	return nil, regerrors.ErrUnimplemented
-}
-
-// TriggerGC — async garbage collection namespace в zot (Internal admin, zot-backed,
-// следующая фаза) → Unimplemented.
-func (u *UseCase) TriggerGC(ctx context.Context, registryID string) (*operations.Operation, error) {
-	if err := u.assertWired(); err != nil {
-		return nil, err
-	}
-	return nil, regerrors.ErrUnimplemented
-}

@@ -121,20 +121,29 @@ func PermissionMap() authz.RPCMap {
 			Extract:    registryObject(),
 			Permission: "registry.registries.delete",
 		},
+		// ListRepositories/ListTags/DeleteTag авторизуются В ХЕНДЛЕРЕ (ScopeFiltered):
+		// interceptor пропускает per-RPC Check, а handler делает call-gate + per-repo
+		// row-filter + existence-hiding (deny→NOT_FOUND). Единичный interceptor-Check
+		// не покрыл бы row-filter каталога и вернул бы PermissionDenied вместо NOT_FOUND
+		// (раскрыв факт существования чужого repo). Relation/Extract сохранены как
+		// permission-catalog документация; энфорс — handler.
 		"/kacho.cloud.registry.v1.RegistryService/ListRepositories": {
-			Relation:   relVList,
-			Extract:    registryObject(),
-			Permission: "registry.repositories.list",
+			Relation:      relVList,
+			Extract:       registryObject(),
+			Permission:    "registry.repositories.list",
+			ScopeFiltered: true,
 		},
 		"/kacho.cloud.registry.v1.RegistryService/ListTags": {
-			Relation:   relVList,
-			Extract:    repositoryObject(),
-			Permission: "registry.repositories.list",
+			Relation:      relVList,
+			Extract:       repositoryObject(),
+			Permission:    "registry.repositories.list",
+			ScopeFiltered: true,
 		},
 		"/kacho.cloud.registry.v1.RegistryService/DeleteTag": {
-			Relation:   relVDelete,
-			Extract:    repositoryObject(),
-			Permission: "registry.repositories.delete",
+			Relation:      relVDelete,
+			Extract:       repositoryObject(),
+			Permission:    "registry.repositories.delete",
+			ScopeFiltered: true,
 		},
 
 		// ---- admin InternalRegistryService (cluster-internal :9091) ----
