@@ -58,6 +58,23 @@ func TestPermissionMap_CRUD_InterceptorGated(t *testing.T) {
 	}
 }
 
+// TestPermissionMap_OperationService_PublicExempt — LRO-поллинг: op-id opaque,
+// авторизуется на data-уровне (op принадлежит ресурсу, созданному вызывающим).
+// Interceptor fail-close'ит НЕ-замапленные RPC, поэтому Get/Cancel ОБЯЗАНЫ быть
+// Public exempt — иначе poll недостижим (gateway opsProxy форвардит сюда, а
+// registry-authz отвергает «rpc not mapped»).
+func TestPermissionMap_OperationService_PublicExempt(t *testing.T) {
+	m := PermissionMap()
+	for _, rpc := range []string{
+		"/kacho.cloud.operation.OperationService/Get",
+		"/kacho.cloud.operation.OperationService/Cancel",
+	} {
+		e, ok := m[rpc]
+		require.True(t, ok, "%s must be mapped (interceptor fail-closes unmapped RPC)", rpc)
+		require.True(t, e.Public, "%s must be Public (exempt from per-RPC Check — op-id opaque)", rpc)
+	}
+}
+
 // TestPermissionMap_Internal — InternalRegistryService (:9091) под per-RPC Check
 // (internal НЕ освобождён, security.md): Stats read-tier (v_get), GC mutation-tier
 // (v_delete). REG-38.

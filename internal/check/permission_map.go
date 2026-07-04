@@ -153,6 +153,13 @@ func PermissionMap() authz.RPCMap {
 			ScopeFiltered: true,
 		},
 
+		// ---- OperationService (LRO poll, proto `kacho.cloud.operation`, NOT `.v1`) ----
+		// op-id opaque; авторизация на data-уровне (op принадлежит ресурсу вызывающего).
+		// Public exempt из per-RPC Check — иначе gateway opsProxy форвардит Get/Cancel
+		// сюда, а fail-closed interceptor отвергает unmapped RPC → poll недостижим.
+		"/kacho.cloud.operation.OperationService/Get":    {Public: true},
+		"/kacho.cloud.operation.OperationService/Cancel": {Public: true},
+
 		// ---- admin InternalRegistryService (cluster-internal :9091) ----
 		"/kacho.cloud.registry.v1.InternalRegistryService/TriggerGarbageCollection": {
 			Relation:   relVDelete,
