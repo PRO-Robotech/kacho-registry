@@ -252,6 +252,25 @@ func TestRegistry_REG36_Update_MutableFields(t *testing.T) {
 	})
 }
 
+// REG-27 — worker-principal propagation: async Update-worker обязан пробросить
+// principal в worker-ctx (baggage.Extract режет его), иначе downstream/peer-вызовы
+// уходят анонимно (authz_no_principal). writer.Update должен получить ctx с
+// principal вызывающего (usr-alice), а не system/bootstrap-fallback.
+func TestRegistry_REG27_Update_WorkerPrincipalPropagated(t *testing.T) {
+	repo := &mockRepo{}
+	ops := newMemOps()
+	uc := newUC(repo, &mockZot{}, &mockIAM{}, ops)
+
+	op, err := uc.Update(aliceCtx(), registry.UpdateSpec{
+		RegistryID: validRegID, Mask: []string{"description"}, Description: "x",
+	})
+	require.NoError(t, err)
+	awaitOpDone(t, ops, op.ID)
+
+	require.Equal(t, "user", repo.updatePrincipal.Type, "worker-ctx несёт principal вызывающего, не system")
+	require.Equal(t, "usr-alice", repo.updatePrincipal.ID)
+}
+
 // REG-07 — Delete happy: Operation → poll до done без error; zot-namespace снят;
 // unregister-intent (project-tuple) эмитится.
 func TestRegistry_REG07_Delete_HappyPath(t *testing.T) {

@@ -36,6 +36,9 @@ type mockRepo struct {
 	insertReg    *domain.Registry
 	updateSpec   registry.UpdateSpec
 	deleteIntent domain.RegisterIntent
+	// updatePrincipal — principal, извлечённый из ctx worker'а на вызове Update
+	// (проверка проброса principal в worker-ctx, иначе peer-вызовы анонимны).
+	updatePrincipal operations.Principal
 }
 
 func (m *mockRepo) Get(ctx context.Context, id string) (*domain.Registry, error) {
@@ -66,6 +69,7 @@ func (m *mockRepo) Insert(ctx context.Context, r *domain.Registry, intent domain
 func (m *mockRepo) Update(ctx context.Context, spec registry.UpdateSpec, mirror func(*domain.Registry) domain.RegisterIntent) (*domain.Registry, error) {
 	m.mu.Lock()
 	m.updateSpec = spec
+	m.updatePrincipal = operations.PrincipalFromContext(ctx)
 	m.mu.Unlock()
 	if m.updateFn != nil {
 		return m.updateFn(ctx, spec, mirror)

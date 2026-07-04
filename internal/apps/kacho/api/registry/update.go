@@ -64,7 +64,9 @@ func (u *UseCase) Update(ctx context.Context, spec UpdateSpec) (*operations.Oper
 	}
 
 	operations.Run(ctx, u.ops, op.ID, func(workerCtx context.Context) (*anypb.Any, error) {
-		_ = operations.WithPrincipal(workerCtx, principal)
+		// Worker-ctx детачнут от request'а — принудительно несём principal (иначе
+		// mirror register-intent / любой downstream уходит анонимно, authz_no_principal).
+		workerCtx = operations.WithPrincipal(workerCtx, principal)
 		updated, uerr := u.writer.Update(workerCtx, spec, mirrorIntent)
 		if uerr != nil {
 			return nil, mapRepoErr(uerr)

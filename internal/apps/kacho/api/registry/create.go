@@ -89,12 +89,13 @@ func (u *UseCase) Create(ctx context.Context, spec CreateSpec) (*operations.Oper
 		return nil, mapRepoErr(err)
 	}
 
-	operations.Run(ctx, u.ops, op.ID, func(workerCtx context.Context) (*anypb.Any, error) {
-		// Worker-ctx детачнут от request'а — восстанавливаем principal (иначе
-		// downstream/peer-вызовы уходят анонимно, authz_no_principal).
-		_ = operations.WithPrincipal(workerCtx, principal)
-		// zot-namespace lazy: реестр создаётся на первом docker push, отдельного
-		// provisioning-шага нет. Финализируем Operation созданным ресурсом.
+	operations.Run(ctx, u.ops, op.ID, func(_ context.Context) (*anypb.Any, error) {
+		// Строка реестра + owner-tuple intent уже записаны СИНХРОННО (writer.Insert
+		// с request-ctx, несущим principal). zot-namespace lazy — материализуется на
+		// первом docker push, отдельного provisioning-шага нет. Worker лишь финализирует
+		// Operation созданным ресурсом: downstream/peer-вызовов нет, principal в
+		// worker-ctx не требуется (в отличие от update/delete/deletetag/gc, где он
+		// принудительно пробрасывается перед downstream-вызовом).
 		return u.registryAny(created)
 	})
 

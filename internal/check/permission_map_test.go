@@ -9,13 +9,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPermissionMap_ScopeFiltered — ListRepositories/ListTags/DeleteTag авторизуются
-// В ХЕНДЛЕРЕ (call-gate + per-repo row-filter + existence-hiding NOT_FOUND), поэтому
-// per-RPC interceptor-Check для них ПРОПУСКАЕТСЯ (ScopeFiltered): единичный Check
-// отдал бы PermissionDenied, а нужен per-repo row-filter и NOT_FOUND. REG-22/24/25.
+// TestPermissionMap_ScopeFiltered — List/ListRepositories/ListTags/DeleteTag
+// авторизуются В ХЕНДЛЕРЕ (call-gate + row-filter + existence-hiding NOT_FOUND),
+// поэтому per-RPC interceptor-Check для них ПРОПУСКАЕТСЯ (ScopeFiltered): единичный
+// Check отдал бы PermissionDenied (а для List коллекции — «empty object id» вовсе,
+// т.к. collection не несёт single object), а нужен row-filter и 200+empty/NOT_FOUND.
+// REG-06/22/24/25.
 func TestPermissionMap_ScopeFiltered(t *testing.T) {
 	m := PermissionMap()
 	for _, rpc := range []string{
+		"/kacho.cloud.registry.v1.RegistryService/List",
 		"/kacho.cloud.registry.v1.RegistryService/ListRepositories",
 		"/kacho.cloud.registry.v1.RegistryService/ListTags",
 		"/kacho.cloud.registry.v1.RegistryService/DeleteTag",
@@ -26,13 +29,24 @@ func TestPermissionMap_ScopeFiltered(t *testing.T) {
 	}
 }
 
+// TestPermissionMap_List_CatalogRetained — List остаётся ScopeFiltered, но несёт
+// v_list Relation как permission-catalog документацию (энфорс — row-filter в
+// хендлере по registry_registry v_list, non-member → 200+empty). REG-06.
+func TestPermissionMap_List_CatalogRetained(t *testing.T) {
+	m := PermissionMap()
+	e, ok := m["/kacho.cloud.registry.v1.RegistryService/List"]
+	require.True(t, ok, "List must be mapped")
+	require.True(t, e.ScopeFiltered, "List must be ScopeFiltered (handler row-filter, not per-object Check)")
+	require.Equal(t, relVList, e.Relation, "List keeps v_list as permission-catalog doc")
+}
+
 // TestPermissionMap_CRUD_InterceptorGated — стандартный CRUD registry-namespace
-// остаётся под per-RPC interceptor-Check (НЕ ScopeFiltered) — тир-based gate.
+// (кроме List — она ScopeFiltered) остаётся под per-RPC interceptor-Check (НЕ
+// ScopeFiltered) — тир-based gate на single object registry_registry:<id>.
 func TestPermissionMap_CRUD_InterceptorGated(t *testing.T) {
 	m := PermissionMap()
 	for _, rpc := range []string{
 		"/kacho.cloud.registry.v1.RegistryService/Get",
-		"/kacho.cloud.registry.v1.RegistryService/List",
 		"/kacho.cloud.registry.v1.RegistryService/Create",
 		"/kacho.cloud.registry.v1.RegistryService/Update",
 		"/kacho.cloud.registry.v1.RegistryService/Delete",

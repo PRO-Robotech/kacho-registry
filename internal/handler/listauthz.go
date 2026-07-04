@@ -107,6 +107,28 @@ func (a repoAuthz) checkRepo(ctx context.Context, registryID, repository, relati
 	return nil
 }
 
+// filterRegistries — row-filter коллекции реестров: оставляет только реестры, на
+// registry_registry:<id> которых subject имеет v_list. non-member → пустой список
+// (200+empty, НЕ 403 — List не гейтится per-object Check). breakglass → все;
+// az-error → UNAVAILABLE (не отдаём нефильтрованный список — no-leak).
+func (a repoAuthz) filterRegistries(ctx context.Context, regs []*domain.Registry) ([]*domain.Registry, error) {
+	if a.az == nil {
+		return regs, nil
+	}
+	subject := subjectFromContext(ctx)
+	out := make([]*domain.Registry, 0, len(regs))
+	for _, r := range regs {
+		allowed, err := a.az.Check(ctx, subject, relationVList, registryObjectRef(r.ID))
+		if err != nil {
+			return nil, errAuthzUnavailable()
+		}
+		if allowed {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
 // filterRepos — per-repo row-filter каталога: оставляет только repos, на
 // registry_repository:<reg>/<repo> которых subject имеет v_list (REG-22/23). breakglass
 // → все; az-error → UNAVAILABLE (не отдаём нефильтрованный список — no-leak).

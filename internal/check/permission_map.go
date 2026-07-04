@@ -101,10 +101,17 @@ func PermissionMap() authz.RPCMap {
 			Extract:    registryObject(),
 			Permission: "registry.registries.get",
 		},
+		// List (registries collection) авторизуется В ХЕНДЛЕРЕ (ScopeFiltered):
+		// interceptor пропускает per-RPC Check, а handler делает listauthz row-filter
+		// по registry_registry v_list. Единичный per-RPC Check здесь семантически
+		// неверен — collection не несёт single object (extract вернул бы пустой
+		// object-id коллекции → "empty object id" → 403 на всю выборку). non-member →
+		// 200+empty (exempt-parity). Relation/Extract сохранены как catalog-doc.
 		"/kacho.cloud.registry.v1.RegistryService/List": {
-			Relation:   relVList,
-			Extract:    projectObject(),
-			Permission: "registry.registries.list",
+			Relation:      relVList,
+			Extract:       projectObject(),
+			Permission:    "registry.registries.list",
+			ScopeFiltered: true,
 		},
 		"/kacho.cloud.registry.v1.RegistryService/Create": {
 			Relation:   relVCreate,

@@ -45,7 +45,12 @@ func (h *RegistryHandler) Get(ctx context.Context, req *registryv1.GetRegistryRe
 	return h.uc.ProtoRegistry(r), nil
 }
 
-// List возвращает реестры project'а (sync, cursor-пагинация; listauthz-фильтр).
+// List возвращает реестры project'а (sync, cursor-пагинация). Authz — listauthz
+// row-filter В ХЕНДЛЕРЕ (RPC ScopeFiltered, interceptor пропускает per-RPC Check):
+// оставляем только реестры, на registry_registry:<id> которых subject имеет v_list.
+// non-member → 200+empty (exempt-parity, НЕ 403); iam недоступен → UNAVAILABLE
+// (fail-closed). next-token сервера сохраняется (клиент продолжает пагинацию даже
+// если страница схлопнута фильтром).
 func (h *RegistryHandler) List(ctx context.Context, req *registryv1.ListRegistriesRequest) (*registryv1.ListRegistriesResponse, error) {
 	items, next, err := h.uc.List(ctx, registry.ListQuery{
 		ProjectID: req.GetProjectId(),
@@ -56,8 +61,12 @@ func (h *RegistryHandler) List(ctx context.Context, req *registryv1.ListRegistri
 	if err != nil {
 		return nil, mapErr(err)
 	}
+	filtered, err := h.authz.filterRegistries(ctx, items)
+	if err != nil {
+		return nil, err
+	}
 	resp := &registryv1.ListRegistriesResponse{NextPageToken: next}
-	for _, r := range items {
+	for _, r := range filtered {
 		resp.Registries = append(resp.Registries, h.uc.ProtoRegistry(r))
 	}
 	return resp, nil
