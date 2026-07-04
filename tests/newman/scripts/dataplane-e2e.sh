@@ -252,6 +252,50 @@ fi
 echo
 
 # ---------------------------------------------------------------------------
+# 5b. helm-artifact push: config.mediaType = vnd.cncf.helm.config → образ
+#     классифицируется как HELM_CHART (дискриминатор docker vs helm). Тот же
+#     blob+manifest путь, что docker push (helm CLI не требуется).
+# ---------------------------------------------------------------------------
+echo "--- 5b. helm-artifact push (config vnd.cncf.helm.config) → HELM_CHART ---"
+HELM_REPO="${REPO}-helm"
+HELM_OK=0
+if [[ "$PUSH_SKIP" == 0 ]]; then
+  hcode="$(do_req POST "${DATAPLANE_URL}/v2/${REGISTRY_ID}/${HELM_REPO}/blobs/uploads/" "${AUTH[@]}")"
+  hloc="$(awk 'BEGIN{IGNORECASE=1} /^Location:/ {v=$2; sub(/\r$/,"",v); print v}' "$HDR" | tail -1)"
+  if [[ "$hcode" == 202 && -n "$hloc" ]]; then
+    [[ "$hloc" == http* ]] && HUP="$hloc" || HUP="${DATAPLANE_URL}${hloc}"
+    printf '%s' '{"name":"demo-chart","version":"0.1.0","apiVersion":"v2"}' > "$TMP/helmcfg.json"
+    read -r HCFG_DIGEST HCFG_SIZE < <(python3 - "$TMP/helmcfg.json" <<'PY'
+import hashlib, sys
+b = open(sys.argv[1], "rb").read()
+print("sha256:" + hashlib.sha256(b).hexdigest(), len(b))
+PY
+)
+    if [[ "$HUP" == *\?* ]]; then hblob="${HUP}&digest=${HCFG_DIGEST}"; else hblob="${HUP}?digest=${HCFG_DIGEST}"; fi
+    code="$(do_req PUT "$hblob" "${AUTH[@]}" -H "Content-Type: application/octet-stream" --data-binary "@${TMP}/helmcfg.json")"
+    assert_hard "PUT helm config blob" "$code" 201 || true
+    python3 - "$HCFG_DIGEST" "$HCFG_SIZE" > "$TMP/helmmanifest.json" <<'PY'
+import json, sys
+digest, size = sys.argv[1], int(sys.argv[2])
+print(json.dumps({
+    "schemaVersion": 2,
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "config": {"mediaType": "application/vnd.cncf.helm.config.v1+json", "digest": digest, "size": size},
+    "layers": [],
+}))
+PY
+    code="$(do_req PUT "${DATAPLANE_URL}/v2/${REGISTRY_ID}/${HELM_REPO}/manifests/1.0.0" "${AUTH[@]}" \
+      -H "Content-Type: application/vnd.oci.image.manifest.v1+json" --data-binary "@${TMP}/helmmanifest.json")"
+    if assert_hard "PUT helm manifest" "$code" 201; then HELM_OK=1; fi
+  else
+    doc_note "helm push-init → HTTP $hcode (no session) — helm-classify e2e skipped (follow-up)"
+  fi
+else
+  echo "SKIP helm push — push disabled"
+fi
+echo
+
+# ---------------------------------------------------------------------------
 # 6. pull: GET manifest (200) → GET config blob (200) → GET tags/list (200 + tag)
 # ---------------------------------------------------------------------------
 echo "--- 6. pull: manifest / blob / tags-list → 200 ---"
@@ -325,17 +369,80 @@ echo
 # 10. control-plane cross-check (documented): ListRepositories видит register-on-
 #     first-push repo. Требует ADMIN_JWT + GATEWAY_URL; иначе DOC-skip.
 # ---------------------------------------------------------------------------
-echo "--- 10. control-plane cross-check ListRepositories (documented) ---"
+echo "--- 10. control-plane cross-check ListRepositories + artifact_type (documented) ---"
+# at_of REPO — печатает artifact_type репо REPO из последнего тела $BODY (пусто, если нет).
+at_of() {
+  python3 - "$BODY" "$1" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    print(""); sys.exit(0)
+for r in d.get("repositories", []):
+    if r.get("name") == sys.argv[2]:
+        print(r.get("artifact_type", "")); sys.exit(0)
+print("")
+PY
+}
 if [[ -n "$ADMIN_JWT" && -n "$GATEWAY_URL" ]]; then
-  code="$(do_req GET "${GATEWAY_URL}/registry/v1/registries/${REGISTRY_ID}/repositories" \
-    -H "Authorization: Bearer ${ADMIN_JWT}")"
-  if [[ "$code" == 200 ]] && body_contains "$REPO"; then
+  # poll-retry: register-on-first-push материализует v_list на repo асинхронно
+  # (FGA-пропагация ~0.6–2s) — тянем ListRepositories, пока docker-repo не появится.
+  DOCKER_AT=""
+  for _a in $(seq 1 10); do
+    code="$(do_req GET "${GATEWAY_URL}/registry/v1/registries/${REGISTRY_ID}/repositories" \
+      -H "Authorization: Bearer ${ADMIN_JWT}")"
+    DOCKER_AT="$(at_of "$REPO")"
+    [[ -n "$DOCKER_AT" ]] && break
+    sleep 1.5
+  done
+  if [[ "$code" == 200 && -n "$DOCKER_AT" ]]; then
     echo "PASS [documented] ListRepositories contains ${REPO} (register-on-first-push visible) — HTTP 200"
+    # GWT-1: docker/oci config → CONTAINER_IMAGE.
+    if [[ "$DOCKER_AT" == "ARTIFACT_TYPE_CONTAINER_IMAGE" ]]; then
+      echo "PASS [hard] ${REPO} artifact_type = ARTIFACT_TYPE_CONTAINER_IMAGE"
+    else
+      echo "FAIL [hard] ${REPO} artifact_type = '${DOCKER_AT}' (expected ARTIFACT_TYPE_CONTAINER_IMAGE)"
+      HARD_FAILS=$((HARD_FAILS + 1))
+    fi
+    # GWT-10: back-compat — существующие поля не пропали.
+    if python3 - "$BODY" "$REPO" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for r in d.get("repositories", []):
+    if r.get("name") == sys.argv[2]:
+        sys.exit(0 if all(k in r for k in ("tag_count", "size_bytes", "updated_at")) else 1)
+sys.exit(1)
+PY
+    then
+      echo "PASS [hard] ${REPO} back-compat fields (tag_count/size_bytes/updated_at) present"
+    else
+      echo "FAIL [hard] ${REPO} back-compat fields missing"
+      HARD_FAILS=$((HARD_FAILS + 1))
+    fi
   else
-    doc_note "ListRepositories cross-check — HTTP $code, ${REPO} $(body_contains "$REPO" && echo present || echo absent); FGA-пропагация register-on-first-push ~0.6–2s (poll-retry вне scope harness)"
+    doc_note "ListRepositories cross-check — HTTP $code, ${REPO} absent after poll; FGA-пропагация register-on-first-push ~0.6–2s"
+  fi
+  # GWT-2: helm-config образ → HELM_CHART (если helm-push прошёл).
+  if [[ "$HELM_OK" == 1 ]]; then
+    HELM_AT=""
+    for _a in $(seq 1 10); do
+      code="$(do_req GET "${GATEWAY_URL}/registry/v1/registries/${REGISTRY_ID}/repositories" \
+        -H "Authorization: Bearer ${ADMIN_JWT}")"
+      HELM_AT="$(at_of "$HELM_REPO")"
+      [[ -n "$HELM_AT" ]] && break
+      sleep 1.5
+    done
+    if [[ "$HELM_AT" == "ARTIFACT_TYPE_HELM_CHART" ]]; then
+      echo "PASS [hard] ${HELM_REPO} artifact_type = ARTIFACT_TYPE_HELM_CHART"
+    else
+      echo "FAIL [hard] ${HELM_REPO} artifact_type = '${HELM_AT}' (expected ARTIFACT_TYPE_HELM_CHART)"
+      HARD_FAILS=$((HARD_FAILS + 1))
+    fi
+  else
+    doc_note "helm-classify e2e skipped — helm push (5b) не прошёл"
   fi
 else
-  doc_note "control-plane cross-check skipped — set ADMIN_JWT + GATEWAY_URL to verify register-on-first-push visibility"
+  doc_note "control-plane cross-check skipped — set ADMIN_JWT + GATEWAY_URL to verify register-on-first-push visibility + artifact_type"
 fi
 echo
 
