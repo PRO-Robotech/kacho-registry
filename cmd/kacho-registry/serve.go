@@ -66,32 +66,61 @@ func runServe(cfg config.Config) error {
 	// ── LRO-стек: общая operations-таблица (corelib) каталога kacho_registry.
 	opsRepo := operations.NewRepo(pool, "kacho_registry")
 
-	// ── ребро registry→iam (:9091, mTLS): один conn на per-RPC authz Check и на
-	// клиента ProjectService.Get / fga-proxy Register/Unregister. При breakglass
+	// ── ребро registry→iam INTERNAL (:9091, mTLS): per-RPC authz Check +
+	// fga-proxy RegisterResource/UnregisterResource (Internal-only). При breakglass
 	// conn может быть nil (интерсептор пропускает всё; клиенты отвечают Unavailable).
 	var authzConn *grpc.ClientConn
 	if cfg.AuthZIAMGRPCAddr != "" {
 		authzCreds, cerr := grpcclient.TLSClientTransportCreds(cfg.IAMAuthzMTLS)
 		if cerr != nil {
-			return fmt.Errorf("registry→iam mTLS creds: %w", cerr)
+			return fmt.Errorf("registry→iam authz mTLS creds: %w", cerr)
 		}
 		authzConn, err = grpc.NewClient(cfg.AuthZIAMGRPCAddr,
 			grpc.WithTransportCredentials(authzCreds),
 			grpcclient.KeepaliveDialOption(true))
 		if err != nil {
-			return fmt.Errorf("dial kacho-iam: %w", err)
+			return fmt.Errorf("dial kacho-iam internal: %w", err)
 		}
 		defer authzConn.Close()
 	}
 
+	// ── ребро registry→iam PUBLIC (:9090, mTLS): ProjectService.Get (existence-
+	// валидация project на Create). ОТДЕЛЬНЫЙ conn — ProjectService зарегистрирован
+	// только на public :9090; вызов на :9091 (authzConn) вернул бы Unimplemented →
+	// фикс. INTERNAL на Create. ServerName public dial-host'а (kacho-iam.*) ≠ internal,
+	// поэтому раздельные mTLS-creds (IAMProjectMTLS vs IAMAuthzMTLS) обязательны.
+	var projectConn *grpc.ClientConn
+	if cfg.IAMProjectGRPCAddr != "" {
+		projectCreds, cerr := grpcclient.TLSClientTransportCreds(cfg.IAMProjectMTLS)
+		if cerr != nil {
+			return fmt.Errorf("registry→iam project mTLS creds: %w", cerr)
+		}
+		projectConn, err = grpc.NewClient(cfg.IAMProjectGRPCAddr,
+			grpc.WithTransportCredentials(projectCreds),
+			grpcclient.KeepaliveDialOption(true))
+		if err != nil {
+			return fmt.Errorf("dial kacho-iam project: %w", err)
+		}
+		defer projectConn.Close()
+	}
+	logger.Info("registry→iam edges wired",
+		"authz_addr", cfg.AuthZIAMGRPCAddr, "authz_mtls", cfg.IAMAuthzMTLS.Enable,
+		"project_addr", cfg.IAMProjectGRPCAddr, "project_mtls", cfg.IAMProjectMTLS.Enable)
+
 	// ── adapters (порты use-case): pgx-repo, zot data/registry-API, iam-клиент ──
+	// iamConn — internal :9091 (Check-интерсептор + fga-proxy register-drainer).
+	// projectIAMConn — public :9090 (ProjectService.Get). Их conn'ы РАЗДЕЛЬНЫ.
 	var iamConn grpc.ClientConnInterface
 	if authzConn != nil {
 		iamConn = authzConn
 	}
+	var projectIAMConn grpc.ClientConnInterface
+	if projectConn != nil {
+		projectIAMConn = projectConn
+	}
 	registryRepo := pg.NewRegistryRepo(pool)
 	zotAdapter := zotclient.New(cfg.ZotAddr)
-	iamAdapter := iamclient.New(iamConn)
+	iamAdapter := iamclient.New(projectIAMConn)
 
 	// ── use-case (CQRS repo + zot + iam + repo-registrar + LRO) ──
 	registryUC := registry.New(registryRepo, registryRepo, zotAdapter, iamAdapter, registryRepo, opsRepo, cfg.EndpointBase)

@@ -3,13 +3,16 @@
 
 // Package iam — adapter-клиент к kacho-registry-консумируемым RPC kacho-iam.
 // Реализует порт registry.IAMClient: cross-domain валидация project'а на Create
-// (ProjectService.Get). Owner-tuple lifecycle (RegisterResource/UnregisterResource)
-// живёт в register_applier.go (drainer-half), а per-RPC authz-Check — в
-// internal/check — это разные консумируемые поверхности kacho-iam.
+// (ProjectService.Get). ProjectService живёт ТОЛЬКО на iam PUBLIC-листенере (:9090),
+// поэтому conn сюда подаётся именно на :9090 (отдельный от authz/register conn'а на
+// :9091). Owner-tuple lifecycle (RegisterResource/UnregisterResource) живёт в
+// register_applier.go (drainer-half, iam internal :9091), а per-RPC authz-Check — в
+// internal/check (iam internal :9091) — это разные консумируемые поверхности kacho-iam.
 package iam
 
 import (
 	"context"
+	"log/slog"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -22,13 +25,13 @@ import (
 	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
 )
 
-// Client — adapter к kacho-iam поверх grpc-conn к internal-листенеру (:9091).
+// Client — adapter к kacho-iam ProjectService поверх grpc-conn к PUBLIC-листенеру (:9090).
 type Client struct {
 	conn grpc.ClientConnInterface
 }
 
-// New оборачивает grpc-conn (к kacho-iam :9091 — ProjectService.Get). nil conn →
-// методы отвечают Unavailable (мутация fail-closed).
+// New оборачивает grpc-conn к kacho-iam PUBLIC-листенеру (:9090 — ProjectService.Get).
+// nil conn → методы отвечают Unavailable (мутация fail-closed).
 func New(conn grpc.ClientConnInterface) *Client { return &Client{conn: conn} }
 
 // ready — conn к kacho-iam обязан быть подан (иначе fail-closed Unavailable).
@@ -64,6 +67,10 @@ func (c *Client) ProjectExists(ctx context.Context, projectID string) error {
 	}
 	st, ok := status.FromError(err)
 	if !ok {
+		// Non-status ошибка транспорта — наружу фикс. INTERNAL, но причину логируем
+		// (иначе живой сбой = «internal database error» без единой строки диагностики).
+		slog.Default().Error("registry: iam ProjectService.Get unexpected non-status error",
+			"project_id", projectID, "err", err.Error())
 		return regerrors.ErrInternal
 	}
 	switch st.Code() {
@@ -72,5 +79,10 @@ func (c *Client) ProjectExists(ctx context.Context, projectID string) error {
 	case codes.Unavailable, codes.DeadlineExceeded:
 		return regerrors.ErrUnavailable
 	}
+	// Прочие коды (в частности Unimplemented, если conn ошибочно указывает на iam
+	// internal :9091, где ProjectService не зарегистрирован) наружу — фикс. INTERNAL,
+	// но код+message логируем: иначе misroute теряется немо (урок этого бага).
+	slog.Default().Error("registry: iam ProjectService.Get unexpected",
+		"project_id", projectID, "grpc_code", st.Code().String(), "grpc_msg", st.Message())
 	return regerrors.ErrInternal
 }
