@@ -97,11 +97,12 @@ func (r Registry) Validate() error {
 // zot). Не хранится в БД kacho-registry; читается на request-path и
 // per-repo authz-фильтруется.
 type Repository struct {
-	RegistryID string
-	Name       string
-	TagCount   int32
-	SizeBytes  int64
-	UpdatedAt  time.Time
+	RegistryID   string
+	Name         string
+	TagCount     int32
+	SizeBytes    int64
+	UpdatedAt    time.Time
+	ArtifactType ArtifactType // тип артефакта (best-effort по репрезентативному манифесту)
 }
 
 // Tag — output-only проекция тега/манифеста из zot (source of truth = zot).

@@ -77,6 +77,62 @@ func (RegistryStatus) EnumDescriptor() ([]byte, []int) {
 	return file_kacho_cloud_registry_v1_registry_proto_rawDescGZIP(), []int{0}
 }
 
+// ArtifactType — тип OCI-артефакта образа, классифицированный по config.mediaType
+// репрезентативного манифеста (и top-level mediaType для multi-arch index).
+// Дискриминатор docker-образа от helm-чарта: оба несут одинаковый top-level
+// manifest media-type, различие только в config.mediaType.
+type ArtifactType int32
+
+const (
+	ArtifactType_ARTIFACT_TYPE_UNSPECIFIED     ArtifactType = 0 // не классифицирован (нет тегов / манифест непрочитан)
+	ArtifactType_ARTIFACT_TYPE_CONTAINER_IMAGE ArtifactType = 1 // docker/OCI контейнерный образ (вкл. multi-arch index)
+	ArtifactType_ARTIFACT_TYPE_HELM_CHART      ArtifactType = 2 // Helm-чарт (config vnd.cncf.helm.config)
+	ArtifactType_ARTIFACT_TYPE_OTHER           ArtifactType = 3 // иной OCI-артефакт (SBOM/WASM/signature/…)
+)
+
+// Enum value maps for ArtifactType.
+var (
+	ArtifactType_name = map[int32]string{
+		0: "ARTIFACT_TYPE_UNSPECIFIED",
+		1: "ARTIFACT_TYPE_CONTAINER_IMAGE",
+		2: "ARTIFACT_TYPE_HELM_CHART",
+		3: "ARTIFACT_TYPE_OTHER",
+	}
+	ArtifactType_value = map[string]int32{
+		"ARTIFACT_TYPE_UNSPECIFIED":     0,
+		"ARTIFACT_TYPE_CONTAINER_IMAGE": 1,
+		"ARTIFACT_TYPE_HELM_CHART":      2,
+		"ARTIFACT_TYPE_OTHER":           3,
+	}
+)
+
+func (x ArtifactType) Enum() *ArtifactType {
+	p := new(ArtifactType)
+	*p = x
+	return p
+}
+
+func (x ArtifactType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ArtifactType) Descriptor() protoreflect.EnumDescriptor {
+	return file_kacho_cloud_registry_v1_registry_proto_enumTypes[1].Descriptor()
+}
+
+func (ArtifactType) Type() protoreflect.EnumType {
+	return &file_kacho_cloud_registry_v1_registry_proto_enumTypes[1]
+}
+
+func (x ArtifactType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ArtifactType.Descriptor instead.
+func (ArtifactType) EnumDescriptor() ([]byte, []int) {
+	return file_kacho_cloud_registry_v1_registry_proto_rawDescGZIP(), []int{1}
+}
+
 // Registry — тенант-namespace OCI/Docker-реестра Kachō.
 //
 // Плоский ресурс (без K8s-envelope). Registry — НЕ отдельный инстанс движка, а
@@ -220,7 +276,10 @@ type Repository struct {
 	// Суммарный размер (байт) уникальных блобов репозитория.
 	SizeBytes int64 `protobuf:"varint,4,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
 	// Момент последнего обновления (последний push).
-	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	UpdatedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	// Output-only: тип артефакта (best-effort по репрезентативному манифесту).
+	// Позволяет отличить контейнерный образ от helm-чарта в UI-фильтре.
+	ArtifactType  ArtifactType `protobuf:"varint,6,opt,name=artifact_type,json=artifactType,proto3,enum=kacho.cloud.registry.v1.ArtifactType" json:"artifact_type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -288,6 +347,13 @@ func (x *Repository) GetUpdatedAt() *timestamppb.Timestamp {
 		return x.UpdatedAt
 	}
 	return nil
+}
+
+func (x *Repository) GetArtifactType() ArtifactType {
+	if x != nil {
+		return x.ArtifactType
+	}
+	return ArtifactType_ARTIFACT_TYPE_UNSPECIFIED
 }
 
 // Tag — тегированный образ (манифест) в репозитории. Read-only проекция из zot.
@@ -410,7 +476,7 @@ const file_kacho_cloud_registry_v1_registry_proto_rawDesc = "" +
 	" \x01(\x0e2'.kacho.cloud.registry.v1.RegistryStatusR\x06status\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb8\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x84\x02\n" +
 	"\n" +
 	"Repository\x12\x1f\n" +
 	"\vregistry_id\x18\x01 \x01(\tR\n" +
@@ -420,7 +486,8 @@ const file_kacho_cloud_registry_v1_registry_proto_rawDesc = "" +
 	"\n" +
 	"size_bytes\x18\x04 \x01(\x03R\tsizeBytes\x129\n" +
 	"\n" +
-	"updated_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"\xe9\x01\n" +
+	"updated_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12J\n" +
+	"\rartifact_type\x18\x06 \x01(\x0e2%.kacho.cloud.registry.v1.ArtifactTypeR\fartifactType\"\xe9\x01\n" +
 	"\x03Tag\x12\x1f\n" +
 	"\vregistry_id\x18\x01 \x01(\tR\n" +
 	"registryId\x12\x1e\n" +
@@ -438,7 +505,12 @@ const file_kacho_cloud_registry_v1_registry_proto_rawDesc = "" +
 	"\x0eRegistryStatus\x12\x1f\n" +
 	"\x1bREGISTRY_STATUS_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16REGISTRY_STATUS_ACTIVE\x10\x01\x12\x1c\n" +
-	"\x18REGISTRY_STATUS_DELETING\x10\x02BXZVgithub.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1;registryv1b\x06proto3"
+	"\x18REGISTRY_STATUS_DELETING\x10\x02*\x87\x01\n" +
+	"\fArtifactType\x12\x1d\n" +
+	"\x19ARTIFACT_TYPE_UNSPECIFIED\x10\x00\x12!\n" +
+	"\x1dARTIFACT_TYPE_CONTAINER_IMAGE\x10\x01\x12\x1c\n" +
+	"\x18ARTIFACT_TYPE_HELM_CHART\x10\x02\x12\x17\n" +
+	"\x13ARTIFACT_TYPE_OTHER\x10\x03BXZVgithub.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1;registryv1b\x06proto3"
 
 var (
 	file_kacho_cloud_registry_v1_registry_proto_rawDescOnce sync.Once
@@ -452,27 +524,29 @@ func file_kacho_cloud_registry_v1_registry_proto_rawDescGZIP() []byte {
 	return file_kacho_cloud_registry_v1_registry_proto_rawDescData
 }
 
-var file_kacho_cloud_registry_v1_registry_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_kacho_cloud_registry_v1_registry_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_kacho_cloud_registry_v1_registry_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_kacho_cloud_registry_v1_registry_proto_goTypes = []any{
 	(RegistryStatus)(0),           // 0: kacho.cloud.registry.v1.RegistryStatus
-	(*Registry)(nil),              // 1: kacho.cloud.registry.v1.Registry
-	(*Repository)(nil),            // 2: kacho.cloud.registry.v1.Repository
-	(*Tag)(nil),                   // 3: kacho.cloud.registry.v1.Tag
-	nil,                           // 4: kacho.cloud.registry.v1.Registry.LabelsEntry
-	(*timestamppb.Timestamp)(nil), // 5: google.protobuf.Timestamp
+	(ArtifactType)(0),             // 1: kacho.cloud.registry.v1.ArtifactType
+	(*Registry)(nil),              // 2: kacho.cloud.registry.v1.Registry
+	(*Repository)(nil),            // 3: kacho.cloud.registry.v1.Repository
+	(*Tag)(nil),                   // 4: kacho.cloud.registry.v1.Tag
+	nil,                           // 5: kacho.cloud.registry.v1.Registry.LabelsEntry
+	(*timestamppb.Timestamp)(nil), // 6: google.protobuf.Timestamp
 }
 var file_kacho_cloud_registry_v1_registry_proto_depIdxs = []int32{
-	5, // 0: kacho.cloud.registry.v1.Registry.created_at:type_name -> google.protobuf.Timestamp
-	4, // 1: kacho.cloud.registry.v1.Registry.labels:type_name -> kacho.cloud.registry.v1.Registry.LabelsEntry
+	6, // 0: kacho.cloud.registry.v1.Registry.created_at:type_name -> google.protobuf.Timestamp
+	5, // 1: kacho.cloud.registry.v1.Registry.labels:type_name -> kacho.cloud.registry.v1.Registry.LabelsEntry
 	0, // 2: kacho.cloud.registry.v1.Registry.status:type_name -> kacho.cloud.registry.v1.RegistryStatus
-	5, // 3: kacho.cloud.registry.v1.Repository.updated_at:type_name -> google.protobuf.Timestamp
-	5, // 4: kacho.cloud.registry.v1.Tag.created_at:type_name -> google.protobuf.Timestamp
-	5, // [5:5] is the sub-list for method output_type
-	5, // [5:5] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	6, // 3: kacho.cloud.registry.v1.Repository.updated_at:type_name -> google.protobuf.Timestamp
+	1, // 4: kacho.cloud.registry.v1.Repository.artifact_type:type_name -> kacho.cloud.registry.v1.ArtifactType
+	6, // 5: kacho.cloud.registry.v1.Tag.created_at:type_name -> google.protobuf.Timestamp
+	6, // [6:6] is the sub-list for method output_type
+	6, // [6:6] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_kacho_cloud_registry_v1_registry_proto_init() }
@@ -485,7 +559,7 @@ func file_kacho_cloud_registry_v1_registry_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kacho_cloud_registry_v1_registry_proto_rawDesc), len(file_kacho_cloud_registry_v1_registry_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      2,
 			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,

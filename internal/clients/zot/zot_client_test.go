@@ -35,13 +35,14 @@ type manifestFixture struct {
 
 // fakeZot — mock OCI-реестра. repos: full-repo-name (с namespace-prefix) → tag → манифест.
 type fakeZot struct {
-	repos       map[string]map[string]manifestFixture
-	deleted     []string // записанные DELETE digest'ы
-	failCatalog bool     // 500 на _catalog (эмуляция недоступности)
+	repos        map[string]map[string]manifestFixture
+	deleted      []string        // записанные DELETE digest'ы
+	failCatalog  bool            // 500 на _catalog (эмуляция недоступности)
+	failManifest map[string]bool // full-repo → 500 на GET манифеста (best-effort classify)
 }
 
 func newFakeZot() *fakeZot {
-	return &fakeZot{repos: map[string]map[string]manifestFixture{}}
+	return &fakeZot{repos: map[string]map[string]manifestFixture{}, failManifest: map[string]bool{}}
 }
 
 // put регистрирует tag в repo с манифестом (config + layers), проставляя digest
@@ -147,6 +148,12 @@ func (f *fakeZot) handleManifest(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", strconv.Itoa(len(m.body)))
 		w.WriteHeader(http.StatusOK)
 	default: // GET
+		// best-effort classify: манифест-репрезентант может флейкнуть 5xx, при
+		// живых _catalog/tags/list — тогда тип остаётся UNSPECIFIED, список жив.
+		if f.failManifest[repo] {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Docker-Content-Digest", m.digest)
 		w.Header().Set("Content-Type", m.mediaType)
 		_, _ = w.Write(m.body)

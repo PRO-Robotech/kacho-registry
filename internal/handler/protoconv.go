@@ -30,11 +30,12 @@ func toProtoRepository(r *domain.Repository) *registryv1.Repository {
 		return nil
 	}
 	return &registryv1.Repository{
-		RegistryId: r.RegistryID,
-		Name:       r.Name,
-		TagCount:   r.TagCount,
-		SizeBytes:  r.SizeBytes,
-		UpdatedAt:  ts(r.UpdatedAt),
+		RegistryId:   r.RegistryID,
+		Name:         r.Name,
+		TagCount:     r.TagCount,
+		SizeBytes:    r.SizeBytes,
+		UpdatedAt:    ts(r.UpdatedAt),
+		ArtifactType: registryv1.ArtifactType(r.ArtifactType), // domain↔proto parity int32
 	}
 }
 

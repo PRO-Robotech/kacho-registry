@@ -70,17 +70,20 @@ type tagsResponse struct {
 	Tags []string `json:"tags"`
 }
 
-// manifestBody — минимальный разбор OCI/Docker image-манифеста для расчёта размеров
-// и уникальных блобов (config + layers). manifest-index (multi-arch) не разбираем —
-// у него нет layers, вклад в размер/блобы 0 (best-effort).
+// manifestBody — минимальный разбор OCI/Docker image-манифеста: top-level mediaType
+// (index/manifest-list для multi-arch), config (mediaType — дискриминатор типа
+// артефакта; size/digest — для расчёта размеров) и layers. manifest-index не несёт
+// layers — вклад в размер/блобы 0 (best-effort), но top-level mediaType несёт.
 type manifestBody struct {
-	Config descriptor   `json:"config"`
-	Layers []descriptor `json:"layers"`
+	MediaType string       `json:"mediaType"`
+	Config    descriptor   `json:"config"`
+	Layers    []descriptor `json:"layers"`
 }
 
 type descriptor struct {
-	Digest string `json:"digest"`
-	Size   int64  `json:"size"`
+	MediaType string `json:"mediaType"`
+	Digest    string `json:"digest"`
+	Size      int64  `json:"size"`
 }
 
 // namespaceRepos читает GET /v2/_catalog и возвращает full-repo-имена (с namespace-
@@ -120,12 +123,42 @@ func (c *Client) ListRepositories(ctx context.Context, q registry.RepoListQuery)
 			return nil, "", terr
 		}
 		out = append(out, &domain.Repository{
-			RegistryID: q.RegistryID,
-			Name:       strings.TrimPrefix(full, prefix),
-			TagCount:   int32(len(tags)),
+			RegistryID:   q.RegistryID,
+			Name:         strings.TrimPrefix(full, prefix),
+			TagCount:     int32(len(tags)),
+			ArtifactType: c.classifyRepo(ctx, full, tags),
 		})
 	}
 	return out, "", nil
+}
+
+// classifyRepo определяет тип артефакта репо по манифесту репрезентативного тега
+// (best-effort): "latest" если присутствует, иначе последний в отсортированном
+// списке. Любая ошибка чтения манифеста (404/5xx/decode) → UNSPECIFIED — список
+// НЕ падает (полный отказ zot ловится раньше, на _catalog/tags/list). Нет тегов →
+// UNSPECIFIED. Дискриминатор — config.mediaType (+ top-level mediaType для index).
+func (c *Client) classifyRepo(ctx context.Context, fullRepo string, tags []string) domain.ArtifactType {
+	if len(tags) == 0 {
+		return domain.ArtifactTypeUnspecified
+	}
+	ref := representativeTag(tags)
+	mb, err := c.getManifest(ctx, fullRepo, ref)
+	if err != nil {
+		return domain.ArtifactTypeUnspecified // best-effort: тип неизвестен, список жив
+	}
+	return domain.ClassifyArtifact(mb.Config.MediaType, mb.MediaType)
+}
+
+// representativeTag выбирает тег для классификации: "latest" (если есть), иначе
+// последний в отсортированном списке. Репо практически тип-стабилен, поэтому
+// одного репрезентанта достаточно (mixed-repo — by-design best-effort).
+func representativeTag(tags []string) string {
+	for _, t := range tags {
+		if t == "latest" {
+			return t
+		}
+	}
+	return tags[len(tags)-1]
 }
 
 // repoTags читает GET /v2/<full-repo>/tags/list. 404 (repo нет / GC-нут) → пустой

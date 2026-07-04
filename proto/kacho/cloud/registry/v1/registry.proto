@@ -59,6 +59,17 @@ enum RegistryStatus {
   REGISTRY_STATUS_DELETING = 2;
 }
 
+// ArtifactType — тип OCI-артефакта образа, классифицированный по config.mediaType
+// репрезентативного манифеста (и top-level mediaType для multi-arch index).
+// Дискриминатор docker-образа от helm-чарта: оба несут одинаковый top-level
+// manifest media-type, различие только в config.mediaType.
+enum ArtifactType {
+  ARTIFACT_TYPE_UNSPECIFIED = 0;  // не классифицирован (нет тегов / манифест непрочитан)
+  ARTIFACT_TYPE_CONTAINER_IMAGE = 1;  // docker/OCI контейнерный образ (вкл. multi-arch index)
+  ARTIFACT_TYPE_HELM_CHART = 2;  // Helm-чарт (config vnd.cncf.helm.config)
+  ARTIFACT_TYPE_OTHER = 3;  // иной OCI-артефакт (SBOM/WASM/signature/…)
+}
+
 // Repository — OCI-репозиторий (образ) внутри namespace. Read-only проекция из
 // zot (source of truth = zot), НЕ хранится в БД kacho-registry. Per-repo authz
 // object-type `registry_repository` (parent registry_registry).
@@ -77,6 +88,10 @@ message Repository {
 
   // Момент последнего обновления (последний push).
   google.protobuf.Timestamp updated_at = 5;
+
+  // Output-only: тип артефакта (best-effort по репрезентативному манифесту).
+  // Позволяет отличить контейнерный образ от helm-чарта в UI-фильтре.
+  ArtifactType artifact_type = 6;
 }
 
 // Tag — тегированный образ (манифест) в репозитории. Read-only проекция из zot.
