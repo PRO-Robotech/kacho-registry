@@ -125,6 +125,13 @@ type mockZot struct {
 
 	triggerGCErr   error
 	triggerGCCalls []string
+
+	// statsResult / statsErr — управляемый ответ Stats; statsCalls — записанные
+	// registryID (проверка проброса domain.RegistryStats из zot-бэкенда наружу
+	// без изменения и что sync-reject не трогает бэкенд).
+	statsResult *domain.RegistryStats
+	statsErr    error
+	statsCalls  []string
 }
 
 func (z *mockZot) ListRepositories(ctx context.Context, q registry.RepoListQuery) ([]*domain.Repository, string, error) {
@@ -166,6 +173,15 @@ func (z *mockZot) TriggerGC(ctx context.Context, registryID string) error {
 	return z.triggerGCErr
 }
 func (z *mockZot) Stats(ctx context.Context, registryID string) (*domain.RegistryStats, error) {
+	z.mu.Lock()
+	z.statsCalls = append(z.statsCalls, registryID)
+	z.mu.Unlock()
+	if z.statsErr != nil {
+		return nil, z.statsErr
+	}
+	if z.statsResult != nil {
+		return z.statsResult, nil
+	}
 	return &domain.RegistryStats{RegistryID: registryID}, nil
 }
 

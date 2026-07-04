@@ -193,6 +193,34 @@ CASES.append(Case(
                 test_script=[*_assert_denied_or_empty(), *_deny_leak_gated()])],
 ))
 
+# Update как jwtStranger на существующем regId. Stranger здесь unauthenticated → 401;
+# на многопользовательском стенде — 403 (visible project, no v_update) / 404 (hidden).
+# Мутация stranger'а НИКОГДА не 200-success (нет v_update); deny_reasons-leak не
+# раскрываем (gated !=401 — 401-тело несёт generic-причину, не existence-oracle).
+CASES.append(Case(
+    id="REG-AZ-UPDATE-STRANGER-DENY",
+    title="Update as jwtStranger on existing regId → denied (401/403/404, never 200 success); no deny_reasons (gated !=401)",
+    classes=["AZD", "NEG"], priority="P0",
+    steps=[Step(name="update-stranger", method="PATCH", path=f"{REG}/{{{{regIdAz}}}}", auth="jwtStranger",
+                body={"updateMask": "description", "description": "x"},
+                test_script=[
+                    "pm.test('denied 401/403/404 (stranger, never 200 success)', () => pm.expect(pm.response.code).to.be.oneOf([401, 403, 404]));",
+                    *_deny_leak_gated()])],
+))
+
+# Delete как jwtStranger на существующем regId. Тот же денай-диапазон [401/403/404],
+# НИКОГДА 200-success (нет v_delete). Денай оставляет фикстуру нетронутой → {{regIdAz}}
+# валиден для cleanup. deny_reasons-leak не раскрываем (gated !=401).
+CASES.append(Case(
+    id="REG-AZ-DELETE-STRANGER-DENY",
+    title="Delete as jwtStranger on existing regId → denied (401/403/404, never 200 success); no deny_reasons (gated !=401)",
+    classes=["AZD", "NEG"], priority="P0",
+    steps=[Step(name="delete-stranger", method="DELETE", path=f"{REG}/{{{{regIdAz}}}}", auth="jwtStranger",
+                test_script=[
+                    "pm.test('denied 401/403/404 (stranger, never 200 success)', () => pm.expect(pm.response.code).to.be.oneOf([401, 403, 404]));",
+                    *_deny_leak_gated()])],
+))
+
 # anonymous (без Authorization) Get на существующем regId → 401 AUTHN_REQUIRED.
 CASES.append(Case(
     id="REG-AZ-GET-ANON-401",

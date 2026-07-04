@@ -240,5 +240,10 @@ func (u *UseCase) Stats(ctx context.Context, registryID string) (*domain.Registr
 	if err := u.assertWired(); err != nil {
 		return nil, err
 	}
+	// malformed id → sync InvalidArgument первым стейтментом (parity с TriggerGC/Get);
+	// без этого malformed id доходил бы до zot-бэкенда вместо fail-fast reject.
+	if err := validateRegistryID(registryID); err != nil {
+		return nil, err
+	}
 	return u.zot.Stats(ctx, registryID)
 }

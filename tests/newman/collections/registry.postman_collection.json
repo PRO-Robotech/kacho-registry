@@ -1,6 +1,6 @@
 {
   "info": {
-    "_postman_id": "b1b7836a-9be2-4dde-9f70-ef49dbe050b3",
+    "_postman_id": "27b87ef8-485e-4cdd-8fa4-7737a944d58b",
     "name": "kacho-nlb / newman / registry",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
@@ -1157,6 +1157,94 @@
                   "const regs = pm.response.json().registries || [];",
                   "pm.test('registries is array', () => pm.expect(regs).to.be.an('array'));",
                   "pm.test('no cross-tenant leak of own regId', () => pm.expect(regs.some(r => r.id === pm.environment.get('regId'))).to.eql(false));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "REG-LST-FILTER-NAME-OK — List filter=name=\"team-images-{{runId}}\" → 200, returned registries all match the filtered name",
+      "description": "class:CRUD | class:VAL | priority:P1",
+      "item": [
+        {
+          "name": "list-filter-name",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/registry/v1/registries?projectId={{existingProjectId}}&filter=name%3D%22team-images-{{runId}}%22",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "registry",
+                "v1",
+                "registries?projectId={{existingProjectId}}&filter=name%3D%22team-images-{{runId}}%22"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect(pm.response.code).to.eql(200));",
+                  "const regs = pm.response.json().registries || [];",
+                  "pm.test('registries is array', () => pm.expect(regs).to.be.an('array'));",
+                  "const target = 'team-images-' + pm.environment.get('runId');",
+                  "pm.test('filter=name returns only matching registries (grant-latency: array may be empty)', () => regs.forEach(r => pm.expect(r.name, JSON.stringify(r)).to.eql(target)));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "REG-LST-FILTER-GARBAGE-400 — List filter=notafield=x (unknown field, not in name-whitelist) → 400 INVALID_ARGUMENT",
+      "description": "class:NEG | class:VAL | priority:P1",
+      "item": [
+        {
+          "name": "list-filter-garbage",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/registry/v1/registries?projectId={{existingProjectId}}&filter=notafield%3Dx",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "registry",
+                "v1",
+                "registries?projectId={{existingProjectId}}&filter=notafield%3Dx"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.expect(pm.response.code).to.eql(400));",
+                  "pm.test('grpc code 3 (INVALID_ARGUMENT)', () => {",
+                  "  const j = pm.response.json();",
+                  "  pm.expect(j.code, JSON.stringify(j)).to.eql(3);",
+                  "});"
                 ]
               }
             }

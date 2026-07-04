@@ -195,5 +195,7 @@ InternalRegistryService GC/Stats deep internals (integration-tested, mTLS-only).
 | `REG-AZ-UPDATE-VIEWER-DENY` | Update as viewer (no v_update) → 403/404 |
 | `REG-AZ-DELETE-VIEWER-DENY` | Delete as viewer → 403/404 |
 | `REG-AZ-CREATE-STRANGER-DENY` | Create as stranger → 403/404 |
+| `REG-AZ-UPDATE-STRANGER-DENY` | Update as stranger → 401/403/404 (never 200; no deny_reasons leak when !=401) |
+| `REG-AZ-DELETE-STRANGER-DENY` | Delete as stranger → 401/403/404 (never 200; fixture untouched; no deny_reasons leak when !=401) |
 | `REG-AZ-GET-ANON-401` | Get anonymous → 401 |
 | `REG-AZ-CLEANUP-FIXTURE` | cleanup: delete regIdAz as editor → 404 |

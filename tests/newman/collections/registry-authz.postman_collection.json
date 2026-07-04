@@ -1,6 +1,6 @@
 {
   "info": {
-    "_postman_id": "dff52277-04a0-4bbf-8769-58bba243038e",
+    "_postman_id": "432d6f4f-f887-4867-be4c-91027f144693",
     "name": "kacho-nlb / newman / registry-authz",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
@@ -568,6 +568,133 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('denied or empty (200/401/403/404)', () => pm.expect(pm.response.code).to.be.oneOf([200, 401, 403, 404]));",
+                  "if (pm.response.code !== 401) {",
+                  "  pm.test('authenticated deny -> no resource-existence leak', () => pm.expect(JSON.stringify(pm.response.json())).to.not.include('deny_reasons'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "REG-AZ-UPDATE-STRANGER-DENY — Update as jwtStranger on existing regId → denied (401/403/404, never 200 success); no deny_reasons (gated !=401)",
+      "description": "class:AZD | class:NEG | priority:P0",
+      "item": [
+        {
+          "name": "update-stranger",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/registry/v1/registries/{{regIdAz}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "registry",
+                "v1",
+                "registries",
+                "{{regIdAz}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"updateMask\": \"description\", \"description\": \"x\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// AZD per-step: bearer from env 'jwtStranger'",
+                  "const __t = pm.environment.get('jwtStranger') || pm.variables.get('jwtStranger') || '';",
+                  "if (__t) {",
+                  "  pm.request.headers.upsert({key: 'Authorization', value: 'Bearer ' + __t});",
+                  "} else {",
+                  "  pm.request.headers.remove('Authorization');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('denied 401/403/404 (stranger, never 200 success)', () => pm.expect(pm.response.code).to.be.oneOf([401, 403, 404]));",
+                  "if (pm.response.code !== 401) {",
+                  "  pm.test('authenticated deny -> no resource-existence leak', () => pm.expect(JSON.stringify(pm.response.json())).to.not.include('deny_reasons'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "REG-AZ-DELETE-STRANGER-DENY — Delete as jwtStranger on existing regId → denied (401/403/404, never 200 success); no deny_reasons (gated !=401)",
+      "description": "class:AZD | class:NEG | priority:P0",
+      "item": [
+        {
+          "name": "delete-stranger",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/registry/v1/registries/{{regIdAz}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "registry",
+                "v1",
+                "registries",
+                "{{regIdAz}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// AZD per-step: bearer from env 'jwtStranger'",
+                  "const __t = pm.environment.get('jwtStranger') || pm.variables.get('jwtStranger') || '';",
+                  "if (__t) {",
+                  "  pm.request.headers.upsert({key: 'Authorization', value: 'Bearer ' + __t});",
+                  "} else {",
+                  "  pm.request.headers.remove('Authorization');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('denied 401/403/404 (stranger, never 200 success)', () => pm.expect(pm.response.code).to.be.oneOf([401, 403, 404]));",
                   "if (pm.response.code !== 401) {",
                   "  pm.test('authenticated deny -> no resource-existence leak', () => pm.expect(JSON.stringify(pm.response.json())).to.not.include('deny_reasons'));",
                   "}"

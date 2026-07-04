@@ -298,6 +298,36 @@ CASES.append(Case(
                 ])],
 ))
 
+# List filter=name — whitelist filter (`corelib filter.Parse(q.Filter, ["name"])`).
+# Filtering by the shared registry's exact name returns only matching rows; tolerant of
+# grant-latency (the created reg may not be visible yet → array may be empty, but any
+# returned item MUST carry the filtered name — proves the whitelist filter is applied).
+CASES.append(Case(
+    id="REG-LST-FILTER-NAME-OK",  # index: REG-06
+    title="List filter=name=\"team-images-{{runId}}\" → 200, returned registries all match the filtered name",
+    classes=["CRUD", "VAL"], priority="P1",
+    steps=[Step(name="list-filter-name", method="GET",
+                path=REG + "?projectId={{existingProjectId}}&filter=name%3D%22team-images-{{runId}}%22",
+                test_script=[
+                    *assert_status(200),
+                    "const regs = pm.response.json().registries || [];",
+                    "pm.test('registries is array', () => pm.expect(regs).to.be.an('array'));",
+                    "const target = 'team-images-' + pm.environment.get('runId');",
+                    "pm.test('filter=name returns only matching registries (grant-latency: array may be empty)', () => regs.forEach(r => pm.expect(r.name, JSON.stringify(r)).to.eql(target)));",
+                ])],
+))
+
+# List with an unknown filter field (not in the name-whitelist) → 400 INVALID_ARGUMENT:
+# `filter.Parse` rejects any field outside `["name"]` before the query runs.
+CASES.append(Case(
+    id="REG-LST-FILTER-GARBAGE-400",  # index: REG-06
+    title="List filter=notafield=x (unknown field, not in name-whitelist) → 400 INVALID_ARGUMENT",
+    classes=["NEG", "VAL"], priority="P1",
+    steps=[Step(name="list-filter-garbage", method="GET",
+                path=REG + "?projectId={{existingProjectId}}&filter=notafield%3Dx",
+                test_script=[*assert_status(400), *assert_grpc_code(3, "INVALID_ARGUMENT")])],
+))
+
 
 # ===========================================================================
 # Update
