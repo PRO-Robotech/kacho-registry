@@ -90,6 +90,14 @@ type jwtClaims struct {
 	Exp int64    `json:"exp"`
 	Iss string   `json:"iss"`
 	Aud audience `json:"aud"`
+	// Ext — обёртка обогащения Hydra token-hook'а. Для федеративного SA/user токена
+	// (client_credentials / jwt-bearer) `sub` — это Hydra client_id, а реальный
+	// Kachō principal id (sva…/usr…) IAM штампует в ext.ext_claims.kacho_principal_id.
+	Ext struct {
+		ExtClaims struct {
+			KachoPrincipalID string `json:"kacho_principal_id"`
+		} `json:"ext_claims"`
+	} `json:"ext"`
 }
 
 // Verify верифицирует Bearer-JWT и возвращает identity (`sub`). Энфорс: alg ∈
@@ -138,6 +146,13 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (string, error) {
 	}
 	if claims.Sub == "" {
 		return "", fmt.Errorf("%w: empty subject", ErrInvalidToken)
+	}
+	// Kachō principal id (sva…/usr…) — источник истины authz-subject'а. Для
+	// федеративного токена Hydra `sub` несёт client_id, а principal id обогащён
+	// token-hook'ом в ext.ext_claims.kacho_principal_id. Пусто (необогащённый
+	// user-OIDC / back-compat) → падаем обратно на `sub`.
+	if pid := claims.Ext.ExtClaims.KachoPrincipalID; pid != "" {
+		return pid, nil
 	}
 	return claims.Sub, nil
 }

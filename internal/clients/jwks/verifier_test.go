@@ -170,6 +170,34 @@ func TestJWKS_Verify_ES256_Valid(t *testing.T) {
 	require.Equal(t, "cid-ci", sub)
 }
 
+// Федеративный SA-токен: Hydra `sub` — это client_id, а Kachō principal id (sva…/usr…)
+// лежит в `ext.ext_claims.kacho_principal_id` (обогащение IAM token-hook'а). Verify
+// обязан вернуть principal id, а не сырой client_id — иначе data-plane authz Check
+// целится в несуществующий service_account:<client_id> и отказывает любой push/pull.
+func TestJWKS_Verify_ReturnsKachoPrincipalID(t *testing.T) {
+	js := newJWKSServer(t, "kid-rsa")
+	v := New(js.srv.URL, testAud, testHydraIss)
+	claims := hydraClaims("81f92eee-client-uuid", time.Now().Add(time.Hour))
+	claims["ext"] = map[string]any{"ext_claims": map[string]any{"kacho_principal_id": "svaz7x4kcr58s59fx75v"}}
+	tok := js.mintRS256(t, "kid-rsa", claims)
+
+	principal, err := v.Verify(context.Background(), tok)
+	require.NoError(t, err)
+	require.Equal(t, "svaz7x4kcr58s59fx75v", principal)
+}
+
+// Токен без обогащения (ext отсутствует) → Verify падает обратно на `sub`
+// (back-compat: user-OIDC / not-yet-enriched токены).
+func TestJWKS_Verify_FallsBackToSubWhenNoPrincipalClaim(t *testing.T) {
+	js := newJWKSServer(t, "kid-rsa")
+	v := New(js.srv.URL, testAud, testHydraIss)
+	tok := js.mintRS256(t, "kid-rsa", hydraClaims("usr-bare", time.Now().Add(time.Hour)))
+
+	sub, err := v.Verify(context.Background(), tok)
+	require.NoError(t, err)
+	require.Equal(t, "usr-bare", sub)
+}
+
 // REG-TX-13 — истёкший Hydra-JWT → 401 (invalid_token на стороне proxy).
 func TestJWKS_Verify_Expired(t *testing.T) {
 	js := newJWKSServer(t, "kid-rsa")
