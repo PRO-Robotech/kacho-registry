@@ -12,6 +12,7 @@ import (
 	registry "github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/api/registry"
 	zotclient "github.com/PRO-Robotech/kacho-registry/internal/clients/zot"
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
+	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
 )
 
 const (
@@ -119,4 +120,18 @@ func TestZot_ArtifactType_RepresentativeIsLatest(t *testing.T) {
 	repos, _, err := zotclient.New(srv.URL).ListRepositories(t.Context(), registry.RepoListQuery{RegistryID: "reg-A"})
 	require.NoError(t, err)
 	require.Equal(t, domain.ArtifactTypeHelmChart, artifactTypeOf(t, repos, "mixed"))
+}
+
+// GWT-7 — полный отказ zot на _catalog → ListRepositories отдаёт ErrUnavailable
+// (fail-closed) ДО классификации; классификация НЕ маскирует недоступность
+// частичной проекцией с UNSPECIFIED.
+func TestZot_ArtifactType_CatalogFail_Unavailable(t *testing.T) {
+	fz := newFakeZot()
+	putArtifact(fz, "reg-A/app", "v1", "sha256:app1", mediaManifestOCI, mediaConfigDocker)
+	fz.failCatalog = true
+	srv := fz.server(t)
+
+	repos, _, err := zotclient.New(srv.URL).ListRepositories(t.Context(), registry.RepoListQuery{RegistryID: "reg-A"})
+	require.ErrorIs(t, err, regerrors.ErrUnavailable)
+	require.Nil(t, repos)
 }
