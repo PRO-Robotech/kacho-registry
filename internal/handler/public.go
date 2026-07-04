@@ -90,6 +90,7 @@ func (h *RegistryHandler) Create(ctx context.Context, req *registryv1.CreateRegi
 func (h *RegistryHandler) Update(ctx context.Context, req *registryv1.UpdateRegistryRequest) (*operationProto, error) {
 	op, err := h.uc.Update(ctx, registry.UpdateSpec{
 		RegistryID:  req.GetRegistryId(),
+		Name:        req.GetName(),
 		Description: req.GetDescription(),
 		Labels:      req.GetLabels(),
 		Mask:        req.GetUpdateMask().GetPaths(),

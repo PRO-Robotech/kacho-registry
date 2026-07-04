@@ -153,7 +153,7 @@ type Registry struct {
 	// Момент создания (truncate до секунд в ответе).
 	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	// Имя реестра — DNS-safe, UNIQUE в рамках project (partial UNIQUE WHERE
-	// status<>'DELETING'). Immutable после Create.
+	// status<>'DELETING'). Mutable через Update (смена не трогает endpoint/zot по id).
 	Name string `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`
 	// Описание (mutable через Update).
 	Description string `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`

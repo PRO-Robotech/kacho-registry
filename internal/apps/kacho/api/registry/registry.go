@@ -55,15 +55,17 @@ type CreateSpec struct {
 	Labels      map[string]string
 }
 
-// UpdateSpec — вход Update. name/project immutable (в spec не входят). Handler
-// подаёт сырые Description/Labels + Mask; use-case после mask-discipline выставляет
-// ApplyDescription/ApplyLabels — по ним репозиторий строит частичный UPDATE
-// (пустая карта Labels при ApplyLabels=true реально очищает метки).
+// UpdateSpec — вход Update. project immutable (в spec не входит); name — mutable.
+// Handler подаёт сырые Name/Description/Labels + Mask; use-case после mask-discipline
+// выставляет ApplyName/ApplyDescription/ApplyLabels — по ним репозиторий строит
+// частичный UPDATE (пустая карта Labels при ApplyLabels=true реально очищает метки).
 type UpdateSpec struct {
 	RegistryID       string
+	Name             string
 	Description      string
 	Labels           map[string]string
 	Mask             []string
+	ApplyName        bool
 	ApplyDescription bool
 	ApplyLabels      bool
 }

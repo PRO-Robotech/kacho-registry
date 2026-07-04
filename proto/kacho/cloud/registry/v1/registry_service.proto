@@ -168,6 +168,9 @@ message UpdateRegistryRequest {
   string description = 2;
   map<string, string> labels = 3;
   google.protobuf.FieldMask update_mask = 4;
+  // Имя реестра — mutable (DNS-safe, UNIQUE в рамках project среди живых). Смена
+  // не затрагивает endpoint/zot-namespace (те по id). Конфликт → ALREADY_EXISTS.
+  string name = 5;
 }
 
 message UpdateRegistryMetadata {

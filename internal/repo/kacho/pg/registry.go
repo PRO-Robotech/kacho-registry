@@ -203,6 +203,13 @@ func (r *RegistryRepo) Update(ctx context.Context, spec registry.UpdateSpec, mir
 	sets := []string{}
 	args := []any{spec.RegistryID}
 	idx := 2
+	if spec.ApplyName {
+		// Смена имени: partial-UNIQUE(project_id,name) WHERE status<>'DELETING' →
+		// конфликт даёт 23505 → regerrors.Wrap → ErrAlreadyExists.
+		sets = append(sets, fmt.Sprintf("name = $%d", idx))
+		args = append(args, spec.Name)
+		idx++
+	}
 	if spec.ApplyDescription {
 		sets = append(sets, fmt.Sprintf("description = $%d", idx))
 		args = append(args, spec.Description)

@@ -31,7 +31,7 @@ message Registry {
   google.protobuf.Timestamp created_at = 3;
 
   // Имя реестра — DNS-safe, UNIQUE в рамках project (partial UNIQUE WHERE
-  // status<>'DELETING'). Immutable после Create.
+  // status<>'DELETING'). Mutable через Update (смена не трогает endpoint/zot по id).
   string name = 4;
 
   // Описание (mutable через Update).

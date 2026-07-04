@@ -36,20 +36,21 @@ var knownUpdateFields = map[string]struct{}{
 }
 
 // immutableUpdateFields → каноничный immutable-текст (api-conventions.md
-// §update_mask): поле в mask, но менять нельзя после Create.
+// §update_mask): поле в mask, но менять нельзя после Create. name — mutable
+// (смена не трогает endpoint/zot по id), поэтому здесь только project_id.
 var immutableUpdateFields = map[string]string{
-	"name":       "name is immutable after Registry.Create",
 	"project_id": "projectId is immutable after Registry.Create",
 	"projectId":  "projectId is immutable after Registry.Create",
 }
 
 // resolveUpdateMask применяет update_mask discipline к UpdateSpec:
 //   - unknown поле → InvalidArgument (corevalidate.UpdateMask);
-//   - immutable поле (name/project) → InvalidArgument (каноничный текст);
-//   - пустой mask → full-object PATCH (все mutable-поля применяются);
+//   - immutable поле (project) → InvalidArgument (каноничный текст);
+//   - пустой mask → full-object PATCH (все mutable-поля; name — только если задан
+//     в теле, иначе description/labels-only PATCH не должен «очистить» имя);
 //   - mutable поле → соответствующий Apply*-флаг.
 //
-// Мутирует spec.ApplyDescription / spec.ApplyLabels, возвращает нормализованный spec.
+// Мутирует spec.ApplyName/ApplyDescription/ApplyLabels, возвращает нормализованный spec.
 func resolveUpdateMask(spec UpdateSpec) (UpdateSpec, error) {
 	if err := corevalidate.UpdateMask("update_mask", spec.Mask, knownUpdateFields); err != nil {
 		return spec, err
@@ -60,13 +61,18 @@ func resolveUpdateMask(spec UpdateSpec) (UpdateSpec, error) {
 		}
 	}
 	if len(spec.Mask) == 0 {
-		// full-object PATCH: применяются все mutable-поля.
+		// full-object PATCH: применяются все mutable-поля. name применяем только
+		// если он реально передан (непустой) — иначе PATCH без имени (обновляющий
+		// лишь description/labels) не должен пытаться выставить пустое имя.
+		spec.ApplyName = spec.Name != ""
 		spec.ApplyDescription = true
 		spec.ApplyLabels = true
 		return spec, nil
 	}
 	for _, p := range spec.Mask {
 		switch p {
+		case "name":
+			spec.ApplyName = true
 		case "description":
 			spec.ApplyDescription = true
 		case "labels":

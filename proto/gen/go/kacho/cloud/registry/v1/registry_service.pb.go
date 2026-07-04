@@ -306,11 +306,14 @@ func (x *CreateRegistryMetadata) GetRegistryId() string {
 }
 
 type UpdateRegistryRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RegistryId    string                 `protobuf:"bytes,1,opt,name=registry_id,json=registryId,proto3" json:"registry_id,omitempty"`
-	Description   string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
-	Labels        map[string]string      `protobuf:"bytes,3,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	UpdateMask    *fieldmaskpb.FieldMask `protobuf:"bytes,4,opt,name=update_mask,json=updateMask,proto3" json:"update_mask,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	RegistryId  string                 `protobuf:"bytes,1,opt,name=registry_id,json=registryId,proto3" json:"registry_id,omitempty"`
+	Description string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	Labels      map[string]string      `protobuf:"bytes,3,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	UpdateMask  *fieldmaskpb.FieldMask `protobuf:"bytes,4,opt,name=update_mask,json=updateMask,proto3" json:"update_mask,omitempty"`
+	// Имя реестра — mutable (DNS-safe, UNIQUE в рамках project среди живых). Смена
+	// не затрагивает endpoint/zot-namespace (те по id). Конфликт → ALREADY_EXISTS.
+	Name          string `protobuf:"bytes,5,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -371,6 +374,13 @@ func (x *UpdateRegistryRequest) GetUpdateMask() *fieldmaskpb.FieldMask {
 		return x.UpdateMask
 	}
 	return nil
+}
+
+func (x *UpdateRegistryRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
 }
 
 type UpdateRegistryMetadata struct {
@@ -1000,14 +1010,15 @@ const file_kacho_cloud_registry_v1_registry_service_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"9\n" +
 	"\x16CreateRegistryMetadata\x12\x1f\n" +
 	"\vregistry_id\x18\x01 \x01(\tR\n" +
-	"registryId\"\xa6\x02\n" +
+	"registryId\"\xba\x02\n" +
 	"\x15UpdateRegistryRequest\x12\x1f\n" +
 	"\vregistry_id\x18\x01 \x01(\tR\n" +
 	"registryId\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12R\n" +
 	"\x06labels\x18\x03 \x03(\v2:.kacho.cloud.registry.v1.UpdateRegistryRequest.LabelsEntryR\x06labels\x12;\n" +
 	"\vupdate_mask\x18\x04 \x01(\v2\x1a.google.protobuf.FieldMaskR\n" +
-	"updateMask\x1a9\n" +
+	"updateMask\x12\x12\n" +
+	"\x04name\x18\x05 \x01(\tR\x04name\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"9\n" +

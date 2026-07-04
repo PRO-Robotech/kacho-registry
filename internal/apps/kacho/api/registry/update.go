@@ -39,6 +39,13 @@ func (u *UseCase) Update(ctx context.Context, spec UpdateSpec) (*operations.Oper
 	if err != nil {
 		return nil, err
 	}
+	if spec.ApplyName {
+		// Имя mutable, но валидируется теми же правилами, что и Create (DNS-safe,
+		// длина). Конфликт по partial-UNIQUE(project,name) ловит DB → AlreadyExists.
+		if verr := domain.ValidateName("name", spec.Name); verr != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "Illegal argument: %s", verr.Error())
+		}
+	}
 	if spec.ApplyDescription {
 		if verr := corevalidate.Description("description", spec.Description); verr != nil {
 			return nil, verr
