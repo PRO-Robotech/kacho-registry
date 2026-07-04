@@ -857,6 +857,118 @@ func (x *DeleteTagMetadata) GetTag() string {
 	return ""
 }
 
+type ListRegistryOperationsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RegistryId    string                 `protobuf:"bytes,1,opt,name=registry_id,json=registryId,proto3" json:"registry_id,omitempty"`
+	PageSize      int32                  `protobuf:"varint,2,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	PageToken     string                 `protobuf:"bytes,3,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListRegistryOperationsRequest) Reset() {
+	*x = ListRegistryOperationsRequest{}
+	mi := &file_kacho_cloud_registry_v1_registry_service_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListRegistryOperationsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListRegistryOperationsRequest) ProtoMessage() {}
+
+func (x *ListRegistryOperationsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kacho_cloud_registry_v1_registry_service_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListRegistryOperationsRequest.ProtoReflect.Descriptor instead.
+func (*ListRegistryOperationsRequest) Descriptor() ([]byte, []int) {
+	return file_kacho_cloud_registry_v1_registry_service_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ListRegistryOperationsRequest) GetRegistryId() string {
+	if x != nil {
+		return x.RegistryId
+	}
+	return ""
+}
+
+func (x *ListRegistryOperationsRequest) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+func (x *ListRegistryOperationsRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
+type ListRegistryOperationsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Operations    []*operation.Operation `protobuf:"bytes,1,rep,name=operations,proto3" json:"operations,omitempty"`
+	NextPageToken string                 `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListRegistryOperationsResponse) Reset() {
+	*x = ListRegistryOperationsResponse{}
+	mi := &file_kacho_cloud_registry_v1_registry_service_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListRegistryOperationsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListRegistryOperationsResponse) ProtoMessage() {}
+
+func (x *ListRegistryOperationsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_kacho_cloud_registry_v1_registry_service_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListRegistryOperationsResponse.ProtoReflect.Descriptor instead.
+func (*ListRegistryOperationsResponse) Descriptor() ([]byte, []int) {
+	return file_kacho_cloud_registry_v1_registry_service_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *ListRegistryOperationsResponse) GetOperations() []*operation.Operation {
+	if x != nil {
+		return x.Operations
+	}
+	return nil
+}
+
+func (x *ListRegistryOperationsResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
+}
+
 var File_kacho_cloud_registry_v1_registry_service_proto protoreflect.FileDescriptor
 
 const file_kacho_cloud_registry_v1_registry_service_proto_rawDesc = "" +
@@ -942,7 +1054,18 @@ const file_kacho_cloud_registry_v1_registry_service_proto_rawDesc = "" +
 	"\n" +
 	"repository\x18\x02 \x01(\tR\n" +
 	"repository\x12\x10\n" +
-	"\x03tag\x18\x03 \x01(\tR\x03tag2\xee\r\n" +
+	"\x03tag\x18\x03 \x01(\tR\x03tag\"|\n" +
+	"\x1dListRegistryOperationsRequest\x12\x1f\n" +
+	"\vregistry_id\x18\x01 \x01(\tR\n" +
+	"registryId\x12\x1b\n" +
+	"\tpage_size\x18\x02 \x01(\x05R\bpageSize\x12\x1d\n" +
+	"\n" +
+	"page_token\x18\x03 \x01(\tR\tpageToken\"\x8a\x01\n" +
+	"\x1eListRegistryOperationsResponse\x12@\n" +
+	"\n" +
+	"operations\x18\x01 \x03(\v2 .kacho.cloud.operation.OperationR\n" +
+	"operations\x12&\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken2\x86\x10\n" +
 	"\x0fRegistryService\x12\xd1\x01\n" +
 	"\x03Get\x12+.kacho.cloud.registry.v1.GetRegistryRequest\x1a!.kacho.cloud.registry.v1.Registry\"z\x8a\xb5\x18\x17registry.registries.get\x92\xb5\x18\x05v_get\x9a\xb5\x18 \n" +
 	"\x11registry_registry\x12\vregistry_id\xa2\xb5\x18\x012\x82\xd3\xe4\x93\x02'\x12%/registry/v1/registries/{registry_id}\x12\x94\x01\n" +
@@ -960,7 +1083,9 @@ const file_kacho_cloud_registry_v1_registry_service_proto_rawDesc = "" +
 	"\x10ListRepositories\x120.kacho.cloud.registry.v1.ListRepositoriesRequest\x1a1.kacho.cloud.registry.v1.ListRepositoriesResponse\"F\x8a\xb5\x18\b<exempt>\x82\xd3\xe4\x93\x024\x122/registry/v1/registries/{registry_id}/repositories\x12\xb9\x01\n" +
 	"\bListTags\x12(.kacho.cloud.registry.v1.ListTagsRequest\x1a).kacho.cloud.registry.v1.ListTagsResponse\"X\x8a\xb5\x18\b<exempt>\x82\xd3\xe4\x93\x02F\x12D/registry/v1/registries/{registry_id}/repositories/{repository}/tags\x12\xe7\x01\n" +
 	"\tDeleteTag\x12).kacho.cloud.registry.v1.DeleteTagRequest\x1a .kacho.cloud.operation.Operation\"\x8c\x01\x8a\xb5\x18\b<exempt>\xb2\xd2**\n" +
-	"\x11DeleteTagMetadata\x12\x15google.protobuf.Empty\x82\xd3\xe4\x93\x02L*J/registry/v1/registries/{registry_id}/repositories/{repository}/tags/{tag}BXZVgithub.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1;registryv1b\x06proto3"
+	"\x11DeleteTagMetadata\x12\x15google.protobuf.Empty\x82\xd3\xe4\x93\x02L*J/registry/v1/registries/{registry_id}/repositories/{repository}/tags/{tag}\x12\x95\x02\n" +
+	"\x0eListOperations\x126.kacho.cloud.registry.v1.ListRegistryOperationsRequest\x1a7.kacho.cloud.registry.v1.ListRegistryOperationsResponse\"\x91\x01\x8a\xb5\x18\"registry.registries.listOperations\x92\xb5\x18\x06v_list\x9a\xb5\x18 \n" +
+	"\x11registry_registry\x12\vregistry_id\xa2\xb5\x18\x012\x82\xd3\xe4\x93\x022\x120/registry/v1/registries/{registry_id}/operationsBXZVgithub.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1;registryv1b\x06proto3"
 
 var (
 	file_kacho_cloud_registry_v1_registry_service_proto_rawDescOnce sync.Once
@@ -974,59 +1099,64 @@ func file_kacho_cloud_registry_v1_registry_service_proto_rawDescGZIP() []byte {
 	return file_kacho_cloud_registry_v1_registry_service_proto_rawDescData
 }
 
-var file_kacho_cloud_registry_v1_registry_service_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_kacho_cloud_registry_v1_registry_service_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_kacho_cloud_registry_v1_registry_service_proto_goTypes = []any{
-	(*GetRegistryRequest)(nil),       // 0: kacho.cloud.registry.v1.GetRegistryRequest
-	(*ListRegistriesRequest)(nil),    // 1: kacho.cloud.registry.v1.ListRegistriesRequest
-	(*ListRegistriesResponse)(nil),   // 2: kacho.cloud.registry.v1.ListRegistriesResponse
-	(*CreateRegistryRequest)(nil),    // 3: kacho.cloud.registry.v1.CreateRegistryRequest
-	(*CreateRegistryMetadata)(nil),   // 4: kacho.cloud.registry.v1.CreateRegistryMetadata
-	(*UpdateRegistryRequest)(nil),    // 5: kacho.cloud.registry.v1.UpdateRegistryRequest
-	(*UpdateRegistryMetadata)(nil),   // 6: kacho.cloud.registry.v1.UpdateRegistryMetadata
-	(*DeleteRegistryRequest)(nil),    // 7: kacho.cloud.registry.v1.DeleteRegistryRequest
-	(*DeleteRegistryMetadata)(nil),   // 8: kacho.cloud.registry.v1.DeleteRegistryMetadata
-	(*ListRepositoriesRequest)(nil),  // 9: kacho.cloud.registry.v1.ListRepositoriesRequest
-	(*ListRepositoriesResponse)(nil), // 10: kacho.cloud.registry.v1.ListRepositoriesResponse
-	(*ListTagsRequest)(nil),          // 11: kacho.cloud.registry.v1.ListTagsRequest
-	(*ListTagsResponse)(nil),         // 12: kacho.cloud.registry.v1.ListTagsResponse
-	(*DeleteTagRequest)(nil),         // 13: kacho.cloud.registry.v1.DeleteTagRequest
-	(*DeleteTagMetadata)(nil),        // 14: kacho.cloud.registry.v1.DeleteTagMetadata
-	nil,                              // 15: kacho.cloud.registry.v1.CreateRegistryRequest.LabelsEntry
-	nil,                              // 16: kacho.cloud.registry.v1.UpdateRegistryRequest.LabelsEntry
-	(*Registry)(nil),                 // 17: kacho.cloud.registry.v1.Registry
-	(*fieldmaskpb.FieldMask)(nil),    // 18: google.protobuf.FieldMask
-	(*Repository)(nil),               // 19: kacho.cloud.registry.v1.Repository
-	(*Tag)(nil),                      // 20: kacho.cloud.registry.v1.Tag
-	(*operation.Operation)(nil),      // 21: kacho.cloud.operation.Operation
+	(*GetRegistryRequest)(nil),             // 0: kacho.cloud.registry.v1.GetRegistryRequest
+	(*ListRegistriesRequest)(nil),          // 1: kacho.cloud.registry.v1.ListRegistriesRequest
+	(*ListRegistriesResponse)(nil),         // 2: kacho.cloud.registry.v1.ListRegistriesResponse
+	(*CreateRegistryRequest)(nil),          // 3: kacho.cloud.registry.v1.CreateRegistryRequest
+	(*CreateRegistryMetadata)(nil),         // 4: kacho.cloud.registry.v1.CreateRegistryMetadata
+	(*UpdateRegistryRequest)(nil),          // 5: kacho.cloud.registry.v1.UpdateRegistryRequest
+	(*UpdateRegistryMetadata)(nil),         // 6: kacho.cloud.registry.v1.UpdateRegistryMetadata
+	(*DeleteRegistryRequest)(nil),          // 7: kacho.cloud.registry.v1.DeleteRegistryRequest
+	(*DeleteRegistryMetadata)(nil),         // 8: kacho.cloud.registry.v1.DeleteRegistryMetadata
+	(*ListRepositoriesRequest)(nil),        // 9: kacho.cloud.registry.v1.ListRepositoriesRequest
+	(*ListRepositoriesResponse)(nil),       // 10: kacho.cloud.registry.v1.ListRepositoriesResponse
+	(*ListTagsRequest)(nil),                // 11: kacho.cloud.registry.v1.ListTagsRequest
+	(*ListTagsResponse)(nil),               // 12: kacho.cloud.registry.v1.ListTagsResponse
+	(*DeleteTagRequest)(nil),               // 13: kacho.cloud.registry.v1.DeleteTagRequest
+	(*DeleteTagMetadata)(nil),              // 14: kacho.cloud.registry.v1.DeleteTagMetadata
+	(*ListRegistryOperationsRequest)(nil),  // 15: kacho.cloud.registry.v1.ListRegistryOperationsRequest
+	(*ListRegistryOperationsResponse)(nil), // 16: kacho.cloud.registry.v1.ListRegistryOperationsResponse
+	nil,                                    // 17: kacho.cloud.registry.v1.CreateRegistryRequest.LabelsEntry
+	nil,                                    // 18: kacho.cloud.registry.v1.UpdateRegistryRequest.LabelsEntry
+	(*Registry)(nil),                       // 19: kacho.cloud.registry.v1.Registry
+	(*fieldmaskpb.FieldMask)(nil),          // 20: google.protobuf.FieldMask
+	(*Repository)(nil),                     // 21: kacho.cloud.registry.v1.Repository
+	(*Tag)(nil),                            // 22: kacho.cloud.registry.v1.Tag
+	(*operation.Operation)(nil),            // 23: kacho.cloud.operation.Operation
 }
 var file_kacho_cloud_registry_v1_registry_service_proto_depIdxs = []int32{
-	17, // 0: kacho.cloud.registry.v1.ListRegistriesResponse.registries:type_name -> kacho.cloud.registry.v1.Registry
-	15, // 1: kacho.cloud.registry.v1.CreateRegistryRequest.labels:type_name -> kacho.cloud.registry.v1.CreateRegistryRequest.LabelsEntry
-	16, // 2: kacho.cloud.registry.v1.UpdateRegistryRequest.labels:type_name -> kacho.cloud.registry.v1.UpdateRegistryRequest.LabelsEntry
-	18, // 3: kacho.cloud.registry.v1.UpdateRegistryRequest.update_mask:type_name -> google.protobuf.FieldMask
-	19, // 4: kacho.cloud.registry.v1.ListRepositoriesResponse.repositories:type_name -> kacho.cloud.registry.v1.Repository
-	20, // 5: kacho.cloud.registry.v1.ListTagsResponse.tags:type_name -> kacho.cloud.registry.v1.Tag
-	0,  // 6: kacho.cloud.registry.v1.RegistryService.Get:input_type -> kacho.cloud.registry.v1.GetRegistryRequest
-	1,  // 7: kacho.cloud.registry.v1.RegistryService.List:input_type -> kacho.cloud.registry.v1.ListRegistriesRequest
-	3,  // 8: kacho.cloud.registry.v1.RegistryService.Create:input_type -> kacho.cloud.registry.v1.CreateRegistryRequest
-	5,  // 9: kacho.cloud.registry.v1.RegistryService.Update:input_type -> kacho.cloud.registry.v1.UpdateRegistryRequest
-	7,  // 10: kacho.cloud.registry.v1.RegistryService.Delete:input_type -> kacho.cloud.registry.v1.DeleteRegistryRequest
-	9,  // 11: kacho.cloud.registry.v1.RegistryService.ListRepositories:input_type -> kacho.cloud.registry.v1.ListRepositoriesRequest
-	11, // 12: kacho.cloud.registry.v1.RegistryService.ListTags:input_type -> kacho.cloud.registry.v1.ListTagsRequest
-	13, // 13: kacho.cloud.registry.v1.RegistryService.DeleteTag:input_type -> kacho.cloud.registry.v1.DeleteTagRequest
-	17, // 14: kacho.cloud.registry.v1.RegistryService.Get:output_type -> kacho.cloud.registry.v1.Registry
-	2,  // 15: kacho.cloud.registry.v1.RegistryService.List:output_type -> kacho.cloud.registry.v1.ListRegistriesResponse
-	21, // 16: kacho.cloud.registry.v1.RegistryService.Create:output_type -> kacho.cloud.operation.Operation
-	21, // 17: kacho.cloud.registry.v1.RegistryService.Update:output_type -> kacho.cloud.operation.Operation
-	21, // 18: kacho.cloud.registry.v1.RegistryService.Delete:output_type -> kacho.cloud.operation.Operation
-	10, // 19: kacho.cloud.registry.v1.RegistryService.ListRepositories:output_type -> kacho.cloud.registry.v1.ListRepositoriesResponse
-	12, // 20: kacho.cloud.registry.v1.RegistryService.ListTags:output_type -> kacho.cloud.registry.v1.ListTagsResponse
-	21, // 21: kacho.cloud.registry.v1.RegistryService.DeleteTag:output_type -> kacho.cloud.operation.Operation
-	14, // [14:22] is the sub-list for method output_type
-	6,  // [6:14] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	19, // 0: kacho.cloud.registry.v1.ListRegistriesResponse.registries:type_name -> kacho.cloud.registry.v1.Registry
+	17, // 1: kacho.cloud.registry.v1.CreateRegistryRequest.labels:type_name -> kacho.cloud.registry.v1.CreateRegistryRequest.LabelsEntry
+	18, // 2: kacho.cloud.registry.v1.UpdateRegistryRequest.labels:type_name -> kacho.cloud.registry.v1.UpdateRegistryRequest.LabelsEntry
+	20, // 3: kacho.cloud.registry.v1.UpdateRegistryRequest.update_mask:type_name -> google.protobuf.FieldMask
+	21, // 4: kacho.cloud.registry.v1.ListRepositoriesResponse.repositories:type_name -> kacho.cloud.registry.v1.Repository
+	22, // 5: kacho.cloud.registry.v1.ListTagsResponse.tags:type_name -> kacho.cloud.registry.v1.Tag
+	23, // 6: kacho.cloud.registry.v1.ListRegistryOperationsResponse.operations:type_name -> kacho.cloud.operation.Operation
+	0,  // 7: kacho.cloud.registry.v1.RegistryService.Get:input_type -> kacho.cloud.registry.v1.GetRegistryRequest
+	1,  // 8: kacho.cloud.registry.v1.RegistryService.List:input_type -> kacho.cloud.registry.v1.ListRegistriesRequest
+	3,  // 9: kacho.cloud.registry.v1.RegistryService.Create:input_type -> kacho.cloud.registry.v1.CreateRegistryRequest
+	5,  // 10: kacho.cloud.registry.v1.RegistryService.Update:input_type -> kacho.cloud.registry.v1.UpdateRegistryRequest
+	7,  // 11: kacho.cloud.registry.v1.RegistryService.Delete:input_type -> kacho.cloud.registry.v1.DeleteRegistryRequest
+	9,  // 12: kacho.cloud.registry.v1.RegistryService.ListRepositories:input_type -> kacho.cloud.registry.v1.ListRepositoriesRequest
+	11, // 13: kacho.cloud.registry.v1.RegistryService.ListTags:input_type -> kacho.cloud.registry.v1.ListTagsRequest
+	13, // 14: kacho.cloud.registry.v1.RegistryService.DeleteTag:input_type -> kacho.cloud.registry.v1.DeleteTagRequest
+	15, // 15: kacho.cloud.registry.v1.RegistryService.ListOperations:input_type -> kacho.cloud.registry.v1.ListRegistryOperationsRequest
+	19, // 16: kacho.cloud.registry.v1.RegistryService.Get:output_type -> kacho.cloud.registry.v1.Registry
+	2,  // 17: kacho.cloud.registry.v1.RegistryService.List:output_type -> kacho.cloud.registry.v1.ListRegistriesResponse
+	23, // 18: kacho.cloud.registry.v1.RegistryService.Create:output_type -> kacho.cloud.operation.Operation
+	23, // 19: kacho.cloud.registry.v1.RegistryService.Update:output_type -> kacho.cloud.operation.Operation
+	23, // 20: kacho.cloud.registry.v1.RegistryService.Delete:output_type -> kacho.cloud.operation.Operation
+	10, // 21: kacho.cloud.registry.v1.RegistryService.ListRepositories:output_type -> kacho.cloud.registry.v1.ListRepositoriesResponse
+	12, // 22: kacho.cloud.registry.v1.RegistryService.ListTags:output_type -> kacho.cloud.registry.v1.ListTagsResponse
+	23, // 23: kacho.cloud.registry.v1.RegistryService.DeleteTag:output_type -> kacho.cloud.operation.Operation
+	16, // 24: kacho.cloud.registry.v1.RegistryService.ListOperations:output_type -> kacho.cloud.registry.v1.ListRegistryOperationsResponse
+	16, // [16:25] is the sub-list for method output_type
+	7,  // [7:16] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_kacho_cloud_registry_v1_registry_service_proto_init() }
@@ -1041,7 +1171,7 @@ func file_kacho_cloud_registry_v1_registry_service_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kacho_cloud_registry_v1_registry_service_proto_rawDesc), len(file_kacho_cloud_registry_v1_registry_service_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   17,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

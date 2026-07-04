@@ -58,6 +58,20 @@ func TestPermissionMap_CRUD_InterceptorGated(t *testing.T) {
 	}
 }
 
+// TestPermissionMap_ListOperations_InterceptorGated — per-resource история
+// операций реестра под per-RPC interceptor-Check (НЕ ScopeFiltered): single-object
+// v_list на registry_registry:<registry_id> (тир-parity с Get). Пропуск записи →
+// fail-closed interceptor отверг бы ListOperations как unmapped RPC → «Операции»
+// tab получил бы 403 «catalog: no entry for method».
+func TestPermissionMap_ListOperations_InterceptorGated(t *testing.T) {
+	m := PermissionMap()
+	e, ok := m["/kacho.cloud.registry.v1.RegistryService/ListOperations"]
+	require.True(t, ok, "ListOperations must be mapped (interceptor fail-closes unmapped RPC)")
+	require.False(t, e.ScopeFiltered, "ListOperations interceptor-gated (single-object Check)")
+	require.Equal(t, relVList, e.Relation, "ListOperations gated by v_list")
+	require.Equal(t, "registry.registries.listOperations", e.Permission)
+}
+
 // TestPermissionMap_OperationService_PublicExempt — LRO-поллинг: op-id opaque,
 // авторизуется на data-уровне (op принадлежит ресурсу, созданному вызывающим).
 // Interceptor fail-close'ит НЕ-замапленные RPC, поэтому Get/Cancel ОБЯЗАНЫ быть

@@ -120,6 +120,20 @@ service RegistryService {
     };
     option (kacho.iam.authz.v1.permission) = "<exempt>";
   }
+
+  // ListOperations — sync-история async-операций реестра (per-resource, фильтр по
+  // resource_id=registry_id). Interceptor-gated per-RPC Check v_list на
+  // registry_registry (как Get) → в allowlist как публичный gRPC-путь.
+  rpc ListOperations(ListRegistryOperationsRequest) returns (ListRegistryOperationsResponse) {
+    option (google.api.http) = {get: "/registry/v1/registries/{registry_id}/operations"};
+    option (kacho.iam.authz.v1.permission) = "registry.registries.listOperations";
+    option (kacho.iam.authz.v1.required_relation) = "v_list";
+    option (kacho.iam.authz.v1.scope_extractor) = {
+      object_type: "registry_registry"
+      from_request_field: "registry_id"
+    };
+    option (kacho.iam.authz.v1.required_acr_min) = "2";
+  }
 }
 
 message GetRegistryRequest {
@@ -201,4 +215,15 @@ message DeleteTagMetadata {
   string registry_id = 1;
   string repository = 2;
   string tag = 3;
+}
+
+message ListRegistryOperationsRequest {
+  string registry_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListRegistryOperationsResponse {
+  repeated operation.Operation operations = 1;
+  string next_page_token = 2;
 }

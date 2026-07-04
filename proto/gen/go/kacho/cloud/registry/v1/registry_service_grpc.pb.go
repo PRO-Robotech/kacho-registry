@@ -31,6 +31,7 @@ const (
 	RegistryService_ListRepositories_FullMethodName = "/kacho.cloud.registry.v1.RegistryService/ListRepositories"
 	RegistryService_ListTags_FullMethodName         = "/kacho.cloud.registry.v1.RegistryService/ListTags"
 	RegistryService_DeleteTag_FullMethodName        = "/kacho.cloud.registry.v1.RegistryService/DeleteTag"
+	RegistryService_ListOperations_FullMethodName   = "/kacho.cloud.registry.v1.RegistryService/ListOperations"
 )
 
 // RegistryServiceClient is the client API for RegistryService service.
@@ -66,6 +67,10 @@ type RegistryServiceClient interface {
 	// DELETE отвергается 405). Per-repo v_delete Check синхронно в handler'е ДО
 	// создания Operation → gateway <exempt>.
 	DeleteTag(ctx context.Context, in *DeleteTagRequest, opts ...grpc.CallOption) (*operation.Operation, error)
+	// ListOperations — sync-история async-операций реестра (per-resource, фильтр по
+	// resource_id=registry_id). Interceptor-gated per-RPC Check v_list на
+	// registry_registry (как Get) → в allowlist как публичный gRPC-путь.
+	ListOperations(ctx context.Context, in *ListRegistryOperationsRequest, opts ...grpc.CallOption) (*ListRegistryOperationsResponse, error)
 }
 
 type registryServiceClient struct {
@@ -156,6 +161,16 @@ func (c *registryServiceClient) DeleteTag(ctx context.Context, in *DeleteTagRequ
 	return out, nil
 }
 
+func (c *registryServiceClient) ListOperations(ctx context.Context, in *ListRegistryOperationsRequest, opts ...grpc.CallOption) (*ListRegistryOperationsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListRegistryOperationsResponse)
+	err := c.cc.Invoke(ctx, RegistryService_ListOperations_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RegistryServiceServer is the server API for RegistryService service.
 // All implementations must embed UnimplementedRegistryServiceServer
 // for forward compatibility.
@@ -189,6 +204,10 @@ type RegistryServiceServer interface {
 	// DELETE отвергается 405). Per-repo v_delete Check синхронно в handler'е ДО
 	// создания Operation → gateway <exempt>.
 	DeleteTag(context.Context, *DeleteTagRequest) (*operation.Operation, error)
+	// ListOperations — sync-история async-операций реестра (per-resource, фильтр по
+	// resource_id=registry_id). Interceptor-gated per-RPC Check v_list на
+	// registry_registry (как Get) → в allowlist как публичный gRPC-путь.
+	ListOperations(context.Context, *ListRegistryOperationsRequest) (*ListRegistryOperationsResponse, error)
 	mustEmbedUnimplementedRegistryServiceServer()
 }
 
@@ -222,6 +241,9 @@ func (UnimplementedRegistryServiceServer) ListTags(context.Context, *ListTagsReq
 }
 func (UnimplementedRegistryServiceServer) DeleteTag(context.Context, *DeleteTagRequest) (*operation.Operation, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteTag not implemented")
+}
+func (UnimplementedRegistryServiceServer) ListOperations(context.Context, *ListRegistryOperationsRequest) (*ListRegistryOperationsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListOperations not implemented")
 }
 func (UnimplementedRegistryServiceServer) mustEmbedUnimplementedRegistryServiceServer() {}
 func (UnimplementedRegistryServiceServer) testEmbeddedByValue()                         {}
@@ -388,6 +410,24 @@ func _RegistryService_DeleteTag_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RegistryService_ListOperations_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRegistryOperationsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RegistryServiceServer).ListOperations(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RegistryService_ListOperations_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RegistryServiceServer).ListOperations(ctx, req.(*ListRegistryOperationsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RegistryService_ServiceDesc is the grpc.ServiceDesc for RegistryService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -426,6 +466,10 @@ var RegistryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteTag",
 			Handler:    _RegistryService_DeleteTag_Handler,
+		},
+		{
+			MethodName: "ListOperations",
+			Handler:    _RegistryService_ListOperations_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -229,6 +229,9 @@ func (m *mockRepoReg) UnregisterRepository(ctx context.Context, intent domain.Re
 type memOps struct {
 	mu  sync.Mutex
 	ops map[string]*operations.Operation
+	// listErr — если задан, List возвращает его (no-leak тест: сырой repo-текст
+	// не должен протечь наружу в gRPC Internal).
+	listErr error
 }
 
 func newMemOps() *memOps { return &memOps{ops: map[string]*operations.Operation{}} }
@@ -257,7 +260,16 @@ func (m *memOps) Get(ctx context.Context, id string) (*operations.Operation, err
 	return &cp, nil
 }
 func (m *memOps) List(ctx context.Context, f operations.ListFilter) ([]operations.Operation, string, error) {
-	return nil, "", nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.listErr != nil {
+		return nil, "", m.listErr
+	}
+	out := make([]operations.Operation, 0, len(m.ops))
+	for _, op := range m.ops {
+		out = append(out, *op)
+	}
+	return out, "", nil
 }
 func (m *memOps) MarkDone(ctx context.Context, id string, response *anypb.Any) error {
 	m.mu.Lock()

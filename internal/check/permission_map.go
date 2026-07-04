@@ -45,6 +45,8 @@ func registryObject() authz.ObjectExtractor {
 			id = r.GetRegistryId()
 		case *registryv1.ListRepositoriesRequest:
 			id = r.GetRegistryId()
+		case *registryv1.ListRegistryOperationsRequest:
+			id = r.GetRegistryId()
 		case *registryv1.TriggerGarbageCollectionRequest:
 			id = r.GetRegistryId()
 		case *registryv1.GetRegistryStatsRequest:
@@ -127,6 +129,14 @@ func PermissionMap() authz.RPCMap {
 			Relation:   relVDelete,
 			Extract:    registryObject(),
 			Permission: "registry.registries.delete",
+		},
+		// ListOperations — per-resource история операций реестра. Interceptor-gated
+		// single-object Check v_list на registry_registry:<id> (как Get), НЕ
+		// ScopeFiltered: коллекция принадлежит одному реестру, row-filter не нужен.
+		"/kacho.cloud.registry.v1.RegistryService/ListOperations": {
+			Relation:   relVList,
+			Extract:    registryObject(),
+			Permission: "registry.registries.listOperations",
 		},
 		// ListRepositories/ListTags/DeleteTag авторизуются В ХЕНДЛЕРЕ (ScopeFiltered):
 		// interceptor пропускает per-RPC Check, а handler делает call-gate + per-repo

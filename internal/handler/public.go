@@ -196,3 +196,23 @@ func (h *RegistryHandler) DeleteTag(ctx context.Context, req *registryv1.DeleteT
 	}
 	return operationToProto(op), nil
 }
+
+// ListOperations возвращает историю async-операций реестра (sync). Per-resource
+// фильтр по resource_id=registry_id; authz — per-RPC interceptor-Check v_list на
+// registry_registry:<id> (scope из registry_id), handler тонкий. operationToProto
+// маппит каждую строку в proto-форму (oneof error|response при done).
+func (h *RegistryHandler) ListOperations(ctx context.Context, req *registryv1.ListRegistryOperationsRequest) (*registryv1.ListRegistryOperationsResponse, error) {
+	ops, next, err := h.uc.ListOperations(ctx, registry.ListOperationsQuery{
+		RegistryID: req.GetRegistryId(),
+		PageSize:   int64(req.GetPageSize()),
+		PageToken:  req.GetPageToken(),
+	})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	resp := &registryv1.ListRegistryOperationsResponse{NextPageToken: next}
+	for i := range ops {
+		resp.Operations = append(resp.Operations, operationToProto(&ops[i]))
+	}
+	return resp, nil
+}
