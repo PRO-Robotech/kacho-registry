@@ -86,12 +86,24 @@ message Repository {
   // Суммарный размер (байт) уникальных блобов репозитория.
   int64 size_bytes = 4;
 
-  // Момент последнего обновления (последний push).
+  // Момент последнего push в репозиторий (last-pushed).
   google.protobuf.Timestamp updated_at = 5;
 
-  // Output-only: тип артефакта (best-effort по репрезентативному манифесту).
-  // Позволяет отличить контейнерный образ от helm-чарта в UI-фильтре.
+  // Output-only: доминирующий тип артефакта (первый из artifact_types) — для
+  // обратной совместимости фильтра. Полный набор — в artifact_types.
   ArtifactType artifact_type = 6;
+
+  // Output-only: НАБОР типов артефактов среди тегов репозитория. Репозиторий может
+  // одновременно содержать контейнерные образы И helm-чарты (mixed) — тогда набор
+  // несёт оба значения. Пустой набор — нет тегов / не классифицировано.
+  repeated ArtifactType artifact_types = 11;
+
+  // Output-only: момент последнего pull любого тега репозитория (last-pulled).
+  // Нулевой timestamp — ни один тег ещё не скачивался.
+  google.protobuf.Timestamp last_pulled_at = 12;
+
+  // Output-only: суммарное число скачиваний тегов репозитория (zot download-count).
+  int64 download_count = 13;
 }
 
 // Tag — тегированный образ (манифест) в репозитории. Read-only проекция из zot.
@@ -118,7 +130,17 @@ message Tag {
   // его не несёт (напр. минимальный образ) или артефакт не контейнерный (helm).
   google.protobuf.Timestamp created_at = 7;
 
-  // Платформа образа "<os>/<arch>" (напр. "linux/amd64") из image-config; для
-  // multi-arch index — "multi-arch"; для helm-чарта / неизвестного — пусто.
+  // Платформа образа "<os>/<arch>" (напр. "linux/amd64"); для multi-arch index —
+  // "multi-arch"; для helm-чарта / неизвестного — пусто.
   string architecture = 8;
+
+  // Output-only: момент последнего pull тега (last-pulled). Нулевой timestamp —
+  // тег ещё не скачивался.
+  google.protobuf.Timestamp last_pulled_at = 9;
+
+  // Output-only: субъект последнего push (zot pushed-by), если известен.
+  string pushed_by = 10;
+
+  // Output-only: число скачиваний тега (zot download-count).
+  int64 download_count = 11;
 }

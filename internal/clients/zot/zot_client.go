@@ -11,9 +11,16 @@
 // зеркало zot (source of truth = zot); в БД kacho-registry НЕ хранятся. Все HTTP-сбои
 // zot → ErrUnavailable (fail-closed: проекции не отдают stale-фикцию, Delete-
 // precondition не «считает пустым»).
+//
+// Проекции Repository/Tag читаются через zot search-extension GraphQL
+// (POST /v2/_zot/ext/search): GlobalSearch отдаёт per-repo агрегаты (размер, момент
+// последнего push, download-count) одним запросом, ImageList — теги repo с размером,
+// платформой, push/pull-таймстампами и типом артефакта. Distribution-API остаётся для
+// удаления тегов, инфра-статистики (Stats), catalog-листинга и per-repo blob-scope.
 package zot
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,14 +99,6 @@ type descriptor struct {
 	Size      int64  `json:"size"`
 }
 
-// imageConfig — разбор image-config blob (config.mediaType image): платформа и
-// момент создания образа. Для helm-config / артефактов эти поля отсутствуют.
-type imageConfig struct {
-	Created      string `json:"created"`
-	Architecture string `json:"architecture"`
-	OS           string `json:"os"`
-}
-
 // namespaceRepos читает GET /v2/_catalog и возвращает full-repo-имена (с namespace-
 // префиксом) реестра registryID. Любой HTTP-сбой → ErrUnavailable (fail-closed).
 func (c *Client) namespaceRepos(ctx context.Context, registryID string) ([]string, error) {
@@ -122,40 +122,42 @@ func (c *Client) namespaceRepos(ctx context.Context, registryID string) ([]strin
 // на internal-endpoint, сохраняя скорость против N последовательных round-trip'ов.
 const zotFanout = 8
 
-// ListRepositories возвращает repos namespace (GET /v2/_catalog, namespace-prefix
-// фильтр). Имя repo — БЕЗ namespace-префикса; tag_count — из tags/list; classify —
-// по репрезентативному манифесту. Per-repo обход распараллелен (zotFanout). Repo с
-// НУЛЁМ тегов (все теги удалены, GC ещё не снял запись из _catalog) — скрывается:
-// пустой repo для tenant'а эквивалентен удалённому. Полная проекция (authz-фильтр и
-// пагинацию применяет handler ПОСЛЕ фильтра).
+// ListRepositories возвращает repos namespace через search-ext GraphQL. GlobalSearch
+// даёт per-repo агрегаты (Size / LastUpdated / DownloadCount) одним запросом и служит
+// источником имён репо; per-repo ImageList (распараллелен, zotFanout) — теги для
+// tag_count / artifact-типов / last-pull. Имя repo — БЕЗ namespace-префикса. Repo с
+// НУЛЁМ тегов (все теги удалены, GC ещё не снял запись) — скрывается: пустой repo для
+// tenant'а эквивалентен удалённому. Результат отсортирован по имени. Полная проекция
+// (authz-фильтр и пагинацию применяет handler ПОСЛЕ фильтра).
 func (c *Client) ListRepositories(ctx context.Context, q registry.RepoListQuery) ([]*domain.Repository, string, error) {
 	if err := c.ready(); err != nil {
 		return nil, "", err
 	}
-	fullNames, err := c.namespaceRepos(ctx, q.RegistryID)
-	if err != nil {
+	prefix := q.RegistryID + "/"
+	var gs gqlGlobalSearchData
+	if err := c.gqlQuery(ctx, globalSearchQuery(prefix), &gs); err != nil {
 		return nil, "", err
 	}
-	prefix := q.RegistryID + "/"
-	repos := make([]*domain.Repository, len(fullNames)) // индексируем — порядок _catalog сохраняется
+	summaries := gs.GlobalSearch.Repos
+	repos := make([]*domain.Repository, len(summaries)) // индексируем — компактим ниже
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(zotFanout)
-	for i, full := range fullNames {
-		i, full := i, full
+	for i, rs := range summaries {
+		i, rs := i, rs
+		// GlobalSearch — substring-поиск: отбрасываем чужой namespace (defence-in-depth).
+		if !strings.HasPrefix(rs.Name, prefix) {
+			continue
+		}
 		g.Go(func() error {
-			tags, terr := c.repoTags(gctx, full)
-			if terr != nil {
-				return terr // zot недоступен → fail-closed для всего списка
+			var data gqlImageListData
+			if err := c.gqlQuery(gctx, imageListQuery(rs.Name), &data); err != nil {
+				return err // zot недоступен → fail-closed для всего списка
 			}
-			if len(tags) == 0 {
+			results := data.ImageList.Results
+			if len(results) == 0 {
 				return nil // ghost: пустой repo — скрываем (nil остаётся, компактится ниже)
 			}
-			repos[i] = &domain.Repository{
-				RegistryID:   q.RegistryID,
-				Name:         strings.TrimPrefix(full, prefix),
-				TagCount:     int32(len(tags)),
-				ArtifactType: c.classifyRepo(gctx, full, tags),
-			}
+			repos[i] = repositoryFromSummaries(q.RegistryID, strings.TrimPrefix(rs.Name, prefix), rs, results)
 			return nil
 		})
 	}
@@ -168,36 +170,69 @@ func (c *Client) ListRepositories(ctx context.Context, q registry.RepoListQuery)
 			out = append(out, r)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, "", nil
 }
 
-// classifyRepo определяет тип артефакта репо по манифесту репрезентативного тега
-// (best-effort): "latest" если присутствует, иначе последний в отсортированном
-// списке. Любая ошибка чтения манифеста (404/5xx/decode) → UNSPECIFIED — список
-// НЕ падает (полный отказ zot ловится раньше, на _catalog/tags/list). Нет тегов →
-// UNSPECIFIED. Дискриминатор — config.mediaType (+ top-level mediaType для index).
-func (c *Client) classifyRepo(ctx context.Context, fullRepo string, tags []string) domain.ArtifactType {
-	if len(tags) == 0 {
-		return domain.ArtifactTypeUnspecified
+// repositoryFromSummaries собирает проекцию repo из GlobalSearch-агрегата (rs) и тегов
+// (results из ImageList). tag_count — число тегов; artifact_types — упорядоченно-
+// уникальный набор ClassifyArtifact по тегам (mixed-repo несёт оба значения), без
+// UNSPECIFIED; artifact_type (primary) — первый из набора. last_pulled_at — max
+// LastPullTimestamp по тегам. Size / updated_at / download_count берутся из GlobalSearch;
+// fallback (агрегат пуст) — сумма/максимум по тегам.
+func repositoryFromSummaries(registryID, name string, rs gqlRepoSummary, results []gqlImageSummary) *domain.Repository {
+	repo := &domain.Repository{
+		RegistryID:    registryID,
+		Name:          name,
+		TagCount:      int32(len(results)),
+		SizeBytes:     parseInt64(rs.Size),
+		UpdatedAt:     parseZotTS(rs.LastUpdated),
+		DownloadCount: rs.DownloadCount,
 	}
-	ref := representativeTag(tags)
-	mb, err := c.getManifest(ctx, fullRepo, ref)
-	if err != nil {
-		return domain.ArtifactTypeUnspecified // best-effort: тип неизвестен, список жив
+	var types []domain.ArtifactType
+	seen := map[domain.ArtifactType]bool{}
+	var maxPull, maxPush time.Time
+	var sumSize, sumDownloads int64
+	for _, r := range results {
+		if at := classifyTag(r); at != domain.ArtifactTypeUnspecified && !seen[at] {
+			seen[at] = true
+			types = append(types, at)
+		}
+		if pull := parseZotTS(r.LastPullTimestamp); pull.After(maxPull) {
+			maxPull = pull
+		}
+		if push := parseZotTS(r.PushTimestamp); push.After(maxPush) {
+			maxPush = push
+		}
+		sumSize += parseInt64(r.Size)
+		sumDownloads += r.DownloadCount
 	}
-	return domain.ClassifyArtifact(mb.Config.MediaType, mb.MediaType)
+	repo.ArtifactTypes = types
+	if len(types) > 0 {
+		repo.ArtifactType = types[0]
+	}
+	repo.LastPulledAt = maxPull
+	if repo.UpdatedAt.IsZero() { // GlobalSearch LastUpdated отсутствует → max push по тегам
+		repo.UpdatedAt = maxPush
+	}
+	if repo.SizeBytes == 0 { // GlobalSearch Size отсутствует → Σ размеров тегов
+		repo.SizeBytes = sumSize
+	}
+	if repo.DownloadCount == 0 { // GlobalSearch DownloadCount отсутствует → Σ по тегам
+		repo.DownloadCount = sumDownloads
+	}
+	return repo
 }
 
-// representativeTag выбирает тег для классификации: "latest" (если есть), иначе
-// последний в отсортированном списке. Репо практически тип-стабилен, поэтому
-// одного репрезентанта достаточно (mixed-repo — by-design best-effort).
-func representativeTag(tags []string) string {
-	for _, t := range tags {
-		if t == "latest" {
-			return t
-		}
+// classifyTag определяет тип артефакта тега по config-mediaType (Manifests[0].ArtifactType)
+// и top-level media-type. Multi-arch index (config пуст) классифицируется по top-level
+// mediaType как контейнерный образ.
+func classifyTag(m gqlImageSummary) domain.ArtifactType {
+	config := ""
+	if len(m.Manifests) > 0 {
+		config = m.Manifests[0].ArtifactType
 	}
-	return tags[len(tags)-1]
+	return domain.ClassifyArtifact(config, m.MediaType)
 }
 
 // repoTags читает GET /v2/<full-repo>/tags/list. 404 (repo нет / GC-нут) → пустой
@@ -215,90 +250,52 @@ func (c *Client) repoTags(ctx context.Context, fullRepo string) ([]string, error
 	return tr.Tags, nil
 }
 
-// ListTags возвращает теги repo (GET /v2/<registryID>/<repo>/tags/list) с digest,
-// реальным размером образа (config + Σlayers; для index — Σ дочерних) и, для
-// контейнерных образов, платформой/created из image-config. Per-tag обход
-// распараллелен (zotFanout). Несуществующий repo → пустой список; тег, исчезнувший
-// между list и read, выпадает из проекции. Полная проекция (пагинацию применяет handler).
+// ListTags возвращает теги repo через search-ext GraphQL (ImageList). На каждый тег
+// проецируются digest, размер образа (Size int64), media-type, момент push (created_at),
+// момент последнего pull, subject-push (pushed_by), download-count и платформа
+// ("<os>/<arch>", "multi-arch" для index). Порядок Results сохраняется. Несуществующий
+// repo → пустой ImageList.Results → пустой список (грациозный dangling-ref, не ошибка).
+// Полная проекция (пагинацию применяет handler).
 func (c *Client) ListTags(ctx context.Context, q registry.TagListQuery) ([]*domain.Tag, string, error) {
 	if err := c.ready(); err != nil {
 		return nil, "", err
 	}
 	fullRepo := q.RegistryID + "/" + q.Repository
-	tags, err := c.repoTags(ctx, fullRepo)
-	if err != nil {
+	var data gqlImageListData
+	if err := c.gqlQuery(ctx, imageListQuery(fullRepo), &data); err != nil {
 		return nil, "", err
 	}
-	projected := make([]*domain.Tag, len(tags)) // индексируем — порядок tags/list сохраняется
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(zotFanout)
-	for i, tag := range tags {
-		i, tag := i, tag
-		g.Go(func() error {
-			t, terr := c.projectTag(gctx, q.RegistryID, q.Repository, fullRepo, tag)
-			if terr != nil {
-				if terr == errNotFound {
-					return nil // тег исчез между list и read — выпадает из проекции
-				}
-				return terr // zot недоступен → fail-closed для всего списка
-			}
-			projected[i] = t
-			return nil
-		})
-	}
-	if werr := g.Wait(); werr != nil {
-		return nil, "", werr
-	}
-	out := make([]*domain.Tag, 0, len(projected))
-	for _, t := range projected {
-		if t != nil {
-			out = append(out, t)
-		}
+	results := data.ImageList.Results
+	out := make([]*domain.Tag, 0, len(results))
+	for _, r := range results {
+		out = append(out, tagFromSummary(q.RegistryID, q.Repository, r))
 	}
 	return out, "", nil
 }
 
-// projectTag строит проекцию одного тега: digest + media-type + реальный размер
-// (config + Σlayers; для multi-arch index — Σ дочерних манифестов) + платформа/created
-// из image-config (best-effort: недоступный config-blob не валит тег). errNotFound —
-// тег исчез между list и read.
-func (c *Client) projectTag(ctx context.Context, registryID, repository, fullRepo, tag string) (*domain.Tag, error) {
-	digest, mb, err := c.getManifestFull(ctx, fullRepo, tag)
-	if err != nil {
-		return nil, err
-	}
+// tagFromSummary строит проекцию одного тега из ImageList-элемента. Размер — Size
+// (string int64) из zot; платформа — "multi-arch" для index (>1 манифест), иначе
+// "<os>/<arch>" единственного манифеста.
+func tagFromSummary(registryID, repository string, s gqlImageSummary) *domain.Tag {
 	t := &domain.Tag{
-		RegistryID: registryID,
-		Repository: repository,
-		Tag:        tag,
-		Digest:     digest,
-		MediaType:  mb.MediaType,
+		RegistryID:    registryID,
+		Repository:    repository,
+		Tag:           s.Tag,
+		Digest:        s.Digest,
+		SizeBytes:     parseInt64(s.Size),
+		MediaType:     s.MediaType,
+		CreatedAt:     parseZotTS(s.PushTimestamp),
+		LastPulledAt:  parseZotTS(s.LastPullTimestamp),
+		PushedBy:      s.PushedBy,
+		DownloadCount: s.DownloadCount,
 	}
-	if len(mb.Manifests) > 0 {
-		// multi-arch index: config/layers у index нет, размер — сумма дочерних манифестов.
-		for _, m := range mb.Manifests {
-			t.SizeBytes += m.Size
-		}
+	switch {
+	case len(s.Manifests) > 1:
 		t.Architecture = "multi-arch"
-		return t, nil
+	case len(s.Manifests) == 1:
+		t.Architecture = platformString(s.Manifests[0].Platform.Os, s.Manifests[0].Platform.Arch)
 	}
-	t.SizeBytes = mb.Config.Size
-	for _, l := range mb.Layers {
-		t.SizeBytes += l.Size
-	}
-	// Платформа/created — из image-config blob (только контейнерный образ; helm-config
-	// их не несёт). Миссинг/ошибка чтения config-blob — best-effort, тег остаётся.
-	if isImageConfig(mb.Config.MediaType) && mb.Config.Digest != "" {
-		if cfg, cerr := c.getConfigBlob(ctx, fullRepo, mb.Config.Digest); cerr == nil {
-			t.Architecture = platformString(cfg.OS, cfg.Architecture)
-			if cfg.Created != "" {
-				if ct, perr := time.Parse(time.RFC3339, cfg.Created); perr == nil {
-					t.CreatedAt = ct
-				}
-			}
-		}
-	}
-	return t, nil
+	return t
 }
 
 // DeleteTag удаляет тег/манифест: сначала резолвит digest тега (HEAD), затем
@@ -546,51 +543,6 @@ func (c *Client) getManifest(ctx context.Context, fullRepo, ref string) (manifes
 	return mb, nil
 }
 
-// getManifestFull GET-ит манифест по ref и возвращает digest (Docker-Content-Digest
-// заголовок) вместе с разобранным телом (config/layers/manifests). 404 → errNotFound;
-// прочий не-2xx / транспорт / decode → ErrUnavailable.
-func (c *Client) getManifestFull(ctx context.Context, fullRepo, ref string) (string, manifestBody, error) {
-	req, rerr := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.baseURL+"/v2/"+repoPath(fullRepo)+"/manifests/"+url.PathEscape(ref), nil)
-	if rerr != nil {
-		return "", manifestBody{}, regerrors.ErrUnavailable
-	}
-	req.Header.Set("Accept", acceptManifests)
-	resp, derr := c.http.Do(req)
-	if derr != nil {
-		return "", manifestBody{}, regerrors.ErrUnavailable
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusNotFound {
-		return "", manifestBody{}, errNotFound
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", manifestBody{}, regerrors.ErrUnavailable
-	}
-	var mb manifestBody
-	if err := json.NewDecoder(resp.Body).Decode(&mb); err != nil {
-		return "", manifestBody{}, regerrors.ErrUnavailable
-	}
-	return resp.Header.Get("Docker-Content-Digest"), mb, nil
-}
-
-// getConfigBlob читает image-config blob (GET /blobs/<digest>) и разбирает
-// платформу/created. 404/сбой → ошибка (caller трактует best-effort).
-func (c *Client) getConfigBlob(ctx context.Context, fullRepo, digest string) (imageConfig, error) {
-	var cfg imageConfig
-	if err := c.getJSON(ctx, "/v2/"+repoPath(fullRepo)+"/blobs/"+digest, &cfg); err != nil {
-		return imageConfig{}, err
-	}
-	return cfg, nil
-}
-
-// isImageConfig — config.mediaType контейнерного образа (docker/oci), чей blob несёт
-// architecture/os/created. helm-config и прочие артефакты сюда не попадают.
-func isImageConfig(mediaType string) bool {
-	return mediaType == "application/vnd.oci.image.config.v1+json" ||
-		mediaType == "application/vnd.docker.container.image.v1+json"
-}
-
 // platformString собирает "<os>/<arch>" (оба поля), либо только непустое, либо "".
 func platformString(os, arch string) string {
 	switch {
@@ -637,6 +589,133 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ou
 		_, _ = io.Copy(io.Discard, resp.Body)
 	}
 	return nil
+}
+
+// ---- search-ext GraphQL --------------------------------------------------
+
+// gqlPlatform — платформа манифеста (Os/Arch) в ImageList.
+type gqlPlatform struct {
+	Os   string `json:"Os"`
+	Arch string `json:"Arch"`
+}
+
+// gqlManifestSummary — один манифест образа. ArtifactType несёт config-mediaType
+// (дискриминатор helm/container); Platform — ОС/архитектура.
+type gqlManifestSummary struct {
+	ArtifactType string      `json:"ArtifactType"`
+	Platform     gqlPlatform `json:"Platform"`
+}
+
+// gqlImageSummary — элемент ImageList.Results: проекция одного тега. Size — string
+// int64; таймстампы — RFC3339 ("1970-01-01T00:00:00Z" = never). Manifests — платформы
+// (>1 → multi-arch index).
+type gqlImageSummary struct {
+	Tag               string               `json:"Tag"`
+	Digest            string               `json:"Digest"`
+	MediaType         string               `json:"MediaType"`
+	Size              string               `json:"Size"`
+	DownloadCount     int64                `json:"DownloadCount"`
+	PushTimestamp     string               `json:"PushTimestamp"`
+	LastPullTimestamp string               `json:"LastPullTimestamp"`
+	PushedBy          string               `json:"PushedBy"`
+	Manifests         []gqlManifestSummary `json:"Manifests"`
+}
+
+// gqlImageListData — data-обёртка ответа ImageList.
+type gqlImageListData struct {
+	ImageList struct {
+		Results []gqlImageSummary `json:"Results"`
+	} `json:"ImageList"`
+}
+
+// gqlRepoSummary — элемент GlobalSearch.Repos: per-repo агрегаты. Size — string int64;
+// LastUpdated — RFC3339 момента последнего push.
+type gqlRepoSummary struct {
+	Name          string `json:"Name"`
+	Size          string `json:"Size"`
+	LastUpdated   string `json:"LastUpdated"`
+	DownloadCount int64  `json:"DownloadCount"`
+}
+
+// gqlGlobalSearchData — data-обёртка ответа GlobalSearch.
+type gqlGlobalSearchData struct {
+	GlobalSearch struct {
+		Repos []gqlRepoSummary `json:"Repos"`
+	} `json:"GlobalSearch"`
+}
+
+// imageListQuery строит ImageList-запрос по full-repo (<registryID>/<repo>).
+func imageListQuery(fullRepo string) string {
+	return `{ImageList(repo:` + strconv.Quote(fullRepo) +
+		`){Results{Tag Digest MediaType Size DownloadCount PushTimestamp LastPullTimestamp PushedBy ` +
+		`Manifests{ArtifactType Platform{Os Arch}}}}}`
+}
+
+// globalSearchQuery строит GlobalSearch-запрос по namespace-префиксу (<registryID>/).
+func globalSearchQuery(query string) string {
+	return `{GlobalSearch(query:` + strconv.Quote(query) +
+		`){Repos{Name Size LastUpdated DownloadCount}}}`
+}
+
+// gqlQuery выполняет POST /v2/_zot/ext/search с телом {"query": query} и декодирует
+// поле data в out. Непустой errors, не-2xx, транспортный сбой или decode-ошибка →
+// ErrUnavailable (fail-closed: сырой zot-текст наружу не течёт).
+func (c *Client) gqlQuery(ctx context.Context, query string, out any) error {
+	reqBody, err := json.Marshal(map[string]string{"query": query})
+	if err != nil {
+		return regerrors.ErrUnavailable
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/v2/_zot/ext/search", bytes.NewReader(reqBody))
+	if err != nil {
+		return regerrors.ErrUnavailable
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return regerrors.ErrUnavailable
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return regerrors.ErrUnavailable
+	}
+	var wrapper struct {
+		Data   json.RawMessage `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if derr := json.NewDecoder(resp.Body).Decode(&wrapper); derr != nil {
+		return regerrors.ErrUnavailable
+	}
+	if len(wrapper.Errors) > 0 {
+		return regerrors.ErrUnavailable
+	}
+	if uerr := json.Unmarshal(wrapper.Data, out); uerr != nil {
+		return regerrors.ErrUnavailable
+	}
+	return nil
+}
+
+// parseZotTS разбирает RFC3339-таймстамп zot. Пусто, ошибка разбора или year<=1970
+// (zot-эпоха "никогда") → нулевой time.Time.
+func parseZotTS(s string) time.Time {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil || t.Year() <= 1970 {
+		return time.Time{}
+	}
+	return t
+}
+
+// parseInt64 разбирает строковый int64 (zot отдаёт Size строкой). Мусор → 0.
+func parseInt64(s string) int64 {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 var _ registry.ZotClient = (*Client)(nil)

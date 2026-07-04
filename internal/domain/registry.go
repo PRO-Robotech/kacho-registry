@@ -97,12 +97,23 @@ func (r Registry) Validate() error {
 // zot). Не хранится в БД kacho-registry; читается на request-path и
 // per-repo authz-фильтруется.
 type Repository struct {
-	RegistryID   string
-	Name         string
-	TagCount     int32
-	SizeBytes    int64
-	UpdatedAt    time.Time
-	ArtifactType ArtifactType // тип артефакта (best-effort по репрезентативному манифесту)
+	RegistryID string
+	Name       string
+	TagCount   int32
+	SizeBytes  int64
+	UpdatedAt  time.Time
+	// ArtifactType — доминирующий (первый) тип артефакта репозитория; для обратной
+	// совместимости фильтра. Полный набор — ArtifactTypes.
+	ArtifactType ArtifactType
+	// ArtifactTypes — упорядоченно-уникальный набор типов артефактов среди тегов.
+	// Репозиторий может одновременно содержать контейнерные образы И helm-чарты
+	// (mixed) — тогда набор несёт оба значения. Пусто — нет тегов / не классифицировано.
+	ArtifactTypes []ArtifactType
+	// LastPulledAt — момент последнего pull любого тега репозитория (max по тегам).
+	// Нулевой — ни один тег ещё не скачивался.
+	LastPulledAt time.Time
+	// DownloadCount — суммарное число скачиваний тегов репозитория (zot download-count).
+	DownloadCount int64
 }
 
 // Tag — output-only проекция тега/манифеста из zot (source of truth = zot).
@@ -117,6 +128,12 @@ type Tag struct {
 	// Architecture — платформа образа "<os>/<arch>" (из image-config), "multi-arch"
 	// для index-манифеста, либо пусто (helm-чарт / config без platform).
 	Architecture string
+	// LastPulledAt — момент последнего pull тега (zot last-pull). Нулевой — ни разу.
+	LastPulledAt time.Time
+	// PushedBy — subject, выполнивший push тега (zot pushed-by), если известен.
+	PushedBy string
+	// DownloadCount — число скачиваний тега (zot download-count).
+	DownloadCount int64
 }
 
 // RegistryStats — инфра-проекция namespace (repo/tag count, суммарный размер,

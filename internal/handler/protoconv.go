@@ -29,13 +29,23 @@ func toProtoRepository(r *domain.Repository) *registryv1.Repository {
 	if r == nil {
 		return nil
 	}
+	var types []registryv1.ArtifactType
+	if len(r.ArtifactTypes) > 0 {
+		types = make([]registryv1.ArtifactType, len(r.ArtifactTypes))
+		for i, at := range r.ArtifactTypes {
+			types[i] = registryv1.ArtifactType(at) // domain↔proto parity int32
+		}
+	}
 	return &registryv1.Repository{
-		RegistryId:   r.RegistryID,
-		Name:         r.Name,
-		TagCount:     r.TagCount,
-		SizeBytes:    r.SizeBytes,
-		UpdatedAt:    ts(r.UpdatedAt),
-		ArtifactType: registryv1.ArtifactType(r.ArtifactType), // domain↔proto parity int32
+		RegistryId:    r.RegistryID,
+		Name:          r.Name,
+		TagCount:      r.TagCount,
+		SizeBytes:     r.SizeBytes,
+		UpdatedAt:     ts(r.UpdatedAt),
+		ArtifactType:  registryv1.ArtifactType(r.ArtifactType), // domain↔proto parity int32
+		ArtifactTypes: types,
+		LastPulledAt:  ts(r.LastPulledAt),
+		DownloadCount: r.DownloadCount,
 	}
 }
 
@@ -45,14 +55,17 @@ func toProtoTag(t *domain.Tag) *registryv1.Tag {
 		return nil
 	}
 	return &registryv1.Tag{
-		RegistryId:   t.RegistryID,
-		Repository:   t.Repository,
-		Tag:          t.Tag,
-		Digest:       t.Digest,
-		SizeBytes:    t.SizeBytes,
-		MediaType:    t.MediaType,
-		CreatedAt:    ts(t.CreatedAt),
-		Architecture: t.Architecture,
+		RegistryId:    t.RegistryID,
+		Repository:    t.Repository,
+		Tag:           t.Tag,
+		Digest:        t.Digest,
+		SizeBytes:     t.SizeBytes,
+		MediaType:     t.MediaType,
+		CreatedAt:     ts(t.CreatedAt),
+		Architecture:  t.Architecture,
+		LastPulledAt:  ts(t.LastPulledAt),
+		PushedBy:      t.PushedBy,
+		DownloadCount: t.DownloadCount,
 	}
 }
 

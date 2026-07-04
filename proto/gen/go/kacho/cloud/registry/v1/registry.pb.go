@@ -275,11 +275,20 @@ type Repository struct {
 	TagCount int32 `protobuf:"varint,3,opt,name=tag_count,json=tagCount,proto3" json:"tag_count,omitempty"`
 	// Суммарный размер (байт) уникальных блобов репозитория.
 	SizeBytes int64 `protobuf:"varint,4,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
-	// Момент последнего обновления (последний push).
+	// Момент последнего push в репозиторий (last-pushed).
 	UpdatedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	// Output-only: тип артефакта (best-effort по репрезентативному манифесту).
-	// Позволяет отличить контейнерный образ от helm-чарта в UI-фильтре.
-	ArtifactType  ArtifactType `protobuf:"varint,6,opt,name=artifact_type,json=artifactType,proto3,enum=kacho.cloud.registry.v1.ArtifactType" json:"artifact_type,omitempty"`
+	// Output-only: доминирующий тип артефакта (первый из artifact_types) — для
+	// обратной совместимости фильтра. Полный набор — в artifact_types.
+	ArtifactType ArtifactType `protobuf:"varint,6,opt,name=artifact_type,json=artifactType,proto3,enum=kacho.cloud.registry.v1.ArtifactType" json:"artifact_type,omitempty"`
+	// Output-only: НАБОР типов артефактов среди тегов репозитория. Репозиторий может
+	// одновременно содержать контейнерные образы И helm-чарты (mixed) — тогда набор
+	// несёт оба значения. Пустой набор — нет тегов / не классифицировано.
+	ArtifactTypes []ArtifactType `protobuf:"varint,11,rep,packed,name=artifact_types,json=artifactTypes,proto3,enum=kacho.cloud.registry.v1.ArtifactType" json:"artifact_types,omitempty"`
+	// Output-only: момент последнего pull любого тега репозитория (last-pulled).
+	// Нулевой timestamp — ни один тег ещё не скачивался.
+	LastPulledAt *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=last_pulled_at,json=lastPulledAt,proto3" json:"last_pulled_at,omitempty"`
+	// Output-only: суммарное число скачиваний тегов репозитория (zot download-count).
+	DownloadCount int64 `protobuf:"varint,13,opt,name=download_count,json=downloadCount,proto3" json:"download_count,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -356,6 +365,27 @@ func (x *Repository) GetArtifactType() ArtifactType {
 	return ArtifactType_ARTIFACT_TYPE_UNSPECIFIED
 }
 
+func (x *Repository) GetArtifactTypes() []ArtifactType {
+	if x != nil {
+		return x.ArtifactTypes
+	}
+	return nil
+}
+
+func (x *Repository) GetLastPulledAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastPulledAt
+	}
+	return nil
+}
+
+func (x *Repository) GetDownloadCount() int64 {
+	if x != nil {
+		return x.DownloadCount
+	}
+	return 0
+}
+
 // Tag — тегированный образ (манифест) в репозитории. Read-only проекция из zot.
 type Tag struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -374,9 +404,16 @@ type Tag struct {
 	// Момент создания образа (из image-config, поле "created"). Пусто, если config
 	// его не несёт (напр. минимальный образ) или артефакт не контейнерный (helm).
 	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	// Платформа образа "<os>/<arch>" (напр. "linux/amd64") из image-config; для
-	// multi-arch index — "multi-arch"; для helm-чарта / неизвестного — пусто.
-	Architecture  string `protobuf:"bytes,8,opt,name=architecture,proto3" json:"architecture,omitempty"`
+	// Платформа образа "<os>/<arch>" (напр. "linux/amd64"); для multi-arch index —
+	// "multi-arch"; для helm-чарта / неизвестного — пусто.
+	Architecture string `protobuf:"bytes,8,opt,name=architecture,proto3" json:"architecture,omitempty"`
+	// Output-only: момент последнего pull тега (last-pulled). Нулевой timestamp —
+	// тег ещё не скачивался.
+	LastPulledAt *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=last_pulled_at,json=lastPulledAt,proto3" json:"last_pulled_at,omitempty"`
+	// Output-only: субъект последнего push (zot pushed-by), если известен.
+	PushedBy string `protobuf:"bytes,10,opt,name=pushed_by,json=pushedBy,proto3" json:"pushed_by,omitempty"`
+	// Output-only: число скачиваний тега (zot download-count).
+	DownloadCount int64 `protobuf:"varint,11,opt,name=download_count,json=downloadCount,proto3" json:"download_count,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -467,6 +504,27 @@ func (x *Tag) GetArchitecture() string {
 	return ""
 }
 
+func (x *Tag) GetLastPulledAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastPulledAt
+	}
+	return nil
+}
+
+func (x *Tag) GetPushedBy() string {
+	if x != nil {
+		return x.PushedBy
+	}
+	return ""
+}
+
+func (x *Tag) GetDownloadCount() int64 {
+	if x != nil {
+		return x.DownloadCount
+	}
+	return 0
+}
+
 var File_kacho_cloud_registry_v1_registry_proto protoreflect.FileDescriptor
 
 const file_kacho_cloud_registry_v1_registry_proto_rawDesc = "" +
@@ -487,7 +545,7 @@ const file_kacho_cloud_registry_v1_registry_proto_rawDesc = "" +
 	" \x01(\x0e2'.kacho.cloud.registry.v1.RegistryStatusR\x06status\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x84\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xbb\x03\n" +
 	"\n" +
 	"Repository\x12\x1f\n" +
 	"\vregistry_id\x18\x01 \x01(\tR\n" +
@@ -498,7 +556,10 @@ const file_kacho_cloud_registry_v1_registry_proto_rawDesc = "" +
 	"size_bytes\x18\x04 \x01(\x03R\tsizeBytes\x129\n" +
 	"\n" +
 	"updated_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12J\n" +
-	"\rartifact_type\x18\x06 \x01(\x0e2%.kacho.cloud.registry.v1.ArtifactTypeR\fartifactType\"\x8d\x02\n" +
+	"\rartifact_type\x18\x06 \x01(\x0e2%.kacho.cloud.registry.v1.ArtifactTypeR\fartifactType\x12L\n" +
+	"\x0eartifact_types\x18\v \x03(\x0e2%.kacho.cloud.registry.v1.ArtifactTypeR\rartifactTypes\x12@\n" +
+	"\x0elast_pulled_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\flastPulledAt\x12%\n" +
+	"\x0edownload_count\x18\r \x01(\x03R\rdownloadCount\"\x93\x03\n" +
 	"\x03Tag\x12\x1f\n" +
 	"\vregistry_id\x18\x01 \x01(\tR\n" +
 	"registryId\x12\x1e\n" +
@@ -513,7 +574,11 @@ const file_kacho_cloud_registry_v1_registry_proto_rawDesc = "" +
 	"media_type\x18\x06 \x01(\tR\tmediaType\x129\n" +
 	"\n" +
 	"created_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12\"\n" +
-	"\farchitecture\x18\b \x01(\tR\farchitecture*k\n" +
+	"\farchitecture\x18\b \x01(\tR\farchitecture\x12@\n" +
+	"\x0elast_pulled_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\flastPulledAt\x12\x1b\n" +
+	"\tpushed_by\x18\n" +
+	" \x01(\tR\bpushedBy\x12%\n" +
+	"\x0edownload_count\x18\v \x01(\x03R\rdownloadCount*k\n" +
 	"\x0eRegistryStatus\x12\x1f\n" +
 	"\x1bREGISTRY_STATUS_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16REGISTRY_STATUS_ACTIVE\x10\x01\x12\x1c\n" +
@@ -553,12 +618,15 @@ var file_kacho_cloud_registry_v1_registry_proto_depIdxs = []int32{
 	0, // 2: kacho.cloud.registry.v1.Registry.status:type_name -> kacho.cloud.registry.v1.RegistryStatus
 	6, // 3: kacho.cloud.registry.v1.Repository.updated_at:type_name -> google.protobuf.Timestamp
 	1, // 4: kacho.cloud.registry.v1.Repository.artifact_type:type_name -> kacho.cloud.registry.v1.ArtifactType
-	6, // 5: kacho.cloud.registry.v1.Tag.created_at:type_name -> google.protobuf.Timestamp
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	1, // 5: kacho.cloud.registry.v1.Repository.artifact_types:type_name -> kacho.cloud.registry.v1.ArtifactType
+	6, // 6: kacho.cloud.registry.v1.Repository.last_pulled_at:type_name -> google.protobuf.Timestamp
+	6, // 7: kacho.cloud.registry.v1.Tag.created_at:type_name -> google.protobuf.Timestamp
+	6, // 8: kacho.cloud.registry.v1.Tag.last_pulled_at:type_name -> google.protobuf.Timestamp
+	9, // [9:9] is the sub-list for method output_type
+	9, // [9:9] is the sub-list for method input_type
+	9, // [9:9] is the sub-list for extension type_name
+	9, // [9:9] is the sub-list for extension extendee
+	0, // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_kacho_cloud_registry_v1_registry_proto_init() }
