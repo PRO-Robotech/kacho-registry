@@ -132,25 +132,39 @@ type IAMClient interface {
 	ProjectExists(ctx context.Context, projectID string) error
 }
 
-// UseCase — бизнес-логика Registry поверх портов (CQRS repo + zot + iam) и
-// LRO-стека operations.
+// RepoRegistrar — порт эмита owner/parent-tuple intent'ов репозитория в
+// registry_outbox (тот же transactional-outbox, что CRUD реестра). Repo как
+// authz-объект появляется на первом push (register) и снимается на удалении
+// последнего тега (unregister) — оба через durable-intent, применяемый
+// register-drainer'ом через fga-proxy идемпотентно. Реализуется pg.RegistryRepo.
+type RepoRegistrar interface {
+	// RegisterRepository эмитит register-intent (parent+owner tuple) нового repo.
+	RegisterRepository(ctx context.Context, intent domain.RegisterIntent) error
+	// UnregisterRepository эмитит unregister-intent repo (снятие parent-tuple).
+	UnregisterRepository(ctx context.Context, intent domain.RegisterIntent) error
+}
+
+// UseCase — бизнес-логика Registry поверх портов (CQRS repo + zot + iam +
+// repo-registrar) и LRO-стека operations.
 type UseCase struct {
 	reader       RegistryReader
 	writer       RegistryWriter
 	zot          ZotClient
 	iam          IAMClient
+	repoReg      RepoRegistrar
 	ops          operations.Repo
 	endpointBase string
 }
 
 // New собирает UseCase. reader/writer — одна pg-реализация (CQRS-разделение на
-// уровне портов); ops — corelib LRO-репозиторий; endpointBase — tenant-facing
-// база для output-only Registry.endpoint ("<base>/<id>").
-func New(reader RegistryReader, writer RegistryWriter, zot ZotClient, iam IAMClient, ops operations.Repo, endpointBase string) *UseCase {
+// уровне портов); repoReg эмитит repo-tuple intent'ы (register-on-first-push /
+// unregister-on-last-tag); ops — corelib LRO-репозиторий; endpointBase —
+// tenant-facing база для output-only Registry.endpoint ("<base>/<id>").
+func New(reader RegistryReader, writer RegistryWriter, zot ZotClient, iam IAMClient, repoReg RepoRegistrar, ops operations.Repo, endpointBase string) *UseCase {
 	if endpointBase == "" {
 		endpointBase = "registry.kacho.local"
 	}
-	return &UseCase{reader: reader, writer: writer, zot: zot, iam: iam, ops: ops, endpointBase: endpointBase}
+	return &UseCase{reader: reader, writer: writer, zot: zot, iam: iam, repoReg: repoReg, ops: ops, endpointBase: endpointBase}
 }
 
 // EndpointFor возвращает tenant-facing OCI-endpoint реестра ("<base>/<id>").

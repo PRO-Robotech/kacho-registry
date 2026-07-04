@@ -14,6 +14,8 @@ import (
 	"github.com/PRO-Robotech/kacho-corelib/ids"
 	"github.com/PRO-Robotech/kacho-corelib/operations"
 	registryv1 "github.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1"
+
+	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
 
 // DeleteTag — async удаление тега/манифеста в zot (проекция read-only, source of
@@ -57,10 +59,36 @@ func (u *UseCase) DeleteTag(ctx context.Context, registryID, repository, tag str
 		if derr := u.zot.DeleteTag(wctx, registryID, repository, tag); derr != nil {
 			return nil, mapRepoErr(derr)
 		}
+		if uerr := u.unregisterRepoIfEmpty(wctx, registryID, repository); uerr != nil {
+			return nil, uerr
+		}
 		return emptyAny()
 	})
 
 	return &op, nil
+}
+
+// unregisterRepoIfEmpty — при удалении последнего тега repo эмитит unregister-intent
+// registry_repository:<reg>/<repo> (не оставляем висячий authz-объект). Читает
+// остаток тегов из zot; ошибка чтения → проброс (worker ретраит идемпотентно:
+// zot.DeleteTag no-op на уже-удалённый тег, повторный unregister-intent идемпотентен
+// в iam). repoReg==nil (breakglass) → no-op.
+func (u *UseCase) unregisterRepoIfEmpty(ctx context.Context, registryID, repository string) error {
+	if u.repoReg == nil {
+		return nil
+	}
+	tags, _, err := u.zot.ListTags(ctx, TagListQuery{RegistryID: registryID, Repository: repository})
+	if err != nil {
+		return mapRepoErr(err)
+	}
+	if len(tags) > 0 {
+		return nil // repo ещё непуст — authz-объект жив
+	}
+	intent := domain.UnregisterIntentForRepo(registryID, repository)
+	if uerr := u.repoReg.UnregisterRepository(ctx, intent); uerr != nil {
+		return mapRepoErr(uerr)
+	}
+	return nil
 }
 
 // TriggerGC — async garbage collection namespace в zot (Internal admin, :9091).

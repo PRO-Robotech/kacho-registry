@@ -359,3 +359,28 @@ func TestRepo_REG36_UpdateMutable_LabelClear(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, got.Labels)
 }
+
+// REG-14/REG-25 — repo-tuple intent emit: RegisterRepository пишет fga.register-строку
+// registry_repository (register-on-first-push), UnregisterRepository — fga.unregister
+// (unregister-on-last-tag). У repo нет ресурсной строки (source of truth = zot) —
+// проверяем только durable-emit в registry_outbox.
+func TestRepo_REG14_RepoTupleIntent_Emit(t *testing.T) {
+	pool := setupTestDB(t)
+	repo := kachopg.NewRegistryRepo(pool)
+	ctx := context.Background()
+
+	regID := "regREPOTUPLE000000000"
+	regIntent := domain.RegisterIntentForRepoPush(regID, "app", "service_account:sva-ci")
+	require.NoError(t, repo.RegisterRepository(ctx, regIntent))
+	require.Equal(t, 1, countOutbox(t, pool, regID+"/app", domain.FGAEventRegister),
+		"register-on-first-push emits one repo register-intent")
+
+	unregIntent := domain.UnregisterIntentForRepo(regID, "app")
+	require.NoError(t, repo.UnregisterRepository(ctx, unregIntent))
+	require.Equal(t, 1, countOutbox(t, pool, regID+"/app", domain.FGAEventUnregister),
+		"unregister-on-last-tag emits one repo unregister-intent")
+
+	// Пустой tuple-набор → no-op (нечего регистрировать).
+	require.NoError(t, repo.RegisterRepository(ctx, domain.RegisterIntent{Kind: "Repository", ResourceID: regID + "/empty"}))
+	require.Equal(t, 0, countOutbox(t, pool, regID+"/empty", domain.FGAEventRegister))
+}

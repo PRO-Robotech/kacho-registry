@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
 )
 
@@ -41,6 +42,50 @@ func TestRegistry_REG25_DeleteTag_HappyPath(t *testing.T) {
 	// REG-27: worker не уходит анонимно — principal проброшен в worker-ctx.
 	require.Equal(t, "usr-alice", call.principal.ID)
 	require.Equal(t, "user", call.principal.Type)
+}
+
+// REG-25 (imp-4) — DeleteTag последнего тега repo: после удаления repo пуст
+// (ListTags == []) → worker эмитит UnregisterResource-intent на
+// registry_repository:<reg>/<repo> (не оставлять висячий authz-объект).
+func TestRegistry_REG25_DeleteTag_UnregisterOnLastTag(t *testing.T) {
+	zot := &mockZot{listTagsResult: nil} // после удаления тегов не осталось
+	ops := newMemOps()
+	reg := &mockRepoReg{}
+	uc := newUCWithReg(&mockRepo{}, zot, &mockIAM{}, ops, reg)
+
+	op, err := uc.DeleteTag(aliceCtx(), validRegID, "app", "v1")
+	require.NoError(t, err)
+	done := awaitOpDone(t, ops, op.ID)
+	require.Nil(t, done.Error)
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	require.Len(t, reg.unregisterIntent, 1, "last-tag removal emits repo unregister-intent")
+	intent := reg.unregisterIntent[0]
+	require.Equal(t, "Repository", intent.Kind)
+	require.Equal(t, validRegID+"/app", intent.ResourceID)
+	require.NotEmpty(t, intent.Tuples)
+	// parent-tuple снимается: registry_repository:<reg>/app #parent @registry_registry:<reg>.
+	require.Equal(t, "registry_repository:"+validRegID+"/app", intent.Tuples[0].Object)
+	require.Equal(t, "parent", intent.Tuples[0].Relation)
+}
+
+// REG-25 (imp-4) — DeleteTag НЕ последнего тега: repo ещё содержит теги
+// (ListTags != []) → unregister-intent НЕ эмитится (authz-объект жив).
+func TestRegistry_REG25_DeleteTag_TagsRemain_NoUnregister(t *testing.T) {
+	zot := &mockZot{listTagsResult: []*domain.Tag{{Tag: "v2"}}} // остаётся v2
+	ops := newMemOps()
+	reg := &mockRepoReg{}
+	uc := newUCWithReg(&mockRepo{}, zot, &mockIAM{}, ops, reg)
+
+	op, err := uc.DeleteTag(aliceCtx(), validRegID, "app", "v1")
+	require.NoError(t, err)
+	done := awaitOpDone(t, ops, op.ID)
+	require.Nil(t, done.Error)
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	require.Empty(t, reg.unregisterIntent, "repo still has tags → no unregister")
 }
 
 // REG-25 — DeleteTag: malformed registry id / пустые repo|tag → синхронный

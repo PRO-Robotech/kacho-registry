@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -30,7 +31,9 @@ import (
 	"github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/config"
 	"github.com/PRO-Robotech/kacho-registry/internal/check"
 	iamclient "github.com/PRO-Robotech/kacho-registry/internal/clients/iam"
+	"github.com/PRO-Robotech/kacho-registry/internal/clients/jwks"
 	zotclient "github.com/PRO-Robotech/kacho-registry/internal/clients/zot"
+	"github.com/PRO-Robotech/kacho-registry/internal/dataplane"
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 	"github.com/PRO-Robotech/kacho-registry/internal/handler"
 	"github.com/PRO-Robotech/kacho-registry/internal/repo/kacho/pg"
@@ -90,8 +93,8 @@ func runServe(cfg config.Config) error {
 	zotAdapter := zotclient.New(cfg.ZotAddr)
 	iamAdapter := iamclient.New(iamConn)
 
-	// ── use-case (CQRS repo + zot + iam + LRO) ──
-	registryUC := registry.New(registryRepo, registryRepo, zotAdapter, iamAdapter, opsRepo, cfg.EndpointBase)
+	// ── use-case (CQRS repo + zot + iam + repo-registrar + LRO) ──
+	registryUC := registry.New(registryRepo, registryRepo, zotAdapter, iamAdapter, registryRepo, opsRepo, cfg.EndpointBase)
 
 	// ── register-drainer: owner-tuple register/unregister intent из registry_outbox
 	// применяется через kacho-iam fga-proxy (:9091, mTLS, идемпотентно, at-least-once,
@@ -200,6 +203,22 @@ func runServe(cfg config.Config) error {
 	operationpb.RegisterOperationServiceServer(grpcSrv, opHandler)
 	operationpb.RegisterOperationServiceServer(internalSrv, opHandler)
 
+	// ── data-plane OCI auth-proxy (registry.kacho.local): отдельный HTTP-листенер,
+	// Docker Registry v2 / OCI token-auth flow перед zot. per-request JWKS-verify +
+	// InternalIAMService.Check + existence-hiding + stream-proxy. Отдельно от gRPC.
+	var dpServer *http.Server
+	if cfg.DataplaneAddr != "" {
+		dpHandler, dperr := buildDataplaneHandler(cfg, authzConn, registryRepo, zotAdapter, logger)
+		if dperr != nil {
+			return fmt.Errorf("build data-plane proxy: %w", dperr)
+		}
+		dpServer = &http.Server{
+			Addr:              cfg.DataplaneAddr,
+			Handler:           dpHandler,
+			ReadHeaderTimeout: 15 * time.Second,
+		}
+	}
+
 	listener, err := net.Listen("tcp", ":"+cfg.GrpcPort)
 	if err != nil {
 		return err
@@ -214,6 +233,7 @@ func runServe(cfg config.Config) error {
 		"internal_mtls", cfg.InternalServerMTLS.Enable,
 		"public_port", cfg.GrpcPort,
 		"internal_port", cfg.InternalGrpcPort,
+		"dataplane_addr", cfg.DataplaneAddr,
 		"zot_addr", cfg.ZotAddr)
 
 	shutdownDone := make(chan struct{})
@@ -222,6 +242,15 @@ func runServe(cfg config.Config) error {
 		<-ctx.Done()
 		internalSrv.GracefulStop()
 		grpcSrv.GracefulStop()
+		// Graceful drain data-plane HTTP: перестаёт принимать новые, дожидается
+		// in-flight docker push/pull в пределах bounded-таймаута.
+		if dpServer != nil {
+			dpCtx, cancelDP := context.WithTimeout(context.Background(), 15*time.Second)
+			if serr := dpServer.Shutdown(dpCtx); serr != nil {
+				logger.Warn("data-plane proxy shutdown", "err", serr)
+			}
+			cancelDP()
+		}
 		// Дренируем in-flight LRO-worker'ы: SIGTERM не должен оставить async-мутацию
 		// done=false навсегда (клиент завис бы в polling). Свежий ctx — request-ctx
 		// уже отменён возвратом Operation клиенту.
@@ -239,10 +268,46 @@ func runServe(cfg config.Config) error {
 		}
 	}()
 
+	if dpServer != nil {
+		go func() {
+			if serr := dpServer.ListenAndServe(); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
+				logger.Error("data-plane proxy stopped", "err", serr)
+			}
+		}()
+	}
+
 	serveErr := grpcSrv.Serve(listener)
 	cancel()
 	<-shutdownDone
 	return serveErr
+}
+
+// buildDataplaneHandler собирает data-plane OCI auth-proxy (fail-closed). Штатно:
+// JWKS-verify identity-JWT (RS256) + per-request InternalIAMService.Check + zot
+// stream-proxy. breakglass → bypass AuthN+AuthZ (аварийный режим, как gRPC-листенеры).
+func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoReg dataplane.RepoRegistrar, backend dataplane.Backend, logger *slog.Logger) (http.Handler, error) {
+	forwarder, err := dataplane.NewZotForwarder(cfg.ZotAddr, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	var verifier dataplane.TokenVerifier
+	var authorizer dataplane.Authorizer
+	if cfg.AuthZBreakglass {
+		logger.Warn("BREAKGLASS active: data-plane AuthN+AuthZ bypassed (emergency mode)")
+	} else {
+		if cfg.IAMJWKSURL == "" {
+			return nil, errors.New("data-plane requires KACHO_REGISTRY_IAM_JWKS_URL (or KACHO_REGISTRY_AUTHZ_BREAKGLASS=true to bypass)")
+		}
+		if authzConn == nil {
+			return nil, errors.New("data-plane requires authz IAM conn (KACHO_REGISTRY_AUTHZ_IAM_GRPC_ADDR)")
+		}
+		verifier = jwks.New(cfg.IAMJWKSURL, cfg.ServiceAud, cfg.TokenIssuer)
+		authorizer = check.NewIAMCheckClient(authzConn)
+	}
+
+	return dataplane.New(verifier, authorizer, backend, forwarder, repoReg,
+		cfg.TokenRealm, cfg.ServiceAud, logger), nil
 }
 
 // validateAuthMode разбирает KACHO_REGISTRY_AUTH_MODE (whitelist) и строгость

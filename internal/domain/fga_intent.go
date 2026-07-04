@@ -36,6 +36,11 @@ const FGAObjectTypeRepository = "registry_repository"
 const (
 	FGARelationProject = "project"
 	FGARelationOwner   = "owner"
+	// FGARelationParent — hierarchy-relation репозитория к его namespace-реестру
+	// (registry_repository #parent @registry_registry). Входит в allowedProxyRelations
+	// iam (fga-proxy privilege-guard): модуль вправе проксировать только
+	// {project,account,parent,owner}.
+	FGARelationParent = "parent"
 )
 
 // FGA register-intent event-types (parity с CHECK-constraint registry_outbox и с
@@ -171,6 +176,59 @@ func UnregisterIntentForDelete(registryID, projectID string) RegisterIntent {
 		Kind:       "Registry",
 		ResourceID: registryID,
 		Tuples:     []FGATuple{FGAProjectTuple(registryID, projectID)},
+	}
+}
+
+// repoObjectID — FGA object-id репозитория "<registryID>/<repo>".
+func repoObjectID(registryID, repo string) string { return registryID + "/" + repo }
+
+// FGARepoParentTuple — parent-hierarchy tuple репозитория
+// "registry_registry:<reg> #parent @registry_repository:<reg>/<repo>". Линкует repo
+// к namespace-реестру (наследование tier'ов project→registry→repository).
+func FGARepoParentTuple(registryID, repo string) FGATuple {
+	return FGATuple{
+		SubjectID: FGAObjectRef(FGAObjectTypeRegistry, registryID),
+		Relation:  FGARelationParent,
+		Object:    FGAObjectRef(FGAObjectTypeRepository, repoObjectID(registryID, repo)),
+	}
+}
+
+// FGARepoOwnerTuple — creator owner-tuple репозитория
+// "<subject> #owner @registry_repository:<reg>/<repo>". subject — FGA subject-строка
+// толкающего principal ("service_account:sva…"); пустой subject → tuple пропускается.
+func FGARepoOwnerTuple(registryID, repo, subject string) FGATuple {
+	return FGATuple{
+		SubjectID: subject,
+		Relation:  FGARelationOwner,
+		Object:    FGAObjectRef(FGAObjectTypeRepository, repoObjectID(registryID, repo)),
+	}
+}
+
+// RegisterIntentForRepoPush — intent на первый push нового repo: parent-tuple ПЕРВЫМ
+// (repo линкуется к реестру раньше creator-tuple — тот же урок порядка, что для
+// project→owner), затем (при аутентифицированном pushing-principal) owner-tuple.
+// Repo не label-selectable → Labels/ParentProjectID не несёт (доступ наследуется
+// через parent→registry→project). subject — FGA subject толкающего.
+func RegisterIntentForRepoPush(registryID, repo, subject string) RegisterIntent {
+	tuples := []FGATuple{FGARepoParentTuple(registryID, repo)}
+	if subject != "" {
+		tuples = append(tuples, FGARepoOwnerTuple(registryID, repo, subject))
+	}
+	return RegisterIntent{
+		Kind:       "Repository",
+		ResourceID: repoObjectID(registryID, repo),
+		Tuples:     tuples,
+	}
+}
+
+// UnregisterIntentForRepo — unregister-intent на удаление последнего тега repo:
+// снимает parent-tuple registry_repository:<reg>/<repo> (owner-tuple снимается
+// iam-side GC при unregister parent-hierarchy) — не оставляем висячий authz-объект.
+func UnregisterIntentForRepo(registryID, repo string) RegisterIntent {
+	return RegisterIntent{
+		Kind:       "Repository",
+		ResourceID: repoObjectID(registryID, repo),
+		Tuples:     []FGATuple{FGARepoParentTuple(registryID, repo)},
 	}
 }
 

@@ -56,6 +56,23 @@ type Config struct {
 	// никогда не публично достижим; клиент ходит на cluster-internal endpoint.
 	ZotAddr string `envconfig:"KACHO_REGISTRY_ZOT_ADDR" default:""`
 
+	// ===== data-plane OCI auth-proxy (registry.kacho.local) =====
+
+	// DataplaneAddr — адрес data-plane HTTP-листенера (Docker Registry v2 / OCI).
+	// Отдельный порт от gRPC :9090/:9091. Пусто → data-plane не поднимается.
+	DataplaneAddr string `envconfig:"KACHO_REGISTRY_DATAPLANE_ADDR" default:":8080"`
+	// IAMJWKSURL — IAM JWKS-endpoint для верификации identity-JWT data-plane
+	// (RS256). Пусто + не breakglass → data-plane fail-closed на старте.
+	IAMJWKSURL string `envconfig:"KACHO_REGISTRY_IAM_JWKS_URL" default:""`
+	// TokenRealm — realm для WWW-Authenticate (IAM /token auth-server); docker
+	// сам идёт туда за Bearer-токеном.
+	TokenRealm string `envconfig:"KACHO_REGISTRY_TOKEN_REALM" default:"https://api.kacho.local/iam/token"`
+	// ServiceAud — expected audience identity-JWT (наш service) + значение service=
+	// в WWW-Authenticate.
+	ServiceAud string `envconfig:"KACHO_REGISTRY_SERVICE_AUD" default:"registry.kacho.local"`
+	// TokenIssuer — expected issuer identity-JWT (пусто → iss не проверяется).
+	TokenIssuer string `envconfig:"KACHO_REGISTRY_TOKEN_ISSUER" default:""`
+
 	// EndpointBase — tenant-facing base OCI-endpoint namespace. Output-only поле
 	// Registry.endpoint = "<EndpointBase>/<id>". Это tenant-facing ingress-host;
 	// инфра-адрес zot наружу не раскрывается (security.md §инфра-данные).

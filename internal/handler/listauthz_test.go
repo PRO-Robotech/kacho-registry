@@ -207,7 +207,7 @@ func TestHandler_REG25_DeleteTag_AuthzGate(t *testing.T) {
 // ---- fakes для handler-method тестов --------------------------------------
 
 func newTestHandler(zot registry.ZotClient, az Authorizer) *RegistryHandler {
-	uc := registry.New(stubRepo{}, stubRepo{}, zot, stubIAM{}, newMemOpsH(), "registry.kacho.local")
+	uc := registry.New(stubRepo{}, stubRepo{}, zot, stubIAM{}, stubRepo{}, newMemOpsH(), "registry.kacho.local")
 	return NewRegistryHandler(uc, az)
 }
 
@@ -225,8 +225,10 @@ func (stubRepo) Insert(context.Context, *domain.Registry, domain.RegisterIntent)
 func (stubRepo) Update(context.Context, registry.UpdateSpec, func(*domain.Registry) domain.RegisterIntent) (*domain.Registry, error) {
 	return nil, nil
 }
-func (stubRepo) MarkDeleting(context.Context, string) (*domain.Registry, error) { return nil, nil }
-func (stubRepo) Delete(context.Context, string, domain.RegisterIntent) error    { return nil }
+func (stubRepo) MarkDeleting(context.Context, string) (*domain.Registry, error)    { return nil, nil }
+func (stubRepo) Delete(context.Context, string, domain.RegisterIntent) error       { return nil }
+func (stubRepo) RegisterRepository(context.Context, domain.RegisterIntent) error   { return nil }
+func (stubRepo) UnregisterRepository(context.Context, domain.RegisterIntent) error { return nil }
 
 type stubIAM struct{}
 

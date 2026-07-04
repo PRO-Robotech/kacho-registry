@@ -281,6 +281,72 @@ func (c *Client) Stats(ctx context.Context, registryID string) (*domain.Registry
 	return stats, nil
 }
 
+// ---- data-plane Backend (authz-интроспекция; не reverse-proxy) ------------
+
+// RepoExists сообщает, зарегистрирован ли repo (несёт ≥1 тег) — data-plane
+// verb-map push-new (v_create@namespace) vs push-existing (v_update@repo). zot
+// недоступен → ErrUnavailable (fail-closed: не решаем new/existing вслепую).
+func (c *Client) RepoExists(ctx context.Context, registryID, repo string) (bool, error) {
+	if err := c.ready(); err != nil {
+		return false, err
+	}
+	tags, err := c.repoTags(ctx, registryID+"/"+repo)
+	if err != nil {
+		return false, err
+	}
+	return len(tags) > 0, nil
+}
+
+// CatalogRepoNames возвращает полный zot-каталог (full-repo-имена всех namespace'ов)
+// для per-repo listauthz-фильтрации _catalog в data-plane. zot недоступен →
+// ErrUnavailable (fail-closed — не отдаём частичный каталог).
+func (c *Client) CatalogRepoNames(ctx context.Context) ([]string, error) {
+	if err := c.ready(); err != nil {
+		return nil, err
+	}
+	var cat catalogResponse
+	if err := c.getJSON(ctx, "/v2/_catalog", &cat); err != nil {
+		return nil, err
+	}
+	out := append([]string(nil), cat.Repositories...)
+	sort.Strings(out)
+	return out, nil
+}
+
+// BlobInRepo проверяет per-repo blob-scope (REG-37): <digest> достижим только если
+// входит в config/layers манифеста(ов) авторизованного repo. Cross-reference:
+// перебирает теги repo, читает манифесты, собирает уникальные блоб-digest'ы. Чужой
+// content-addressable блоб (принадлежит манифесту другого repo) → false. zot
+// недоступен → ErrUnavailable (fail-closed).
+func (c *Client) BlobInRepo(ctx context.Context, registryID, repo, digest string) (bool, error) {
+	if err := c.ready(); err != nil {
+		return false, err
+	}
+	fullRepo := registryID + "/" + repo
+	tags, err := c.repoTags(ctx, fullRepo)
+	if err != nil {
+		return false, err
+	}
+	for _, tag := range tags {
+		mb, merr := c.getManifest(ctx, fullRepo, tag)
+		if merr != nil {
+			if merr == errNotFound {
+				continue // тег исчез между list и read — пропускаем
+			}
+			return false, merr
+		}
+		if mb.Config.Digest == digest {
+			return true, nil
+		}
+		for _, l := range mb.Layers {
+			if l.Digest == digest {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // ---- HTTP helpers ---------------------------------------------------------
 
 // errNotFound — внутренний sentinel: zot ответил 404 (тег/манифест/repo отсутствует).

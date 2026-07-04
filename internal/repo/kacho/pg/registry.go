@@ -284,6 +284,44 @@ func (r *RegistryRepo) Delete(ctx context.Context, id string, intent domain.Regi
 	return nil
 }
 
+// RegisterRepository эмитит register-intent (parent+owner tuple) нового repo в
+// registry_outbox. У repo нет собственной ресурсной строки в БД (source of truth =
+// zot) — outbox-строка durable сама по себе, поэтому пишется одиночной tx. Register-
+// drainer применяет её через fga-proxy идемпотентно (повторный push того же repo даёт
+// дубль-intent, iam дедуплицирует → AlreadyApplied).
+func (r *RegistryRepo) RegisterRepository(ctx context.Context, intent domain.RegisterIntent) error {
+	return r.emitRepoIntent(ctx, domain.FGAEventRegister, intent)
+}
+
+// UnregisterRepository эмитит unregister-intent repo (снятие parent-tuple) в
+// registry_outbox — снятие висячего authz-объекта на удалении последнего тега.
+func (r *RegistryRepo) UnregisterRepository(ctx context.Context, intent domain.RegisterIntent) error {
+	return r.emitRepoIntent(ctx, domain.FGAEventUnregister, intent)
+}
+
+// emitRepoIntent — durable-emit repo-intent одиночной tx (у repo нет ресурсной DML,
+// с которой надо было бы атомарить). Пустой набор tuple → no-op.
+func (r *RegistryRepo) emitRepoIntent(ctx context.Context, eventType string, intent domain.RegisterIntent) error {
+	if err := r.ready(); err != nil {
+		return err
+	}
+	if len(intent.Tuples) == 0 {
+		return nil
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return regerrors.Wrap(err, "registry_outbox", intent.ResourceID)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := emitFGAIntent(ctx, tx, eventType, intent); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return regerrors.Wrap(err, "registry_outbox", intent.ResourceID)
+	}
+	return nil
+}
+
 // ---- helpers ----
 
 // scanRegistry читает строку реестра из pgx.Row/pgx.Rows в domain.Registry.
@@ -376,3 +414,4 @@ func invalidFilterErr(err error) error {
 }
 
 var _ registry.RegistryRepo = (*RegistryRepo)(nil)
+var _ registry.RepoRegistrar = (*RegistryRepo)(nil)

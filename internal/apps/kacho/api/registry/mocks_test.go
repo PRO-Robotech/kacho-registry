@@ -114,6 +114,11 @@ type mockZot struct {
 	deleteTagErr  error
 	deleteTagCall []deleteTagCall
 
+	// listTagsResult / listTagsErr — то, что вернёт ListTags (проверка
+	// unregister-on-last-tag: после DeleteTag worker читает остаток тегов repo).
+	listTagsResult []*domain.Tag
+	listTagsErr    error
+
 	triggerGCErr   error
 	triggerGCCalls []string
 }
@@ -122,7 +127,9 @@ func (z *mockZot) ListRepositories(ctx context.Context, q registry.RepoListQuery
 	return nil, "", nil
 }
 func (z *mockZot) ListTags(ctx context.Context, q registry.TagListQuery) ([]*domain.Tag, string, error) {
-	return nil, "", nil
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	return z.listTagsResult, "", z.listTagsErr
 }
 func (z *mockZot) DeleteTag(ctx context.Context, registryID, repository, tag string) error {
 	z.mu.Lock()
@@ -171,6 +178,30 @@ func (i *mockIAM) ProjectExists(ctx context.Context, projectID string) error {
 		return i.projectFn(ctx, projectID)
 	}
 	return nil
+}
+
+// ---- mock RepoRegistrar (register/unregister repo-tuple outbox intent) -----
+
+type mockRepoReg struct {
+	mu               sync.Mutex
+	registerIntents  []domain.RegisterIntent
+	unregisterIntent []domain.RegisterIntent
+	registerErr      error
+	unregisterErr    error
+}
+
+func (m *mockRepoReg) RegisterRepository(ctx context.Context, intent domain.RegisterIntent) error {
+	m.mu.Lock()
+	m.registerIntents = append(m.registerIntents, intent)
+	m.mu.Unlock()
+	return m.registerErr
+}
+
+func (m *mockRepoReg) UnregisterRepository(ctx context.Context, intent domain.RegisterIntent) error {
+	m.mu.Lock()
+	m.unregisterIntent = append(m.unregisterIntent, intent)
+	m.mu.Unlock()
+	return m.unregisterErr
 }
 
 // ---- in-memory operations.Repo + AwaitOpDone -----------------------------
@@ -247,9 +278,15 @@ func awaitOpDone(t *testing.T, ops *memOps, id string) *operations.Operation {
 	return nil
 }
 
-// newUC собирает UseCase поверх mock-портов + in-memory ops.
+// newUC собирает UseCase поверх mock-портов + in-memory ops (repo-registrar —
+// no-op mock, чтобы существующие CRUD-тесты не заботились о нём).
 func newUC(repo *mockRepo, zot *mockZot, iam *mockIAM, ops *memOps) *registry.UseCase {
-	return registry.New(repo, repo, zot, iam, ops, "registry.kacho.local")
+	return newUCWithReg(repo, zot, iam, ops, &mockRepoReg{})
+}
+
+// newUCWithReg — вариант с явным RepoRegistrar (для проверки unregister-on-last-tag).
+func newUCWithReg(repo *mockRepo, zot *mockZot, iam *mockIAM, ops *memOps, reg *mockRepoReg) *registry.UseCase {
+	return registry.New(repo, repo, zot, iam, reg, ops, "registry.kacho.local")
 }
 
 // aliceCtx — ctx с аутентифицированным principal (owner-tuple → user:usr-alice).
