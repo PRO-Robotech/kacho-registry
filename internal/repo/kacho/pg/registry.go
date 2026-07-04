@@ -63,6 +63,21 @@ func (r *RegistryRepo) Get(ctx context.Context, id string) (*domain.Registry, er
 	return reg, nil
 }
 
+// RegistryProjectID — узкий lookup owning-project реестра по id (data-plane
+// register-on-first-push: интент репо должен нести ParentProjectID для containment
+// scope в iam-mirror). pgx.ErrNoRows → ErrNotFound через errors.Wrap.
+func (r *RegistryRepo) RegistryProjectID(ctx context.Context, id string) (string, error) {
+	if err := r.ready(); err != nil {
+		return "", err
+	}
+	var projectID string
+	q := fmt.Sprintf(`SELECT project_id FROM %s.registries WHERE id = $1`, schema)
+	if err := r.pool.QueryRow(ctx, q, id).Scan(&projectID); err != nil {
+		return "", regerrors.Wrap(err, "Registry", id)
+	}
+	return projectID, nil
+}
+
 // List возвращает реестры project'а cursor-пагинацией (created_at,id) ASC.
 // filter — whitelist `name=` (corelib filter.Parse; garbage → InvalidArgument);
 // garbage page_token → InvalidArgument. Запрашивает pageSize+1 для next-cursor.

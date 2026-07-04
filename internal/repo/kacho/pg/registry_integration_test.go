@@ -370,7 +370,7 @@ func TestRepo_REG14_RepoTupleIntent_Emit(t *testing.T) {
 	ctx := context.Background()
 
 	regID := "regREPOTUPLE000000000"
-	regIntent := domain.RegisterIntentForRepoPush(regID, "app", "service_account:sva-ci")
+	regIntent := domain.RegisterIntentForRepoPush(regID, "app", "prj-REPOTUPLE", "service_account:sva-ci")
 	require.NoError(t, repo.RegisterRepository(ctx, regIntent))
 	require.Equal(t, 1, countOutbox(t, pool, regID+"/app", domain.FGAEventRegister),
 		"register-on-first-push emits one repo register-intent")

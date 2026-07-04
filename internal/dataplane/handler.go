@@ -21,6 +21,7 @@ type Handler struct {
 	backend   Backend
 	forwarder Forwarder
 	repoReg   RepoRegistrar
+	regLookup RegistryLookup
 	realm     string // IAM /token realm для WWW-Authenticate
 	service   string // service-audience для WWW-Authenticate
 	logger    *slog.Logger
@@ -28,7 +29,7 @@ type Handler struct {
 
 // New собирает Handler. verifier==nil / authz==nil → breakglass-bypass соответствующей
 // стадии (только аварийный режим); в штатном деплое обе стадии обязательны.
-func New(verifier TokenVerifier, authz Authorizer, backend Backend, forwarder Forwarder, repoReg RepoRegistrar, realm, service string, logger *slog.Logger) *Handler {
+func New(verifier TokenVerifier, authz Authorizer, backend Backend, forwarder Forwarder, repoReg RepoRegistrar, regLookup RegistryLookup, realm, service string, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -44,6 +45,7 @@ func New(verifier TokenVerifier, authz Authorizer, backend Backend, forwarder Fo
 		backend:   backend,
 		forwarder: forwarder,
 		repoReg:   repoReg,
+		regLookup: regLookup,
 		realm:     realm,
 		service:   service,
 		logger:    logger,
@@ -195,18 +197,38 @@ func (h *Handler) servePush(w http.ResponseWriter, r *http.Request, p parsed, su
 	status := h.forwarder.Forward(w, r)
 
 	// register-on-first-push: repo материализуется как authz-объект на первом
-	// успешном manifest-PUT (parent-tuple ПЕРВЫМ + owner-tuple pushing-SA).
+	// успешном manifest-PUT (parent-tuple ПЕРВЫМ + owner-tuple pushing-SA). Intent
+	// несёт ParentProjectID реестра — иначе resource_mirror строка репо пустая и
+	// iam-reconciler не материализует per-object v_* (репо непуллим даже владельцем).
 	if !exists && p.route == routeManifest && r.Method == http.MethodPut && status >= 200 && status < 300 {
-		intent := domain.RegisterIntentForRepoPush(p.registryID, p.repo, subject)
+		projectID := h.resolveRegistryProject(ctx, p.registryID)
+		intent := domain.RegisterIntentForRepoPush(p.registryID, p.repo, projectID, subject)
 		if h.repoReg != nil {
 			if rerr := h.repoReg.RegisterRepository(ctx, intent); rerr != nil {
-				// Push успешен; register-intent durable-emit провалился (redкий DB-сбой).
+				// Push успешен; register-intent durable-emit провалился (редкий DB-сбой).
 				// Не рвём клиенту уже отданный ответ — логируем.
 				h.logger.Error("register-on-first-push emit failed",
 					"repo", p.registryID+"/"+p.repo, "err", rerr)
 			}
 		}
 	}
+}
+
+// resolveRegistryProject резолвит owning-project реестра для containment scope
+// register-intent. regLookup==nil → "" (best-effort, интент без project). Ошибка
+// lookup'а на этом post-response пути логируется; интент всё равно эмитится (хотя бы
+// структурный parent-tuple), не регрессируя ниже прежнего поведения.
+func (h *Handler) resolveRegistryProject(ctx context.Context, registryID string) string {
+	if h.regLookup == nil {
+		return ""
+	}
+	projectID, err := h.regLookup.RegistryProjectID(ctx, registryID)
+	if err != nil {
+		h.logger.Error("register-on-first-push project lookup failed",
+			"registry", registryID, "err", err)
+		return ""
+	}
+	return projectID
 }
 
 // serveMount — cross-repo blob mount exfil-guard: ДВА Check — v_get на src-repo И

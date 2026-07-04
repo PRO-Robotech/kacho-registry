@@ -208,7 +208,7 @@ func runServe(cfg config.Config) error {
 	// InternalIAMService.Check + existence-hiding + stream-proxy. Отдельно от gRPC.
 	var dpServer *http.Server
 	if cfg.DataplaneAddr != "" {
-		dpHandler, dperr := buildDataplaneHandler(cfg, authzConn, registryRepo, zotAdapter, logger)
+		dpHandler, dperr := buildDataplaneHandler(cfg, authzConn, registryRepo, zotAdapter, registryRepo, logger)
 		if dperr != nil {
 			return fmt.Errorf("build data-plane proxy: %w", dperr)
 		}
@@ -285,7 +285,7 @@ func runServe(cfg config.Config) error {
 // buildDataplaneHandler собирает data-plane OCI auth-proxy (fail-closed). Штатно:
 // JWKS-verify identity-JWT (RS256) + per-request InternalIAMService.Check + zot
 // stream-proxy. breakglass → bypass AuthN+AuthZ (аварийный режим, как gRPC-листенеры).
-func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoReg dataplane.RepoRegistrar, backend dataplane.Backend, logger *slog.Logger) (http.Handler, error) {
+func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoReg dataplane.RepoRegistrar, backend dataplane.Backend, regLookup dataplane.RegistryLookup, logger *slog.Logger) (http.Handler, error) {
 	forwarder, err := dataplane.NewZotForwarder(cfg.ZotAddr, logger)
 	if err != nil {
 		return nil, err
@@ -306,7 +306,7 @@ func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoRe
 		authorizer = check.NewIAMCheckClient(authzConn)
 	}
 
-	return dataplane.New(verifier, authorizer, backend, forwarder, repoReg,
+	return dataplane.New(verifier, authorizer, backend, forwarder, repoReg, regLookup,
 		cfg.TokenRealm, cfg.ServiceAud, logger), nil
 }
 

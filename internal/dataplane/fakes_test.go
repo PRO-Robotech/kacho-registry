@@ -145,7 +145,33 @@ func (r *fakeRepoReg) registered() []domain.RegisterIntent {
 	return out
 }
 
+// ---- fake RegistryLookup (owning-project резолв) --------------------------
+
+type fakeRegistryLookup struct {
+	mu                sync.Mutex
+	projectByRegistry map[string]string
+	err               error
+	calls             int
+}
+
+func (l *fakeRegistryLookup) RegistryProjectID(ctx context.Context, registryID string) (string, error) {
+	l.mu.Lock()
+	l.calls++
+	l.mu.Unlock()
+	if l.err != nil {
+		return "", l.err
+	}
+	return l.projectByRegistry[registryID], nil
+}
+
 // newTestHandler собирает Handler поверх fake-портов с фиксированными realm/service.
+// RegistryLookup — дефолтная пустая fake (тесты, не проверяющие ParentProjectID).
 func newTestHandler(v TokenVerifier, az Authorizer, be Backend, fw Forwarder, rr RepoRegistrar) *Handler {
-	return New(v, az, be, fw, rr, "https://api.kacho.local/iam/token", "registry.kacho.local", nil)
+	return newTestHandlerLK(v, az, be, fw, rr, &fakeRegistryLookup{})
+}
+
+// newTestHandlerLK — вариант с явной RegistryLookup (проверка project-резолва
+// register-on-first-push).
+func newTestHandlerLK(v TokenVerifier, az Authorizer, be Backend, fw Forwarder, rr RepoRegistrar, lk RegistryLookup) *Handler {
+	return New(v, az, be, fw, rr, lk, "https://api.kacho.local/iam/token", "registry.kacho.local", nil)
 }

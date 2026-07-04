@@ -70,3 +70,11 @@ type Forwarder interface {
 type RepoRegistrar interface {
 	RegisterRepository(ctx context.Context, intent domain.RegisterIntent) error
 }
+
+// RegistryLookup — резолв owning-project реестра по id (control-plane read). Нужен
+// register-on-first-push, чтобы intent репо нёс ParentProjectID (containment scope в
+// iam-mirror; без него reconciler не материализует per-object v_* → репо непуллим
+// даже владельцем). Реализуется pg.RegistryRepo. nil → интент без project (best-effort).
+type RegistryLookup interface {
+	RegistryProjectID(ctx context.Context, registryID string) (string, error)
+}

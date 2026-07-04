@@ -134,6 +134,37 @@ func TestDataplane_REG14_PushNewRepo_VCreate_Register(t *testing.T) {
 	require.Equal(t, "service_account:sva-ci", it.Tuples[1].SubjectID)
 }
 
+// REG-14b — register-on-first-push резолвит project реестра и несёт его в intent как
+// ParentProjectID (иначе resource_mirror строка репо пустая → iam-reconciler не
+// материализует v_* → образы недоступны даже владельцу). parent-tuple остаётся ПЕРВЫМ.
+func TestDataplane_REG14_PushNewRepo_CarriesRegistryProject(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	fw := &fakeForwarder{status: 201}
+	be := &fakeBackend{exists: map[string]bool{}}
+	rr := &fakeRepoReg{}
+	lk := &fakeRegistryLookup{projectByRegistry: map[string]string{"reg-A": "prj-owner"}}
+	h := newTestHandlerLK(&fakeVerifier{subject: "sva-ci"}, az, be, fw, rr, lk)
+
+	up := doReq(h, http.MethodPost, "/v2/reg-A/app/blobs/uploads/", true)
+	require.Equal(t, 201, up.Code)
+	mf := doReq(h, http.MethodPut, "/v2/reg-A/app/manifests/v1", true)
+	require.Equal(t, 201, mf.Code)
+
+	intents := rr.registered()
+	require.Len(t, intents, 1)
+	it := intents[0]
+	require.Equal(t, "prj-owner", it.ParentProjectID,
+		"repo register-intent must carry the owning-project (iam mirror containment)")
+	// parent-tuple ПЕРВЫМ (структурная привязка раньше owner-tuple) — не регрессируем.
+	require.Equal(t, "parent", it.Tuples[0].Relation)
+	require.Equal(t, "registry_repository:reg-A/app", it.Tuples[0].Object)
+	// репо не несёт project-tuple (у типа нет project-relation).
+	for _, tp := range it.Tuples {
+		require.NotEqual(t, "project", tp.Relation, "repo intent must not carry a project-tuple")
+	}
+	require.Equal(t, 1, lk.calls, "project resolved exactly once on register-on-first-push")
+}
+
 // REG-18 — push без прав → первый upload-запрос Check(registry_registry:reg-A, v_create)
 // deny → 404 (existence-hiding); блоб не принят, register-intent не эмитится.
 func TestDataplane_REG18_PushNoRights_404(t *testing.T) {

@@ -207,17 +207,21 @@ func FGARepoOwnerTuple(registryID, repo, subject string) FGATuple {
 // RegisterIntentForRepoPush — intent на первый push нового repo: parent-tuple ПЕРВЫМ
 // (repo линкуется к реестру раньше creator-tuple — тот же урок порядка, что для
 // project→owner), затем (при аутентифицированном pushing-principal) owner-tuple.
-// Repo не label-selectable → Labels/ParentProjectID не несёт (доступ наследуется
-// через parent→registry→project). subject — FGA subject толкающего.
-func RegisterIntentForRepoPush(registryID, repo, subject string) RegisterIntent {
+// projectID — owning-project реестра-владельца; несётся как ParentProjectID, чтобы
+// resource_mirror строка репо в iam получила containment scope и reconciler
+// материализовал per-object v_* (без него репо невидим/непуллим даже владельцу).
+// Labels репо не несёт (у type нет own-table labels — label-scope неприменим).
+// subject — FGA subject толкающего.
+func RegisterIntentForRepoPush(registryID, repo, projectID, subject string) RegisterIntent {
 	tuples := []FGATuple{FGARepoParentTuple(registryID, repo)}
 	if subject != "" {
 		tuples = append(tuples, FGARepoOwnerTuple(registryID, repo, subject))
 	}
 	return RegisterIntent{
-		Kind:       "Repository",
-		ResourceID: repoObjectID(registryID, repo),
-		Tuples:     tuples,
+		Kind:            "Repository",
+		ResourceID:      repoObjectID(registryID, repo),
+		Tuples:          tuples,
+		ParentProjectID: projectID,
 	}
 }
 
