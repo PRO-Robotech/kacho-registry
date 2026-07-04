@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -36,13 +37,18 @@ type manifestFixture struct {
 // fakeZot — mock OCI-реестра. repos: full-repo-name (с namespace-prefix) → tag → манифест.
 type fakeZot struct {
 	repos        map[string]map[string]manifestFixture
-	deleted      []string        // записанные DELETE digest'ы
-	failCatalog  bool            // 500 на _catalog (эмуляция недоступности)
-	failManifest map[string]bool // full-repo → 500 на GET манифеста (best-effort classify)
+	blobs        map[string][]byte // content-addressable blob-store: config-digest → тело
+	deleted      []string          // записанные DELETE digest'ы
+	failCatalog  bool              // 500 на _catalog (эмуляция недоступности)
+	failManifest map[string]bool   // full-repo → 500 на GET манифеста (best-effort classify)
 }
 
 func newFakeZot() *fakeZot {
-	return &fakeZot{repos: map[string]map[string]manifestFixture{}, failManifest: map[string]bool{}}
+	return &fakeZot{
+		repos:        map[string]map[string]manifestFixture{},
+		blobs:        map[string][]byte{},
+		failManifest: map[string]bool{},
+	}
 }
 
 // put регистрирует tag в repo с манифестом (config + layers), проставляя digest
@@ -69,6 +75,11 @@ func (f *fakeZot) put(repo, tag, digest string, configSz int64, layers ...int64)
 		configSz:  configSz,
 		layerSz:   layers,
 		body:      body,
+	}
+	// image-config blob (по умолчанию — платформа linux/amd64, без created) под
+	// config-digest; тест может переопределить f.blobs[...] для created/иной платформы.
+	if f.blobs["sha256:cfg"+digest] == nil {
+		f.blobs["sha256:cfg"+digest] = []byte(`{"architecture":"amd64","os":"linux"}`)
 	}
 }
 
@@ -120,6 +131,14 @@ func (f *fakeZot) server(t *testing.T) *httptest.Server {
 			_ = json.NewEncoder(w).Encode(map[string]any{"name": repo, "tags": names})
 		case strings.Contains(path, "/manifests/"):
 			f.handleManifest(w, r)
+		case strings.Contains(path, "/blobs/"):
+			digest := path[strings.Index(path, "/blobs/")+len("/blobs/"):]
+			b, ok := f.blobs[digest]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_, _ = w.Write(b)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -187,7 +206,8 @@ func TestZot_REG22_ListRepositories_NamespaceScoped(t *testing.T) {
 	require.NotContains(t, byName, "secret", "cross-namespace not leaked")
 }
 
-// REG-24 — ListTags возвращает теги repo с digest + size (HEAD manifest); source of
+// REG-24 — ListTags возвращает теги repo с digest + РЕАЛЬНЫМ размером образа
+// (config + Σlayers, НЕ размер манифеста) + платформой из image-config; source of
 // truth = zot.
 func TestZot_REG24_ListTags_DigestAndSize(t *testing.T) {
 	fz := newFakeZot()
@@ -200,16 +220,60 @@ func TestZot_REG24_ListTags_DigestAndSize(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tags, 2)
 
-	byTag := map[string]string{}
+	byTag := map[string]*struct {
+		digest string
+		size   int64
+		arch   string
+	}{}
 	for _, tg := range tags {
 		require.Equal(t, "reg-A", tg.RegistryID)
 		require.Equal(t, "app", tg.Repository)
-		require.NotEmpty(t, tg.Digest, "digest resolved via HEAD manifest")
-		require.Greater(t, tg.SizeBytes, int64(0), "manifest size populated")
-		byTag[tg.Tag] = tg.Digest
+		require.NotEmpty(t, tg.Digest, "digest resolved via manifest GET")
+		byTag[tg.Tag] = &struct {
+			digest string
+			size   int64
+			arch   string
+		}{tg.Digest, tg.SizeBytes, tg.Architecture}
 	}
-	require.Equal(t, "sha256:app1", byTag["v1"])
-	require.Equal(t, "sha256:app2", byTag["v2"])
+	require.Equal(t, "sha256:app1", byTag["v1"].digest)
+	require.Equal(t, "sha256:app2", byTag["v2"].digest)
+	require.Equal(t, int64(310), byTag["v1"].size, "config(10)+layers(100+200)")
+	require.Equal(t, int64(110), byTag["v2"].size, "config(10)+layer(100)")
+	require.Equal(t, "linux/amd64", byTag["v1"].arch, "платформа из image-config")
+}
+
+// ListTags — платформа и created берутся из image-config blob (не из манифеста).
+func TestZot_ListTags_ArchitectureAndCreated(t *testing.T) {
+	fz := newFakeZot()
+	fz.put("reg-A/img", "v1", "sha256:img1", 12, 300)
+	// Переопределяем config-blob: иная платформа + created (RFC3339).
+	fz.blobs["sha256:cfgsha256:img1"] = []byte(`{"architecture":"arm64","os":"linux","created":"2026-02-03T10:20:30Z"}`)
+	srv := fz.server(t)
+
+	cli := zotclient.New(srv.URL)
+	tags, _, err := cli.ListTags(t.Context(), registry.TagListQuery{RegistryID: "reg-A", Repository: "img"})
+	require.NoError(t, err)
+	require.Len(t, tags, 1)
+	require.Equal(t, int64(312), tags[0].SizeBytes, "config(12)+layer(300)")
+	require.Equal(t, "linux/arm64", tags[0].Architecture)
+	require.Equal(t, 2026, tags[0].CreatedAt.Year())
+	require.Equal(t, time.February, tags[0].CreatedAt.Month())
+	require.Equal(t, 3, tags[0].CreatedAt.Day())
+}
+
+// ListRepositories — repo с НУЛЁМ тегов (все удалены, запись в _catalog осталась до
+// GC) скрывается из проекции: пустой repo для tenant'а эквивалентен удалённому.
+func TestZot_ListRepositories_HidesEmptyRepo(t *testing.T) {
+	fz := newFakeZot()
+	fz.put("reg-A/live", "v1", "sha256:live1", 10, 100)
+	fz.repos["reg-A/ghost"] = map[string]manifestFixture{} // _catalog помнит, тегов нет
+	srv := fz.server(t)
+
+	cli := zotclient.New(srv.URL)
+	repos, _, err := cli.ListRepositories(t.Context(), registry.RepoListQuery{RegistryID: "reg-A"})
+	require.NoError(t, err)
+	require.Len(t, repos, 1, "ghost repo (0 тегов) скрыт")
+	require.Equal(t, "live", repos[0].Name)
 }
 
 // REG-24 — ListTags на несуществующий repo → пустой список (грациозный dangling-ref,

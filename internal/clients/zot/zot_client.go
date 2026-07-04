@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	registry "github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/api/registry"
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
@@ -78,12 +80,23 @@ type manifestBody struct {
 	MediaType string       `json:"mediaType"`
 	Config    descriptor   `json:"config"`
 	Layers    []descriptor `json:"layers"`
+	// Manifests — дочерние манифесты multi-arch index/list (config/layers у самого
+	// index нет; размер образа = сумма их size).
+	Manifests []descriptor `json:"manifests"`
 }
 
 type descriptor struct {
 	MediaType string `json:"mediaType"`
 	Digest    string `json:"digest"`
 	Size      int64  `json:"size"`
+}
+
+// imageConfig — разбор image-config blob (config.mediaType image): платформа и
+// момент создания образа. Для helm-config / артефактов эти поля отсутствуют.
+type imageConfig struct {
+	Created      string `json:"created"`
+	Architecture string `json:"architecture"`
+	OS           string `json:"os"`
 }
 
 // namespaceRepos читает GET /v2/_catalog и возвращает full-repo-имена (с namespace-
@@ -104,9 +117,17 @@ func (c *Client) namespaceRepos(ctx context.Context, registryID string) ([]strin
 	return out, nil
 }
 
+// zotFanout — верхняя граница параллельных запросов к zot при построении проекций
+// (per-repo tags/list + classify, per-tag manifest+config). Ограничивает нагрузку
+// на internal-endpoint, сохраняя скорость против N последовательных round-trip'ов.
+const zotFanout = 8
+
 // ListRepositories возвращает repos namespace (GET /v2/_catalog, namespace-prefix
-// фильтр). Имя repo — БЕЗ namespace-префикса; tag_count — из tags/list. Возвращает
-// полную проекцию (per-repo authz-фильтр и пагинацию применяет handler ПОСЛЕ фильтра).
+// фильтр). Имя repo — БЕЗ namespace-префикса; tag_count — из tags/list; classify —
+// по репрезентативному манифесту. Per-repo обход распараллелен (zotFanout). Repo с
+// НУЛЁМ тегов (все теги удалены, GC ещё не снял запись из _catalog) — скрывается:
+// пустой repo для tenant'а эквивалентен удалённому. Полная проекция (authz-фильтр и
+// пагинацию применяет handler ПОСЛЕ фильтра).
 func (c *Client) ListRepositories(ctx context.Context, q registry.RepoListQuery) ([]*domain.Repository, string, error) {
 	if err := c.ready(); err != nil {
 		return nil, "", err
@@ -116,18 +137,36 @@ func (c *Client) ListRepositories(ctx context.Context, q registry.RepoListQuery)
 		return nil, "", err
 	}
 	prefix := q.RegistryID + "/"
-	out := make([]*domain.Repository, 0, len(fullNames))
-	for _, full := range fullNames {
-		tags, terr := c.repoTags(ctx, full)
-		if terr != nil {
-			return nil, "", terr
-		}
-		out = append(out, &domain.Repository{
-			RegistryID:   q.RegistryID,
-			Name:         strings.TrimPrefix(full, prefix),
-			TagCount:     int32(len(tags)),
-			ArtifactType: c.classifyRepo(ctx, full, tags),
+	repos := make([]*domain.Repository, len(fullNames)) // индексируем — порядок _catalog сохраняется
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(zotFanout)
+	for i, full := range fullNames {
+		i, full := i, full
+		g.Go(func() error {
+			tags, terr := c.repoTags(gctx, full)
+			if terr != nil {
+				return terr // zot недоступен → fail-closed для всего списка
+			}
+			if len(tags) == 0 {
+				return nil // ghost: пустой repo — скрываем (nil остаётся, компактится ниже)
+			}
+			repos[i] = &domain.Repository{
+				RegistryID:   q.RegistryID,
+				Name:         strings.TrimPrefix(full, prefix),
+				TagCount:     int32(len(tags)),
+				ArtifactType: c.classifyRepo(gctx, full, tags),
+			}
+			return nil
 		})
+	}
+	if werr := g.Wait(); werr != nil {
+		return nil, "", werr
+	}
+	out := make([]*domain.Repository, 0, len(repos))
+	for _, r := range repos {
+		if r != nil {
+			out = append(out, r)
+		}
 	}
 	return out, "", nil
 }
@@ -176,9 +215,11 @@ func (c *Client) repoTags(ctx context.Context, fullRepo string) ([]string, error
 	return tr.Tags, nil
 }
 
-// ListTags возвращает теги repo (GET /v2/<registryID>/<repo>/tags/list) с digest и
-// размером манифеста (HEAD /manifests/<tag>). Полная проекция (пагинацию применяет
-// handler). Несуществующий repo → пустой список.
+// ListTags возвращает теги repo (GET /v2/<registryID>/<repo>/tags/list) с digest,
+// реальным размером образа (config + Σlayers; для index — Σ дочерних) и, для
+// контейнерных образов, платформой/created из image-config. Per-tag обход
+// распараллелен (zotFanout). Несуществующий repo → пустой список; тег, исчезнувший
+// между list и read, выпадает из проекции. Полная проекция (пагинацию применяет handler).
 func (c *Client) ListTags(ctx context.Context, q registry.TagListQuery) ([]*domain.Tag, string, error) {
 	if err := c.ready(); err != nil {
 		return nil, "", err
@@ -188,22 +229,76 @@ func (c *Client) ListTags(ctx context.Context, q registry.TagListQuery) ([]*doma
 	if err != nil {
 		return nil, "", err
 	}
-	out := make([]*domain.Tag, 0, len(tags))
-	for _, tag := range tags {
-		digest, size, mediaType, herr := c.headManifest(ctx, fullRepo, tag)
-		if herr != nil && herr != errNotFound {
-			return nil, "", herr
-		}
-		out = append(out, &domain.Tag{
-			RegistryID: q.RegistryID,
-			Repository: q.Repository,
-			Tag:        tag,
-			Digest:     digest,
-			SizeBytes:  size,
-			MediaType:  mediaType,
+	projected := make([]*domain.Tag, len(tags)) // индексируем — порядок tags/list сохраняется
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(zotFanout)
+	for i, tag := range tags {
+		i, tag := i, tag
+		g.Go(func() error {
+			t, terr := c.projectTag(gctx, q.RegistryID, q.Repository, fullRepo, tag)
+			if terr != nil {
+				if terr == errNotFound {
+					return nil // тег исчез между list и read — выпадает из проекции
+				}
+				return terr // zot недоступен → fail-closed для всего списка
+			}
+			projected[i] = t
+			return nil
 		})
 	}
+	if werr := g.Wait(); werr != nil {
+		return nil, "", werr
+	}
+	out := make([]*domain.Tag, 0, len(projected))
+	for _, t := range projected {
+		if t != nil {
+			out = append(out, t)
+		}
+	}
 	return out, "", nil
+}
+
+// projectTag строит проекцию одного тега: digest + media-type + реальный размер
+// (config + Σlayers; для multi-arch index — Σ дочерних манифестов) + платформа/created
+// из image-config (best-effort: недоступный config-blob не валит тег). errNotFound —
+// тег исчез между list и read.
+func (c *Client) projectTag(ctx context.Context, registryID, repository, fullRepo, tag string) (*domain.Tag, error) {
+	digest, mb, err := c.getManifestFull(ctx, fullRepo, tag)
+	if err != nil {
+		return nil, err
+	}
+	t := &domain.Tag{
+		RegistryID: registryID,
+		Repository: repository,
+		Tag:        tag,
+		Digest:     digest,
+		MediaType:  mb.MediaType,
+	}
+	if len(mb.Manifests) > 0 {
+		// multi-arch index: config/layers у index нет, размер — сумма дочерних манифестов.
+		for _, m := range mb.Manifests {
+			t.SizeBytes += m.Size
+		}
+		t.Architecture = "multi-arch"
+		return t, nil
+	}
+	t.SizeBytes = mb.Config.Size
+	for _, l := range mb.Layers {
+		t.SizeBytes += l.Size
+	}
+	// Платформа/created — из image-config blob (только контейнерный образ; helm-config
+	// их не несёт). Миссинг/ошибка чтения config-blob — best-effort, тег остаётся.
+	if isImageConfig(mb.Config.MediaType) && mb.Config.Digest != "" {
+		if cfg, cerr := c.getConfigBlob(ctx, fullRepo, mb.Config.Digest); cerr == nil {
+			t.Architecture = platformString(cfg.OS, cfg.Architecture)
+			if cfg.Created != "" {
+				if ct, perr := time.Parse(time.RFC3339, cfg.Created); perr == nil {
+					t.CreatedAt = ct
+				}
+			}
+		}
+	}
+	return t, nil
 }
 
 // DeleteTag удаляет тег/манифест: сначала резолвит digest тега (HEAD), затем
@@ -449,6 +544,65 @@ func (c *Client) getManifest(ctx context.Context, fullRepo, ref string) (manifes
 		return manifestBody{}, regerrors.ErrUnavailable
 	}
 	return mb, nil
+}
+
+// getManifestFull GET-ит манифест по ref и возвращает digest (Docker-Content-Digest
+// заголовок) вместе с разобранным телом (config/layers/manifests). 404 → errNotFound;
+// прочий не-2xx / транспорт / decode → ErrUnavailable.
+func (c *Client) getManifestFull(ctx context.Context, fullRepo, ref string) (string, manifestBody, error) {
+	req, rerr := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.baseURL+"/v2/"+repoPath(fullRepo)+"/manifests/"+url.PathEscape(ref), nil)
+	if rerr != nil {
+		return "", manifestBody{}, regerrors.ErrUnavailable
+	}
+	req.Header.Set("Accept", acceptManifests)
+	resp, derr := c.http.Do(req)
+	if derr != nil {
+		return "", manifestBody{}, regerrors.ErrUnavailable
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", manifestBody{}, errNotFound
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", manifestBody{}, regerrors.ErrUnavailable
+	}
+	var mb manifestBody
+	if err := json.NewDecoder(resp.Body).Decode(&mb); err != nil {
+		return "", manifestBody{}, regerrors.ErrUnavailable
+	}
+	return resp.Header.Get("Docker-Content-Digest"), mb, nil
+}
+
+// getConfigBlob читает image-config blob (GET /blobs/<digest>) и разбирает
+// платформу/created. 404/сбой → ошибка (caller трактует best-effort).
+func (c *Client) getConfigBlob(ctx context.Context, fullRepo, digest string) (imageConfig, error) {
+	var cfg imageConfig
+	if err := c.getJSON(ctx, "/v2/"+repoPath(fullRepo)+"/blobs/"+digest, &cfg); err != nil {
+		return imageConfig{}, err
+	}
+	return cfg, nil
+}
+
+// isImageConfig — config.mediaType контейнерного образа (docker/oci), чей blob несёт
+// architecture/os/created. helm-config и прочие артефакты сюда не попадают.
+func isImageConfig(mediaType string) bool {
+	return mediaType == "application/vnd.oci.image.config.v1+json" ||
+		mediaType == "application/vnd.docker.container.image.v1+json"
+}
+
+// platformString собирает "<os>/<arch>" (оба поля), либо только непустое, либо "".
+func platformString(os, arch string) string {
+	switch {
+	case os != "" && arch != "":
+		return os + "/" + arch
+	case arch != "":
+		return arch
+	case os != "":
+		return os
+	default:
+		return ""
+	}
 }
 
 // do выполняет запрос method+path; при out != nil декодирует JSON-тело. 404 →

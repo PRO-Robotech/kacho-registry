@@ -114,6 +114,11 @@ message Tag {
   // MediaType манифеста (OCI image / artifact / index).
   string media_type = 6;
 
-  // Момент создания (push) тега.
+  // Момент создания образа (из image-config, поле "created"). Пусто, если config
+  // его не несёт (напр. минимальный образ) или артефакт не контейнерный (helm).
   google.protobuf.Timestamp created_at = 7;
+
+  // Платформа образа "<os>/<arch>" (напр. "linux/amd64") из image-config; для
+  // multi-arch index — "multi-arch"; для helm-чарта / неизвестного — пусто.
+  string architecture = 8;
 }

@@ -114,6 +114,9 @@ type Tag struct {
 	SizeBytes  int64
 	MediaType  string
 	CreatedAt  time.Time
+	// Architecture — платформа образа "<os>/<arch>" (из image-config), "multi-arch"
+	// для index-манифеста, либо пусто (helm-чарт / config без platform).
+	Architecture string
 }
 
 // RegistryStats — инфра-проекция namespace (repo/tag count, суммарный размер,

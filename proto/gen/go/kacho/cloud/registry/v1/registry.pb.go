@@ -371,8 +371,12 @@ type Tag struct {
 	SizeBytes int64 `protobuf:"varint,5,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
 	// MediaType манифеста (OCI image / artifact / index).
 	MediaType string `protobuf:"bytes,6,opt,name=media_type,json=mediaType,proto3" json:"media_type,omitempty"`
-	// Момент создания (push) тега.
-	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// Момент создания образа (из image-config, поле "created"). Пусто, если config
+	// его не несёт (напр. минимальный образ) или артефакт не контейнерный (helm).
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// Платформа образа "<os>/<arch>" (напр. "linux/amd64") из image-config; для
+	// multi-arch index — "multi-arch"; для helm-чарта / неизвестного — пусто.
+	Architecture  string `protobuf:"bytes,8,opt,name=architecture,proto3" json:"architecture,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -456,6 +460,13 @@ func (x *Tag) GetCreatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *Tag) GetArchitecture() string {
+	if x != nil {
+		return x.Architecture
+	}
+	return ""
+}
+
 var File_kacho_cloud_registry_v1_registry_proto protoreflect.FileDescriptor
 
 const file_kacho_cloud_registry_v1_registry_proto_rawDesc = "" +
@@ -487,7 +498,7 @@ const file_kacho_cloud_registry_v1_registry_proto_rawDesc = "" +
 	"size_bytes\x18\x04 \x01(\x03R\tsizeBytes\x129\n" +
 	"\n" +
 	"updated_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12J\n" +
-	"\rartifact_type\x18\x06 \x01(\x0e2%.kacho.cloud.registry.v1.ArtifactTypeR\fartifactType\"\xe9\x01\n" +
+	"\rartifact_type\x18\x06 \x01(\x0e2%.kacho.cloud.registry.v1.ArtifactTypeR\fartifactType\"\x8d\x02\n" +
 	"\x03Tag\x12\x1f\n" +
 	"\vregistry_id\x18\x01 \x01(\tR\n" +
 	"registryId\x12\x1e\n" +
@@ -501,7 +512,8 @@ const file_kacho_cloud_registry_v1_registry_proto_rawDesc = "" +
 	"\n" +
 	"media_type\x18\x06 \x01(\tR\tmediaType\x129\n" +
 	"\n" +
-	"created_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt*k\n" +
+	"created_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12\"\n" +
+	"\farchitecture\x18\b \x01(\tR\farchitecture*k\n" +
 	"\x0eRegistryStatus\x12\x1f\n" +
 	"\x1bREGISTRY_STATUS_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16REGISTRY_STATUS_ACTIVE\x10\x01\x12\x1c\n" +

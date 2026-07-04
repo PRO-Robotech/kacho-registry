@@ -45,13 +45,14 @@ func toProtoTag(t *domain.Tag) *registryv1.Tag {
 		return nil
 	}
 	return &registryv1.Tag{
-		RegistryId: t.RegistryID,
-		Repository: t.Repository,
-		Tag:        t.Tag,
-		Digest:     t.Digest,
-		SizeBytes:  t.SizeBytes,
-		MediaType:  t.MediaType,
-		CreatedAt:  ts(t.CreatedAt),
+		RegistryId:   t.RegistryID,
+		Repository:   t.Repository,
+		Tag:          t.Tag,
+		Digest:       t.Digest,
+		SizeBytes:    t.SizeBytes,
+		MediaType:    t.MediaType,
+		CreatedAt:    ts(t.CreatedAt),
+		Architecture: t.Architecture,
 	}
 }
 
