@@ -23,3 +23,10 @@ go.work.sum
 
 # Синканная AI-оснастка (управляется ./sync-tooling.sh)
 .claude/
+
+# AI-оснастка (источник истины — kacho-workspace, локально синкается) — не коммитим
+.claude/
+CLAUDE.md
+AGENTS.md
+.codex/
+.agents/
