@@ -69,17 +69,23 @@ type Config struct {
 	// DataplaneAddr — адрес data-plane HTTP-листенера (Docker Registry v2 / OCI).
 	// Отдельный порт от gRPC :9090/:9091. Пусто → data-plane не поднимается.
 	DataplaneAddr string `envconfig:"KACHO_REGISTRY_DATAPLANE_ADDR" default:":8080"`
-	// IAMJWKSURL — IAM JWKS-endpoint для верификации identity-JWT data-plane
-	// (RS256). Пусто + не breakglass → data-plane fail-closed на старте.
-	IAMJWKSURL string `envconfig:"KACHO_REGISTRY_IAM_JWKS_URL" default:""`
-	// TokenRealm — realm для WWW-Authenticate (IAM /token auth-server); docker
-	// сам идёт туда за Bearer-токеном.
+	// HydraJWKSURL — Hydra-public JWKS-endpoint для верификации identity-JWT
+	// data-plane. Токен теперь Hydra-issued (client_credentials для docker,
+	// jwt-bearer для k8s); подпись — RS256 (Ory default) либо ES256. Пусто + не
+	// breakglass → data-plane fail-closed на старте.
+	HydraJWKSURL string `envconfig:"KACHO_REGISTRY_HYDRA_JWKS_URL" default:"http://kacho-umbrella-hydra-public.kacho.svc:4444/.well-known/jwks.json"`
+	// TokenRealm — realm для WWW-Authenticate; docker сам идёт туда за Bearer-токеном.
+	// Остаётся token-шимом (kacho-iam /iam/token): docker предъявляет SA-key шиму,
+	// шим брокерит токен у Hydra. Для data-plane realm — непрозрачный указатель на
+	// auth-сервер клиента, поэтому Hydra-переключение его не меняет.
 	TokenRealm string `envconfig:"KACHO_REGISTRY_TOKEN_REALM" default:"https://api.kacho.local/iam/token"`
 	// ServiceAud — expected audience identity-JWT (наш service) + значение service=
-	// в WWW-Authenticate.
+	// в WWW-Authenticate. Токен обязан нести aud ⊇ ServiceAud (federation-out на
+	// другие RP registry-доступа не даёт).
 	ServiceAud string `envconfig:"KACHO_REGISTRY_SERVICE_AUD" default:"registry.kacho.local"`
-	// TokenIssuer — expected issuer identity-JWT (пусто → iss не проверяется).
-	TokenIssuer string `envconfig:"KACHO_REGISTRY_TOKEN_ISSUER" default:""`
+	// HydraIssuer — expected issuer identity-JWT (external Hydra issuer, напр.
+	// https://hydra.api.kacho.cloud). Пусто → iss не проверяется (задаётся деплоем).
+	HydraIssuer string `envconfig:"KACHO_REGISTRY_HYDRA_ISSUER" default:""`
 
 	// EndpointBase — tenant-facing base OCI-endpoint namespace. Output-only поле
 	// Registry.endpoint = "<EndpointBase>/<id>". Это tenant-facing ingress-host;

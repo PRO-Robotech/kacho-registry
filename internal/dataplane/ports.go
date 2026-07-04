@@ -5,10 +5,13 @@
 // HTTP-листенер, реализующий Docker Registry v2 / OCI Distribution token-auth flow
 // перед общим zot-бэкендом.
 //
+// AuthN входного токена — Hydra JWKS (RS256/ES256); authZ — per-request Check.
+//
 // Поверхность и инвариант (security.md — authN+authZ на КАЖДОМ запросе):
-//   - AuthN: клиент без Bearer-JWT → 401 + WWW-Authenticate (realm = IAM /token).
-//     Docker сам идёт в realm (IAM /token), получает identity-JWT и повторяет с
-//     `Authorization: Bearer <jwt>`. Proxy верифицирует JWT по IAM JWKS (RS256).
+//   - AuthN: клиент без Bearer-JWT → 401 + WWW-Authenticate (realm = /iam/token-шим).
+//     Docker сам идёт в realm (token-шим), получает Hydra-issued identity-JWT и
+//     повторяет с `Authorization: Bearer <jwt>`. Proxy верифицирует JWT по Hydra JWKS
+//     (RS256/ES256).
 //   - AuthZ: КАЖДЫЙ /v2/-запрос проходит per-request InternalIAMService.Check
 //     (Вариант B — identity-only токен, без pre-issued scope; авторизация — здесь).
 //     Deny → 404 (existence-hiding: не раскрывать существование чужого repo/блоба).
@@ -28,10 +31,10 @@ import (
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
 
-// TokenVerifier — верификация Bearer-JWT по IAM JWKS (RS256; энфорс exp/aud/iss).
-// Возвращает identity (`sub` — Kachō principal id, напр. SA "sva…"); scope в токене
-// НЕТ (identity-only, авторизация — per-request Check). Ошибка → 401 (invalid_token).
-// Реализуется clients/jwks.Verifier.
+// TokenVerifier — верификация Hydra-issued Bearer-JWT по Hydra JWKS (RS256/ES256;
+// энфорс exp/aud/iss). Возвращает identity (`sub` — Hydra client_id ↔ Kachō principal,
+// напр. SA "sva…"); scope в токене НЕТ (identity-only, авторизация — per-request
+// Check). Ошибка → 401 (invalid_token). Реализуется clients/jwks.Verifier.
 type TokenVerifier interface {
 	Verify(ctx context.Context, rawToken string) (subject string, err error)
 }

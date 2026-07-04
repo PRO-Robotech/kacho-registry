@@ -38,6 +38,41 @@ func TestConfig_IAMProjectEdge_DefaultAndDistinctFromAuthz(t *testing.T) {
 		"project (public :9090) and authz (internal :9091) edges must be distinct conns")
 }
 
+// TestConfig_HydraJWKS_Defaults фиксирует контракт data-plane authN: JWKS-источник
+// верификации identity-JWT по умолчанию — cluster-internal Hydra public (:4444);
+// Hydra issuer по умолчанию не задан (iss проверяется только когда сконфигурен);
+// realm WWW-Authenticate остаётся token-шимом (docker идёт в шим, шим ходит в Hydra —
+// data-plane про это не знает).
+func TestConfig_HydraJWKS_Defaults(t *testing.T) {
+	env := baseEnv()
+
+	var c Config
+	require.NoError(t, LoadInto(&c, env))
+
+	assert.Equal(t,
+		"http://kacho-umbrella-hydra-public.kacho.svc:4444/.well-known/jwks.json",
+		c.HydraJWKSURL,
+		"data-plane JWKS source must default to cluster-internal Hydra public")
+	assert.Equal(t, "", c.HydraIssuer,
+		"Hydra issuer unset by default (verified only when configured)")
+	assert.Equal(t, "https://api.kacho.local/iam/token", c.TokenRealm,
+		"WWW-Authenticate realm stays the token-shim even though it now brokers to Hydra")
+	assert.Equal(t, "registry.kacho.local", c.ServiceAud)
+}
+
+// TestConfig_HydraJWKS_Override — env-override JWKS-источника и Hydra issuer (для S3).
+func TestConfig_HydraJWKS_Override(t *testing.T) {
+	env := baseEnv()
+	env["KACHO_REGISTRY_HYDRA_JWKS_URL"] = "http://hydra.example:4444/.well-known/jwks.json"
+	env["KACHO_REGISTRY_HYDRA_ISSUER"] = "https://hydra.api.kacho.cloud"
+
+	var c Config
+	require.NoError(t, LoadInto(&c, env))
+
+	assert.Equal(t, "http://hydra.example:4444/.well-known/jwks.json", c.HydraJWKSURL)
+	assert.Equal(t, "https://hydra.api.kacho.cloud", c.HydraIssuer)
+}
+
 // TestConfig_IAMProjectEdge_Override — env-override addr + отдельные mTLS-creds ребра.
 func TestConfig_IAMProjectEdge_Override(t *testing.T) {
 	env := baseEnv()

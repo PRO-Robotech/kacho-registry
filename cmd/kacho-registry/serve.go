@@ -312,8 +312,9 @@ func runServe(cfg config.Config) error {
 }
 
 // buildDataplaneHandler собирает data-plane OCI auth-proxy (fail-closed). Штатно:
-// JWKS-verify identity-JWT (RS256) + per-request InternalIAMService.Check + zot
-// stream-proxy. breakglass → bypass AuthN+AuthZ (аварийный режим, как gRPC-листенеры).
+// JWKS-verify Hydra-issued identity-JWT (RS256/ES256) + per-request
+// InternalIAMService.Check + zot stream-proxy. breakglass → bypass AuthN+AuthZ
+// (аварийный режим, как gRPC-листенеры).
 func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoReg dataplane.RepoRegistrar, backend dataplane.Backend, regLookup dataplane.RegistryLookup, logger *slog.Logger) (http.Handler, error) {
 	forwarder, err := dataplane.NewZotForwarder(cfg.ZotAddr, logger)
 	if err != nil {
@@ -325,13 +326,13 @@ func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoRe
 	if cfg.AuthZBreakglass {
 		logger.Warn("BREAKGLASS active: data-plane AuthN+AuthZ bypassed (emergency mode)")
 	} else {
-		if cfg.IAMJWKSURL == "" {
-			return nil, errors.New("data-plane requires KACHO_REGISTRY_IAM_JWKS_URL (or KACHO_REGISTRY_AUTHZ_BREAKGLASS=true to bypass)")
+		if cfg.HydraJWKSURL == "" {
+			return nil, errors.New("data-plane requires KACHO_REGISTRY_HYDRA_JWKS_URL (or KACHO_REGISTRY_AUTHZ_BREAKGLASS=true to bypass)")
 		}
 		if authzConn == nil {
 			return nil, errors.New("data-plane requires authz IAM conn (KACHO_REGISTRY_AUTHZ_IAM_GRPC_ADDR)")
 		}
-		verifier = jwks.New(cfg.IAMJWKSURL, cfg.ServiceAud, cfg.TokenIssuer)
+		verifier = jwks.New(cfg.HydraJWKSURL, cfg.ServiceAud, cfg.HydraIssuer)
 		authorizer = check.NewIAMCheckClient(authzConn)
 	}
 
