@@ -256,9 +256,16 @@ echo
 # ---------------------------------------------------------------------------
 echo "--- 6. pull: manifest / blob / tags-list → 200 ---"
 if [[ "$MANIFEST_OK" == 1 ]]; then
-  code="$(do_req GET "${DATAPLANE_URL}/v2/${REGISTRY_ID}/${REPO}/manifests/${TAG}" "${AUTH[@]}" \
-    -H "Accept: application/vnd.oci.image.manifest.v1+json")"
-  assert_hard "GET manifest" "$code" 200 || true
+  # register-on-first-push материализует per-object v_get на новом repo асинхронно
+  # (FGA-пропагация ~0.6–2s). Первый pull может дать 404 (existence-hidden, грант ещё
+  # не долетел) — poll-retry до 10× по 1.5s, затем финальный assert (#10 grant-latency).
+  for _att in $(seq 1 10); do
+    code="$(do_req GET "${DATAPLANE_URL}/v2/${REGISTRY_ID}/${REPO}/manifests/${TAG}" "${AUTH[@]}" \
+      -H "Accept: application/vnd.oci.image.manifest.v1+json")"
+    [[ "$code" == 200 ]] && break
+    sleep 1.5
+  done
+  assert_hard "GET manifest (poll-retry for grant-latency)" "$code" 200 || true
 
   code="$(do_req GET "${DATAPLANE_URL}/v2/${REGISTRY_ID}/${REPO}/blobs/${CFG_DIGEST}" "${AUTH[@]}")"
   assert_hard "GET config blob (blob-scope in-repo)" "$code" 200 || true
