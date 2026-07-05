@@ -23,7 +23,6 @@ import (
 	registry "github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/api/registry"
 	"github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/shared/namepage"
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
-	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
 )
 
 // zotFanout — верхняя граница параллельных запросов к zot при построении проекций
@@ -295,23 +294,23 @@ func globalSearchQuery(query string) string {
 func (c *Client) gqlQuery(ctx context.Context, query string, out any) error {
 	reqBody, err := json.Marshal(map[string]string{"query": query})
 	if err != nil {
-		return regerrors.ErrUnavailable
+		return failClosed("graphql marshal", "err", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.baseURL+"/v2/_zot/ext/search", bytes.NewReader(reqBody))
 	if err != nil {
-		return regerrors.ErrUnavailable
+		return failClosed("graphql request build", "err", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return regerrors.ErrUnavailable
+		return failClosed("graphql transport", "err", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return regerrors.ErrUnavailable
+		return failClosed("graphql non-2xx", "status", resp.StatusCode)
 	}
 	var wrapper struct {
 		Data   json.RawMessage `json:"data"`
@@ -320,13 +319,14 @@ func (c *Client) gqlQuery(ctx context.Context, query string, out any) error {
 		} `json:"errors"`
 	}
 	if derr := json.NewDecoder(resp.Body).Decode(&wrapper); derr != nil {
-		return regerrors.ErrUnavailable
+		return failClosed("graphql decode", "err", derr)
 	}
 	if len(wrapper.Errors) > 0 {
-		return regerrors.ErrUnavailable
+		return failClosed("graphql errors", "graphql_error", wrapper.Errors[0].Message,
+			"error_count", len(wrapper.Errors))
 	}
 	if uerr := json.Unmarshal(wrapper.Data, out); uerr != nil {
-		return regerrors.ErrUnavailable
+		return failClosed("graphql data unmarshal", "err", uerr)
 	}
 	return nil
 }

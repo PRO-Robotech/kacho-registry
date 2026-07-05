@@ -148,6 +148,25 @@ func TestRegistry_REG38_TriggerGC_MalformedID(t *testing.T) {
 	require.Equal(t, codes.InvalidArgument, codeOf(t, err))
 }
 
+// REG-38 — TriggerGC worker zot-failure: async worker'а zot.TriggerGC вернул ошибку →
+// Operation завершается done=true С НЕПУСТЫМ error (не «тихий success»), код проброшен
+// через mapRepoErr без mismap/leak. Mirror REG-25 DeleteTag_WorkerZotError — раньше
+// GC-worker error-ветка не покрывалась (регрессия «emptyAny() вместо mapped error»
+// прошла бы незамеченной).
+func TestRegistry_REG38_TriggerGC_WorkerZotError(t *testing.T) {
+	zot := &mockZot{triggerGCErr: regerrors.ErrUnavailable}
+	ops := newMemOps()
+	uc := newUC(&mockRepo{}, zot, &mockIAM{}, ops)
+
+	op, err := uc.TriggerGC(aliceCtx(), validRegID)
+	require.NoError(t, err)
+	done := awaitOpDone(t, ops, op.ID)
+	require.NotNil(t, done.Error, "worker GC zot-failure must surface in Operation.error, not silent success")
+	require.Equal(t, int32(codes.Unavailable), done.Error.GetCode(),
+		"mapped gRPC code preserved (mapRepoErr, not swallowed/mismapped)")
+	require.Contains(t, zot.triggerGCCalls, validRegID)
+}
+
 // REG-08 — Delete непустого namespace: sync-precondition читает zot.NamespaceEmpty;
 // НЕ пусто → FAILED_PRECONDITION "registry is not empty"; Operation НЕ создаётся,
 // namespace/строка не трогаются (status остаётся ACTIVE, worker не запускается).

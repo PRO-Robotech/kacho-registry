@@ -48,7 +48,7 @@ func (r *RegistryRepo) ready() error {
 	return nil
 }
 
-// Get возвращает реестр по id. pgx.ErrNoRows → ErrNotFound через errors.Wrap.
+// Get возвращает реестр по id. pgx.ErrNoRows → ErrNotFound через wrapPgErr.
 func (r *RegistryRepo) Get(ctx context.Context, id string) (*domain.Registry, error) {
 	if err := r.ready(); err != nil {
 		return nil, err
@@ -56,14 +56,14 @@ func (r *RegistryRepo) Get(ctx context.Context, id string) (*domain.Registry, er
 	q := fmt.Sprintf(`SELECT %s FROM %s.registries WHERE id = $1`, registryColumns, schema)
 	reg, err := scanRegistry(r.pool.QueryRow(ctx, q, id))
 	if err != nil {
-		return nil, regerrors.Wrap(err, "Registry", id)
+		return nil, wrapPgErr(err, "Registry", id)
 	}
 	return reg, nil
 }
 
 // RegistryProjectID — узкий lookup owning-project реестра по id (data-plane
 // register-on-first-push: интент репо должен нести ParentProjectID для containment
-// scope в iam-mirror). pgx.ErrNoRows → ErrNotFound через errors.Wrap.
+// scope в iam-mirror). pgx.ErrNoRows → ErrNotFound через wrapPgErr.
 func (r *RegistryRepo) RegistryProjectID(ctx context.Context, id string) (string, error) {
 	if err := r.ready(); err != nil {
 		return "", err
@@ -71,7 +71,7 @@ func (r *RegistryRepo) RegistryProjectID(ctx context.Context, id string) (string
 	var projectID string
 	q := fmt.Sprintf(`SELECT project_id FROM %s.registries WHERE id = $1`, schema)
 	if err := r.pool.QueryRow(ctx, q, id).Scan(&projectID); err != nil {
-		return "", regerrors.Wrap(err, "Registry", id)
+		return "", wrapPgErr(err, "Registry", id)
 	}
 	return projectID, nil
 }
@@ -129,7 +129,7 @@ func (r *RegistryRepo) List(ctx context.Context, q registry.ListQuery) ([]*domai
 
 	rows, err := r.pool.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, "", regerrors.Wrap(err, "Registry", "")
+		return nil, "", wrapPgErr(err, "Registry", "")
 	}
 	defer rows.Close()
 
@@ -137,12 +137,12 @@ func (r *RegistryRepo) List(ctx context.Context, q registry.ListQuery) ([]*domai
 	for rows.Next() {
 		reg, serr := scanRegistry(rows)
 		if serr != nil {
-			return nil, "", regerrors.Wrap(serr, "Registry", "")
+			return nil, "", wrapPgErr(serr, "Registry", "")
 		}
 		out = append(out, reg)
 	}
 	if rerr := rows.Err(); rerr != nil {
-		return nil, "", regerrors.Wrap(rerr, "Registry", "")
+		return nil, "", wrapPgErr(rerr, "Registry", "")
 	}
 
 	var next string
@@ -167,7 +167,7 @@ func (r *RegistryRepo) Insert(ctx context.Context, reg *domain.Registry, intent 
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return nil, regerrors.Wrap(err, "Registry", reg.ID)
+		return nil, wrapPgErr(err, "Registry", reg.ID)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -178,14 +178,14 @@ func (r *RegistryRepo) Insert(ctx context.Context, reg *domain.Registry, intent 
 	created, err := scanRegistry(tx.QueryRow(ctx, q,
 		reg.ID, reg.ProjectID, reg.Name, reg.Description, labels, statusString(reg.Status)))
 	if err != nil {
-		return nil, regerrors.Wrap(err, "Registry", reg.ID)
+		return nil, wrapPgErr(err, "Registry", reg.ID)
 	}
 
 	if err := emitFGAIntent(ctx, tx, domain.FGAEventRegister, intent); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, regerrors.Wrap(err, "Registry", reg.ID)
+		return nil, wrapPgErr(err, "Registry", reg.ID)
 	}
 	return created, nil
 }
@@ -203,7 +203,7 @@ func (r *RegistryRepo) Update(ctx context.Context, spec registry.UpdateSpec, mir
 	idx := 2
 	if spec.ApplyName {
 		// Смена имени: partial-UNIQUE(project_id,name) WHERE status<>'DELETING' →
-		// конфликт даёт 23505 → regerrors.Wrap → ErrAlreadyExists.
+		// конфликт даёт 23505 → wrapPgErr → ErrAlreadyExists.
 		sets = append(sets, fmt.Sprintf("name = $%d", idx))
 		args = append(args, spec.Name)
 		idx++
@@ -225,7 +225,7 @@ func (r *RegistryRepo) Update(ctx context.Context, spec registry.UpdateSpec, mir
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return nil, regerrors.Wrap(err, "Registry", spec.RegistryID)
+		return nil, wrapPgErr(err, "Registry", spec.RegistryID)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -244,14 +244,14 @@ func (r *RegistryRepo) Update(ctx context.Context, spec registry.UpdateSpec, mir
 		updated, err = scanRegistry(tx.QueryRow(ctx, q, args...))
 	}
 	if err != nil {
-		return nil, regerrors.Wrap(err, "Registry", spec.RegistryID)
+		return nil, wrapPgErr(err, "Registry", spec.RegistryID)
 	}
 
 	if err := emitFGAIntent(ctx, tx, domain.FGAEventRegister, mirror(updated)); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, regerrors.Wrap(err, "Registry", spec.RegistryID)
+		return nil, wrapPgErr(err, "Registry", spec.RegistryID)
 	}
 	return updated, nil
 }
@@ -270,7 +270,7 @@ func (r *RegistryRepo) MarkDeleting(ctx context.Context, id string) (*domain.Reg
 		RETURNING %s`, schema, registryColumns)
 	reg, err := scanRegistry(r.pool.QueryRow(ctx, q, id))
 	if err != nil {
-		return nil, regerrors.Wrap(err, "Registry", id)
+		return nil, wrapPgErr(err, "Registry", id)
 	}
 	return reg, nil
 }
@@ -285,21 +285,21 @@ func (r *RegistryRepo) Delete(ctx context.Context, id string, intent domain.Regi
 	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return regerrors.Wrap(err, "Registry", id)
+		return wrapPgErr(err, "Registry", id)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var deletedID string
 	q := fmt.Sprintf(`DELETE FROM %s.registries WHERE id = $1 RETURNING id`, schema)
 	if err := tx.QueryRow(ctx, q, id).Scan(&deletedID); err != nil {
-		return regerrors.Wrap(err, "Registry", id)
+		return wrapPgErr(err, "Registry", id)
 	}
 
 	if err := emitFGAIntent(ctx, tx, domain.FGAEventUnregister, intent); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return regerrors.Wrap(err, "Registry", id)
+		return wrapPgErr(err, "Registry", id)
 	}
 	return nil
 }
@@ -330,14 +330,14 @@ func (r *RegistryRepo) emitRepoIntent(ctx context.Context, eventType string, int
 	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return regerrors.Wrap(err, "registry_outbox", intent.ResourceID)
+		return wrapPgErr(err, "registry_outbox", intent.ResourceID)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := emitFGAIntent(ctx, tx, eventType, intent); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return regerrors.Wrap(err, "registry_outbox", intent.ResourceID)
+		return wrapPgErr(err, "registry_outbox", intent.ResourceID)
 	}
 	return nil
 }
@@ -380,7 +380,7 @@ func emitFGAIntent(ctx context.Context, tx pgx.Tx, eventType string, intent doma
 		INSERT INTO %s.registry_outbox (event_type, payload, resource_kind, resource_id)
 		VALUES ($1, $2::jsonb, $3, $4)`, schema)
 	if _, err := tx.Exec(ctx, q, eventType, string(payload), intent.Kind, intent.ResourceID); err != nil {
-		return regerrors.Wrap(err, "registry_outbox", intent.ResourceID)
+		return wrapPgErr(err, "registry_outbox", intent.ResourceID)
 	}
 	return nil
 }

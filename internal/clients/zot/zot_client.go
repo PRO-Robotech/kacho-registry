@@ -25,6 +25,7 @@
 package zot
 
 import (
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -56,6 +57,16 @@ func (c *Client) ready() error {
 		return regerrors.ErrUnavailable
 	}
 	return nil
+}
+
+// failClosed логирует discarded root-cause fail-closed ветки zot-адаптера ПЕРЕД
+// возвратом фиксированного ErrUnavailable (CWE-778: сырой zot-текст наружу не течёт,
+// но оператор получает сигнал — иначе пустые Repository/Tag-проекции неотличимы от
+// сетевого сбоя / GraphQL-разрыва). Логгер — slog.Default() (та же конвенция, что у
+// iam-адаптера). Возвращает sentinel для прямого `return`.
+func failClosed(op string, attrs ...any) error {
+	slog.Default().Error("zot adapter fail-closed: "+op, attrs...)
+	return regerrors.ErrUnavailable
 }
 
 var _ registry.ZotClient = (*Client)(nil)
