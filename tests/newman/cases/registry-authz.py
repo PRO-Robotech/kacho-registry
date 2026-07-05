@@ -22,7 +22,11 @@ viewer-tier юзер здесь не провиженятся:
 - **Viewer-tier** (GET-VIEWER-OK / UPDATE-VIEWER-DENY / DELETE-VIEWER-DENY) — требуют
   зарегистрированного viewer-юзера, которого стенд дать не может. Кейс fixture-gated:
   при пустом `jwtProjectViewerA` — единичный informational-SKIP (green), при наличии
-  токена — полный энфорс реальных assertions.
+  токена — полный энфорс реальных assertions. Граница «viewer держит v_get, но НЕ
+  v_update/v_delete → Update/Delete = NOT_FOUND (existence-hidden)» ДОПОЛНИТЕЛЬНО
+  покрыта всегда-исполняемым Go-тестом internal/check/viewer_boundary_test.go
+  (реальный corelib authz-interceptor поверх registry PermissionMap + fake CheckClient,
+  грантящий ровно v_get) — граница НЕ висит только на fixture-gated SKIP'е.
 
 Инвариант existence-hiding (authenticated-ungranted → 404, никогда 403, без leak'а)
 отдельно верифицируется GREEN control-plane-сьютом и data-plane-харнессом.
