@@ -20,7 +20,6 @@ import (
 	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
 
 	registry "github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/api/registry"
-	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
 
 // RegistryHandler реализует registryv1.RegistryServiceServer.
@@ -165,12 +164,15 @@ func (h *RegistryHandler) ListTags(ctx context.Context, req *registryv1.ListTags
 	if err := h.authz.checkRepo(ctx, registryID, repository, relationVList); err != nil {
 		return nil, err
 	}
-	items, _, err := h.uc.ListTags(ctx, registry.TagListQuery{RegistryID: registryID, Repository: repository})
-	if err != nil {
-		return nil, mapErr(err)
-	}
-	page, next, err := pageByName(items, func(t *domain.Tag) string { return t.Tag },
-		int64(req.GetPageSize()), req.GetPageToken())
+	// Пагинация — В АДАПТЕРЕ У ИСТОЧНИКА (zot ListTags режет окно по имени тега ДО
+	// проекции в domain.Tag — bound материализации, CWE-770; паритет с ListRepositories).
+	// Handler лишь форматирует окно + пробрасывает next-token.
+	page, next, err := h.uc.ListTags(ctx, registry.TagListQuery{
+		RegistryID: registryID,
+		Repository: repository,
+		PageSize:   int64(req.GetPageSize()),
+		PageToken:  req.GetPageToken(),
+	})
 	if err != nil {
 		return nil, mapErr(err)
 	}

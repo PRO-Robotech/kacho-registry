@@ -37,30 +37,23 @@ func NewInterceptor(opts Options) (*authz.Interceptor, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	if opts.Breakglass {
-		return authz.NewInterceptor(authz.InterceptorOptions{
-			ServiceName:          opts.ServiceName,
-			Map:                  PermissionMap(),
-			Client:               nil,
-			Cache:                authz.NewCache(opts.CacheTTL),
-			Logger:               opts.Logger,
-			Breakglass:           true,
-			DenyRateLimitPerSec:  opts.DenyRateLimitPerSec,
-			CheckTimeout:         opts.CheckTimeout,
-			AllowSystemPrincipal: opts.AllowSystemPrincipal,
-		}), nil
+	// Breakglass → Client=nil (authz bypass); иначе IAM обязателен (fail-closed:
+	// nil conn без breakglass = misconfig). Остальные 7 полей InterceptorOptions
+	// идентичны в обеих ветвях — резолвим только Client и строим ОДИН литерал.
+	var client authz.CheckClient
+	if !opts.Breakglass {
+		if opts.IAMConn == nil {
+			return nil, ErrIAMConnNotConfigured
+		}
+		client = NewIAMCheckClient(opts.IAMConn)
 	}
-	if opts.IAMConn == nil {
-		return nil, ErrIAMConnNotConfigured
-	}
-	client := NewIAMCheckClient(opts.IAMConn)
 	return authz.NewInterceptor(authz.InterceptorOptions{
 		ServiceName:          opts.ServiceName,
 		Map:                  PermissionMap(),
 		Client:               client,
 		Cache:                authz.NewCache(opts.CacheTTL),
 		Logger:               opts.Logger,
-		Breakglass:           false,
+		Breakglass:           opts.Breakglass,
 		DenyRateLimitPerSec:  opts.DenyRateLimitPerSec,
 		CheckTimeout:         opts.CheckTimeout,
 		AllowSystemPrincipal: opts.AllowSystemPrincipal,

@@ -575,6 +575,37 @@ func TestZot_ListTags_MultiArch(t *testing.T) {
 	require.Equal(t, "multi-arch", tags[0].Architecture)
 }
 
+// SEC(#770) — ListTags режет ОКНО (page_size) по имени тега (ASC) В АДАПТЕРЕ ДО
+// проекции в domain.Tag — материализация/аллокация ограничена запрошенной страницей,
+// а не полным набором тегов repo (паритет с ListRepositories window-before-fan-out).
+// Курсор (opaque base64 имени) байт-совместим с прежней handler-пагинацией.
+func TestZot_ListTags_PaginatedWindowByName(t *testing.T) {
+	fz := newFakeZot()
+	// Порядок в Results намеренно НЕ отсортирован — адаптер обязан сортировать по имени.
+	fz.addGqlTag("reg-A/app", containerTag("v3", "sha256:t3", 30, "linux", "amd64"))
+	fz.addGqlTag("reg-A/app", containerTag("v1", "sha256:t1", 10, "linux", "amd64"))
+	fz.addGqlTag("reg-A/app", containerTag("v2", "sha256:t2", 20, "linux", "amd64"))
+	srv := fz.server(t)
+	cli := zotclient.New(srv.URL)
+
+	// Первая страница (size=2) — первые два имени ASC (v1, v2) + next-token.
+	page1, next, err := cli.ListTags(t.Context(),
+		registry.TagListQuery{RegistryID: "reg-A", Repository: "app", PageSize: 2})
+	require.NoError(t, err)
+	require.Len(t, page1, 2, "окно size=2, а не весь набор тегов")
+	require.Equal(t, "v1", page1[0].Tag)
+	require.Equal(t, "v2", page1[1].Tag)
+	require.NotEmpty(t, next, "есть ещё теги → non-empty next-token")
+
+	// Вторая страница (по next-token) — остаток (v3), next пуст.
+	page2, next2, err := cli.ListTags(t.Context(),
+		registry.TagListQuery{RegistryID: "reg-A", Repository: "app", PageSize: 2, PageToken: next})
+	require.NoError(t, err)
+	require.Len(t, page2, 1)
+	require.Equal(t, "v3", page2[0].Tag)
+	require.Empty(t, next2, "последняя страница → пустой next-token")
+}
+
 // REG-24 — ListTags на несуществующий repo → пустой список (грациозный dangling-ref, не
 // ошибка): ImageList отдаёт пустой Results, репо GC-нут — не 500.
 func TestZot_REG24_ListTags_MissingRepo_Empty(t *testing.T) {

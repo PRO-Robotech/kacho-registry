@@ -334,6 +334,9 @@ func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoRe
 		if err := requireSecureJWKSURL(cfg.AuthMode, cfg.HydraJWKSURL); err != nil {
 			return nil, err
 		}
+		if err := requireIssuerPinned(cfg.AuthMode, cfg.HydraIssuer); err != nil {
+			return nil, err
+		}
 		if authzConn == nil {
 			return nil, errors.New("data-plane requires authz IAM conn (KACHO_REGISTRY_AUTHZ_IAM_GRPC_ADDR)")
 		}
@@ -361,6 +364,25 @@ func requireSecureJWKSURL(authMode, jwksURL string) error {
 		if !strings.EqualFold(u.Scheme, "https") {
 			return fmt.Errorf("AuthMode=%s requires https:// KACHO_REGISTRY_HYDRA_JWKS_URL "+
 				"(JWKS trust anchor must not be fetched over plaintext; got scheme %q)", authMode, u.Scheme)
+		}
+	}
+	return nil
+}
+
+// requireIssuerPinned — в production/production-strict issuer (iss) identity-JWT
+// обязан быть закреплён (KACHO_REGISTRY_HYDRA_ISSUER непустой). jwks.Verifier пропускает
+// iss-проверку при пустом issuer (issuer-pinning опционален) — тогда data-plane принял бы
+// любой токен, подписанный ключом из того же JWKS и несущий aud ⊇ ServiceAud, независимо
+// от того, КТО его выпустил (federation-out на другой RP, разделяющий Hydra/JWKS, дал бы
+// доступ к OCI data-plane). В проде issuer-pinning не должен молча отсутствовать — параллель
+// requireSecureJWKSURL. В dev (и breakglass — verifier не поднимается) пустой iss допустим.
+func requireIssuerPinned(authMode, issuer string) error {
+	switch authMode {
+	case "production", "production-strict":
+		if issuer == "" {
+			return fmt.Errorf("AuthMode=%s requires KACHO_REGISTRY_HYDRA_ISSUER "+
+				"(issuer pinning must not be silently omitted; a token from any relying "+
+				"party sharing the JWKS+aud would otherwise authenticate)", authMode)
 		}
 	}
 	return nil

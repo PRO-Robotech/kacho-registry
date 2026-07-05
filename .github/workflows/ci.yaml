@@ -33,6 +33,24 @@ jobs:
       - run: go vet ./...
       - run: go test -race -short -count=1 -timeout 5m ./...
 
+  integration:
+    name: integration (testcontainers Postgres)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with: { path: kacho-registry }
+      - uses: actions/setup-go@v6
+        with: { go-version-file: kacho-registry/go.mod, cache-dependency-path: kacho-registry/go.sum }
+      - run: go mod download
+      # internal/repo/kacho/pg holds the testcontainers Postgres integration &
+      # concurrency-race tests (REG04 unique-name race, REG40 update-vs-delete CAS,
+      # rename-race, source-version-monotonic, create-fullpath race). They MUST run
+      # here without -short — the unit job runs -short and setupTestDB t.Skip()'s
+      # them, so the DB-level exactly-one-winner invariants (project-rule #10/#12)
+      # would otherwise be compiled but never asserted in CI. Docker is available on
+      # ubuntu-latest runners. -p 1 avoids testcontainers port contention.
+      - run: go test ./internal/repo/... -race -count=1 -p 1 -timeout 600s
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest

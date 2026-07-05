@@ -35,3 +35,34 @@ func TestRequireSecureJWKSURL(t *testing.T) {
 		})
 	}
 }
+
+// TestRequireIssuerPinned — в production/production-strict issuer (iss) identity-JWT
+// обязан быть закреплён (KACHO_REGISTRY_HYDRA_ISSUER непустой); пустой iss в проде
+// принимал бы токен от любого RP с тем же JWKS+aud (federation-out). В dev пустой iss
+// допустим (issuer-pinning опционален), симметрично http:// JWKS и DB sslmode=disable.
+func TestRequireIssuerPinned(t *testing.T) {
+	cases := []struct {
+		name     string
+		authMode string
+		issuer   string
+		wantErr  bool
+	}{
+		{"dev-empty-ok", "dev", "", false},
+		{"dev-set-ok", "dev", "https://hydra.api.kacho.cloud", false},
+		{"prod-empty-rejected", "production", "", true},
+		{"prod-set-ok", "production", "https://hydra.api.kacho.cloud", false},
+		{"prod-strict-empty-rejected", "production-strict", "", true},
+		{"prod-strict-set-ok", "production-strict", "https://hydra.api.kacho.cloud", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := requireIssuerPinned(tc.authMode, tc.issuer)
+			if tc.wantErr && err == nil {
+				t.Fatalf("want error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("want nil, got %v", err)
+			}
+		})
+	}
+}
