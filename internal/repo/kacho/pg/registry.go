@@ -232,8 +232,15 @@ func (r *RegistryRepo) Update(ctx context.Context, spec registry.UpdateSpec, mir
 	var updated *domain.Registry
 	if len(sets) == 0 {
 		// Пустой набор применяемых полей (mask без mutable-полей) — возвращаем
-		// текущую ACTIVE-строку; mirror по-прежнему re-register'ит labels.
-		q := fmt.Sprintf(`SELECT %s FROM %s.registries WHERE id = $1 AND status = 'ACTIVE'`,
+		// текущую ACTIVE-строку; mirror по-прежнему re-register'ит labels. FOR UPDATE
+		// берёт тот же row-lock, что и SET-ветка (UPDATE ... WHERE), поэтому outbox-
+		// INSERT этой ветки сериализуется с конкурентными реальными UPDATE того же
+		// реестра — source_version (BIGSERIAL id) остаётся commit-order-monotonic и
+		// mirror не откатывает label-scope к устаревшему снапшоту (MVCC-reader без
+		// FOR UPDATE не блокируется на writer-row-lock и мог бы получить больший id при
+		// stale labels). Ветка ныне недостижима через use-case, но FOR UPDATE закрывает
+		// её как foot-gun для любого прямого/будущего caller'а с пустым Apply-набором.
+		q := fmt.Sprintf(`SELECT %s FROM %s.registries WHERE id = $1 AND status = 'ACTIVE' FOR UPDATE`,
 			registryColumns, schema)
 		updated, err = scanRegistry(tx.QueryRow(ctx, q, spec.RegistryID))
 	} else {
@@ -321,6 +328,18 @@ func (r *RegistryRepo) UnregisterRepository(ctx context.Context, intent domain.R
 
 // emitRepoIntent — durable-emit repo-intent одиночной tx (у repo нет ресурсной DML,
 // с которой надо было бы атомарить). Пустой набор tuple → no-op.
+//
+// В отличие от registry-scoped мутаций (Insert/Update/Delete сериализуются row-lock'ом
+// на registries — воркер, закоммитивший позже, обязательно выполнил outbox-INSERT позже
+// и получил больший BIGSERIAL source_version), у repo-объекта НЕТ registries-строки для
+// row-lock (source of truth репо = zot). Без явной сериализации две конкурентные
+// register/unregister ОДНОГО repo-объекта могли бы закоммититься в порядке, расходящемся
+// с их source_version → iam-mirror last-source-state-wins выбрал бы не финально-
+// закоммиченное состояние (dangling authz-объект / непуллимый свежий repo). Поэтому берём
+// per-repo pg_advisory_xact_lock(hashtext(resource_id)) ПЕРЕД outbox-INSERT: concurrent
+// intent'ы одного repo-объекта сериализуются (второй ждёт commit первого → получает
+// больший id), а разные repo-объекты друг друга не блокируют. Lock — xact-scoped,
+// снимается на commit/rollback.
 func (r *RegistryRepo) emitRepoIntent(ctx context.Context, eventType string, intent domain.RegisterIntent) error {
 	if err := r.ready(); err != nil {
 		return err
@@ -333,6 +352,9 @@ func (r *RegistryRepo) emitRepoIntent(ctx context.Context, eventType string, int
 		return wrapPgErr(err, "registry_outbox", intent.ResourceID)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, intent.ResourceID); err != nil {
+		return wrapPgErr(err, "registry_outbox", intent.ResourceID)
+	}
 	if err := emitFGAIntent(ctx, tx, eventType, intent); err != nil {
 		return err
 	}

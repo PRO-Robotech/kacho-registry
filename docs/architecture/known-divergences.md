@@ -163,3 +163,38 @@ unverified test code (against the verification discipline).
 **What would revisit this.** Provision `jwtProjectViewerA` (second IdP identity + viewer
 role grant) on the stand; the three fixture-gated viewer cases in `registry-authz.py`
 then enforce authenticated-deny→404 automatically with no code change.
+
+## 6. ScopeFiltered-RPC row-filter / existence-hiding lives in `handler/listauthz.go`, not the use-case
+
+**Rule.** Thin handler: no domain-state / security decisions in transport; per-object
+authz belongs with the use-case.
+
+**Divergence.** For the three `ScopeFiltered` collection RPCs
+(`List` / `ListRepositories` / `ListTags`) the per-object authz — row-filter,
+existence-hiding (`deny → NOT_FOUND`), fail-closed on iam.Check error — is applied by
+`internal/handler/listauthz.go` (`repoAuthz.filterRegistries` / `filterRepos` /
+`namespaceGate` / `checkRepo`), *after* the use-case returns the unfiltered set. These
+RPCs are deliberately marked `ScopeFiltered` so the per-RPC authz-interceptor skips them
+(a single-object Check cannot express row-filter + existence-hiding at once).
+
+**Why accepted.**
+- `repoAuthz` is a **distinct authz component** wired into the handler, not ad-hoc
+  transport branching — the package doc treats `use-case/authz` as a peer decision layer
+  («ветвления по domain-state — в use-case/authz»). It is the *same* `Authorizer` port
+  and the *same* centralised `internal/domain` verb-relations / object-refs the
+  interceptor and data-plane use; drift between planes is structurally excluded.
+- It is **directly unit-tested** as the production authz seam
+  (`internal/handler/listauthz_test.go`: authenticated-deny → `NOT_FOUND`, filters return
+  empty not 403) — see divergence #5 — so it is not un-testable transport code.
+- Pushing the filter into the use-case would force the use-case to emit transport-shaped
+  `NOT_FOUND`/`UNAVAILABLE` existence-hiding (a gRPC-status concern) or a bespoke
+  hidden-existence sentinel + rewiring the `Authorizer` port through every `List*`
+  signature and its unit tests — trading one layering seam for another with no wire
+  change and real regression surface on security-critical code.
+
+**What would revisit this.** A second consumer of `uc.List` / `uc.ListRepositories`
+(e.g. a REST projection or a new admin RPC) that must not re-implement the filter:
+introduce an authz-scoped list use-case returning already-filtered domain results plus a
+hidden-existence sentinel, and reduce the handler to sentinel→gRPC-status translation.
+Until a second caller exists, the single filtered path is the whole surface and the risk
+the finding describes (a future caller forgetting to filter) has no live instance.

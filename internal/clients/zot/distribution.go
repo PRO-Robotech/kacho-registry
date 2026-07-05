@@ -73,7 +73,7 @@ func (c *Client) DeleteTag(ctx context.Context, registryID, repository, tag stri
 		return err
 	}
 	fullRepo := registryID + "/" + repository
-	digest, _, _, err := c.headManifest(ctx, fullRepo, tag)
+	digest, err := c.headManifest(ctx, fullRepo, tag)
 	if err != nil {
 		if errors.Is(err, errNotFound) {
 			return nil // тег уже отсутствует — идемпотентно

@@ -163,9 +163,16 @@ func classifyTag(m gqlImageSummary) domain.ArtifactType {
 // ListTags возвращает теги repo через search-ext GraphQL (ImageList). На каждый тег
 // проецируются digest, размер образа (Size int64), media-type, момент push (created_at),
 // момент последнего pull, subject-push (pushed_by), download-count и платформа
-// ("<os>/<arch>", "multi-arch" для index). Порядок Results сохраняется. Несуществующий
-// repo → пустой ImageList.Results → пустой список (грациозный dangling-ref, не ошибка).
-// Полная проекция (пагинацию применяет handler).
+// ("<os>/<arch>", "multi-arch" для index). Несуществующий repo → пустой ImageList.Results
+// → пустой список (грациозный dangling-ref, не ошибка).
+//
+// Окно (page_size/page_token) режется по имени тега (ASC) В АДАПТЕРЕ ДО проекции в
+// domain.Tag: материализация/аллокация ограничена запрошенной страницей, а не полным
+// набором тегов repo (CWE-770 — дешёвый ListTags(page_size=1) иначе аллоцировал бы
+// domain.Tag на КАЖДЫЙ тег; паритет с ListRepositories window-before-fan-out). zot
+// ImageList не поддерживает server-side keyset — сортируем+режем окно здесь; курсор
+// (namepage) байт-совместим с прежней handler-пагинацией. next-token пуст на последней
+// странице.
 func (c *Client) ListTags(ctx context.Context, q registry.TagListQuery) ([]*domain.Tag, string, error) {
 	if err := c.ready(); err != nil {
 		return nil, "", err
@@ -176,11 +183,17 @@ func (c *Client) ListTags(ctx context.Context, q registry.TagListQuery) ([]*doma
 		return nil, "", err
 	}
 	results := data.ImageList.Results
-	out := make([]*domain.Tag, 0, len(results))
-	for _, r := range results {
+	sort.Slice(results, func(i, j int) bool { return results[i].Tag < results[j].Tag })
+	window, next, err := namepage.Window(results, func(r gqlImageSummary) string { return r.Tag },
+		q.PageSize, q.PageToken)
+	if err != nil {
+		return nil, "", err
+	}
+	out := make([]*domain.Tag, 0, len(window))
+	for _, r := range window {
 		out = append(out, tagFromSummary(q.RegistryID, q.Repository, r))
 	}
-	return out, "", nil
+	return out, next, nil
 }
 
 // tagFromSummary строит проекцию одного тега из ImageList-элемента. Размер — Size

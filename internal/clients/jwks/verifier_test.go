@@ -286,6 +286,35 @@ func TestJWKS_Verify_NoneAlg_Rejected(t *testing.T) {
 	require.Error(t, err)
 }
 
+// REG-TX-21 alg-guard — cross-type key/alg confusion: заголовок объявляет один alg,
+// а kid резолвится в ключ ДРУГОГО типа (ES256 header ↔ RSA key, RS256 header ↔ EC key).
+// verifySignature обязан отвергнуть по type-assertion ("key type mismatch"), НЕ подсунув
+// ключ не того типа в проверку подписи (иначе — вектор forgery при adverse key-config).
+// Пиннит обе ветви `if !ok` в verifySignature (RS256/ES256), которые до этого не
+// покрывались ни одним negative-тестом (все прочие кейсы — off-allowlist alg / bad sig).
+func TestJWKS_Verify_KeyTypeAlgConfusion_Rejected(t *testing.T) {
+	// header alg=ES256, но kid указывает на RSA-ключ → key.(*ecdsa.PublicKey) не проходит.
+	t.Run("es256-header-over-rsa-key", func(t *testing.T) {
+		js := newJWKSServer(t, "kid-rsa")
+		v := New(js.srv.URL, testAud, testHydraIss)
+		signingInput := joseSigningInput("ES256", "kid-rsa", hydraClaims("cid-ci", time.Now().Add(time.Hour)))
+		// подпись-заглушка нужной для ES256 длины (64B) — type-assert падает ДО её проверки.
+		tok := signingInput + "." + b64u(make([]byte, 64))
+		_, err := v.Verify(context.Background(), tok)
+		require.ErrorIs(t, err, ErrInvalidToken)
+	})
+	// header alg=RS256, но kid указывает на EC-ключ → key.(*rsa.PublicKey) не проходит.
+	t.Run("rs256-header-over-ec-key", func(t *testing.T) {
+		js := newJWKSServer(t)
+		js.addEC(t, "kid-ec")
+		v := New(js.srv.URL, testAud, testHydraIss)
+		signingInput := joseSigningInput("RS256", "kid-ec", hydraClaims("cid-ci", time.Now().Add(time.Hour)))
+		tok := signingInput + "." + b64u([]byte("stub-signature"))
+		_, err := v.Verify(context.Background(), tok)
+		require.ErrorIs(t, err, ErrInvalidToken)
+	})
+}
+
 // JWKS кэшируется (TTL): повторные Verify известным kid не рефетчат JWKS.
 func TestJWKS_Verify_Caches(t *testing.T) {
 	js := newJWKSServer(t, "kid-rsa")

@@ -25,17 +25,14 @@ const acceptManifests = "application/vnd.oci.image.manifest.v1+json," +
 	"application/vnd.oci.image.index.v1+json," +
 	"application/vnd.docker.distribution.manifest.list.v2+json"
 
-// manifestBody — минимальный разбор OCI/Docker image-манифеста: top-level mediaType
-// (index/manifest-list для multi-arch), config (mediaType — дискриминатор типа
-// артефакта; size/digest — для расчёта размеров) и layers. manifest-index не несёт
-// layers — вклад в размер/блобы 0 (best-effort), но top-level mediaType несёт.
+// manifestBody — минимальный разбор OCI/Docker image-манифеста: config (mediaType —
+// дискриминатор типа артефакта; size/digest — для расчёта размеров) и layers. Только
+// эти два поля читаются consumer'ами (manifestHasDigest / Stats). manifest-index не
+// несёт config/layers → вклад в размер/блобы 0 (best-effort, index-child-агрегация не
+// реализована).
 type manifestBody struct {
-	MediaType string       `json:"mediaType"`
-	Config    descriptor   `json:"config"`
-	Layers    []descriptor `json:"layers"`
-	// Manifests — дочерние манифесты multi-arch index/list (config/layers у самого
-	// index нет; размер образа = сумма их size).
-	Manifests []descriptor `json:"manifests"`
+	Config descriptor   `json:"config"`
+	Layers []descriptor `json:"layers"`
 }
 
 type descriptor struct {
@@ -63,28 +60,29 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	return c.do(ctx, http.MethodGet, path, nil, out)
 }
 
-// headManifest резолвит digest/size/media-type манифеста по ref (тег или digest)
-// через HEAD /manifests/<ref>. 404 → errNotFound.
-func (c *Client) headManifest(ctx context.Context, fullRepo, ref string) (digest string, size int64, mediaType string, err error) {
+// headManifest резолвит digest манифеста по ref (тег или digest) через
+// HEAD /manifests/<ref>. 404 → errNotFound. Единственный caller (DeleteTag) читает
+// только digest — size/media-type не проецируются.
+func (c *Client) headManifest(ctx context.Context, fullRepo, ref string) (digest string, err error) {
 	req, rerr := http.NewRequestWithContext(ctx, http.MethodHead,
 		c.baseURL+"/v2/"+repoPath(fullRepo)+"/manifests/"+url.PathEscape(ref), nil)
 	if rerr != nil {
-		return "", 0, "", failClosed("HEAD manifest request build", "err", rerr)
+		return "", failClosed("HEAD manifest request build", "err", rerr)
 	}
 	req.Header.Set("Accept", acceptManifests)
 	resp, derr := c.http.Do(req)
 	if derr != nil {
-		return "", 0, "", failClosed("HEAD manifest transport", "err", derr)
+		return "", failClosed("HEAD manifest transport", "err", derr)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
-		return "", 0, "", errNotFound
+		return "", errNotFound
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", 0, "", failClosed("HEAD manifest non-2xx", "status", resp.StatusCode)
+		return "", failClosed("HEAD manifest non-2xx", "status", resp.StatusCode)
 	}
-	return resp.Header.Get("Docker-Content-Digest"), resp.ContentLength, resp.Header.Get("Content-Type"), nil
+	return resp.Header.Get("Docker-Content-Digest"), nil
 }
 
 // getManifest читает и разбирает тело манифеста (config + layers). 404 → errNotFound.

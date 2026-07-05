@@ -92,7 +92,10 @@ type Config struct {
 	// другие RP registry-доступа не даёт).
 	ServiceAud string `envconfig:"KACHO_REGISTRY_SERVICE_AUD" default:"registry.kacho.local"`
 	// HydraIssuer — expected issuer identity-JWT (external Hydra issuer, напр.
-	// https://hydra.api.kacho.cloud). Пусто → iss не проверяется (задаётся деплоем).
+	// https://hydra.api.kacho.cloud). Пусто → iss не проверяется (dev-only). В
+	// production/production-strict issuer-pinning ОБЯЗАТЕЛЕН — buildDataplaneHandler
+	// (requireIssuerPinned) отклоняет старт при пустом значении, иначе data-plane принял
+	// бы токен любого RP, разделяющего JWKS+aud (federation-out).
 	HydraIssuer string `envconfig:"KACHO_REGISTRY_HYDRA_ISSUER" default:""`
 
 	// EndpointBase — tenant-facing base OCI-endpoint namespace. Output-only поле
