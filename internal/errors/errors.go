@@ -30,9 +30,6 @@ var (
 	ErrUnavailable = errors.New("unavailable")
 	// ErrInternal — некатегоризированная ошибка (без утечки сырого текста).
 	ErrInternal = errors.New("internal database error")
-	// ErrUnimplemented — метод-анкер скелета: реализация в rpc-implementer.
-	// Скелет собирается и отдаёт клиенту codes.Unimplemented до наполнения логикой.
-	ErrUnimplemented = errors.New("not implemented")
 )
 
 // Wrap транслирует ошибку pgx/pgconn в sentinel kacho-registry, прикрепляя

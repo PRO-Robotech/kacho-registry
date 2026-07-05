@@ -7,8 +7,8 @@
 // Create/Update/Delete/DeleteTag (→ Operation). Admin InternalRegistryService —
 // в internal.go (только :9091).
 //
-// Все методы делегируют use-case'у; в скелете use-case/порты возвращают
-// ErrUnimplemented → клиент видит codes.Unimplemented. Наполнение — rpc-implementer.
+// Все методы — тонкий transport: parse-request → делегация use-case'у → format.
+// Никакой бизнес-логики в handler'е (ветвления по domain-state — в use-case/authz).
 package handler
 
 import (
