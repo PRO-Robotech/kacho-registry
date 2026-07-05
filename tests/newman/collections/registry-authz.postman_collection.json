@@ -289,7 +289,7 @@
                 "exec": [
                   "const _viewer = pm.environment.get('jwtProjectViewerA') || '';",
                   "if (!_viewer) {",
-                  "  pm.test('SKIPPED (fixture-gated: needs registered viewer user; external_id is Kratos-projected)', () => pm.expect(true).to.eql(true));",
+                  "  console.log('SKIP viewer-tier (no jwtProjectViewerA fixture); boundary covered by internal/check/viewer_boundary_test.go');",
                   "  return;",
                   "}",
                   "const _n = parseInt(pm.environment.get('_azViewerRetry') || '0', 10);",
@@ -433,7 +433,7 @@
                 "exec": [
                   "const _viewer = pm.environment.get('jwtProjectViewerA') || '';",
                   "if (!_viewer) {",
-                  "  pm.test('SKIPPED (fixture-gated: needs registered viewer user; external_id is Kratos-projected)', () => pm.expect(true).to.eql(true));",
+                  "  console.log('SKIP viewer-tier (no jwtProjectViewerA fixture); boundary covered by internal/check/viewer_boundary_test.go');",
                   "  return;",
                   "}",
                   "pm.test('denied 403/404 (no v_update)', () => pm.expect(pm.response.code).to.be.oneOf([403, 404]));",
@@ -497,7 +497,7 @@
                 "exec": [
                   "const _viewer = pm.environment.get('jwtProjectViewerA') || '';",
                   "if (!_viewer) {",
-                  "  pm.test('SKIPPED (fixture-gated: needs registered viewer user; external_id is Kratos-projected)', () => pm.expect(true).to.eql(true));",
+                  "  console.log('SKIP viewer-tier (no jwtProjectViewerA fixture); boundary covered by internal/check/viewer_boundary_test.go');",
                   "  return;",
                   "}",
                   "pm.test('denied 403/404 (no v_delete)', () => pm.expect(pm.response.code).to.be.oneOf([403, 404]));",

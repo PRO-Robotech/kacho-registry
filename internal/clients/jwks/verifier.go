@@ -33,6 +33,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"strings"
@@ -54,18 +55,33 @@ const defaultTTL = 5 * time.Minute
 // обещание docstring'а («ограниченный TTL ... но не бесконечно», CWE-613).
 const maxTTL = time.Hour
 
+// defaultMinRefresh — минимальный интервал между рефетчами JWKS по неизвестному kid.
+// kid приходит из attacker-controlled JOSE-header и читается ДО верификации подписи;
+// без троттла каждый запрос с новым случайным kid форсил бы outbound-GET на Hydra JWKS
+// (pre-auth DoS-амплификация, CWE-770/400). Легитимная ротация ключа подхватывается с
+// задержкой ≤ minRefresh (после первого рефетча новый kid уже в кэше — обслуживается
+// мгновенно; троттлятся только по-прежнему-неизвестные kid'ы).
+const defaultMinRefresh = 10 * time.Second
+
+// maxJWKSBytes — верхняя граница размера тела JWKS-ответа (io.LimitReader перед
+// json.Decode): скомпрометированный/подменённый JWKS-endpoint не может исчерпать
+// память verifier'а гигантским телом (CWE-400).
+const maxJWKSBytes = 1 << 20 // 1 MiB
+
 // Verifier — потокобезопасный верификатор Hydra-issued identity-JWT по Hydra JWKS.
 type Verifier struct {
 	jwksURL string
 	aud     string        // ожидаемый audience (наш service); обязателен
-	iss     string        // ожидаемый issuer (Hydra); "" → проверка iss пропускается
-	ttl     time.Duration // ограниченный TTL кэша ключей
-	http    *http.Client
-	now     func() time.Time
+	iss        string        // ожидаемый issuer (Hydra); "" → проверка iss пропускается
+	ttl        time.Duration // ограниченный TTL кэша ключей
+	minRefresh time.Duration // минимальный интервал между рефетчами по неизвестному kid
+	http       *http.Client
+	now        func() time.Time
 
-	mu      sync.Mutex
-	keys    map[string]crypto.PublicKey // kid → *rsa.PublicKey | *ecdsa.PublicKey
-	fetched time.Time
+	mu          sync.Mutex
+	keys        map[string]crypto.PublicKey // kid → *rsa.PublicKey | *ecdsa.PublicKey
+	fetched     time.Time                   // время последнего УСПЕШНОГО рефетча (TTL-база)
+	lastRefresh time.Time                   // время последней ПОПЫТКИ рефетча (троттл-база, вкл. неудачные)
 }
 
 // New строит Verifier для Hydra JWKS-endpoint. aud — обязательный expected audience
@@ -73,13 +89,14 @@ type Verifier struct {
 // (Hydra; пусто → не проверяется).
 func New(jwksURL, aud, iss string) *Verifier {
 	return &Verifier{
-		jwksURL: jwksURL,
-		aud:     aud,
-		iss:     iss,
-		ttl:     defaultTTL,
-		http:    &http.Client{Timeout: 10 * time.Second},
-		now:     time.Now,
-		keys:    map[string]crypto.PublicKey{},
+		jwksURL:    jwksURL,
+		aud:        aud,
+		iss:        iss,
+		ttl:        defaultTTL,
+		minRefresh: defaultMinRefresh,
+		http:       &http.Client{Timeout: 10 * time.Second},
+		now:        time.Now,
+		keys:       map[string]crypto.PublicKey{},
 	}
 }
 
@@ -167,14 +184,31 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (string, error) {
 // один рефетч JWKS (key rotation). Рефетч не удался → отказ (fail-closed): по
 // устаревшему кэшу не обслуживаем, чтобы ротированный/отозванный ключ не оставался
 // валидным без ограничения TTL. Рефетч удался, но kid по-прежнему нет → отказ.
+//
+// Троттл (CWE-770/400): kid берётся из attacker-controlled JOSE-header ДО верификации
+// подписи, поэтому рефетч по неизвестному/протухшему kid'у ограничен одним на окно
+// minRefresh. Слот рефетча захватывается под lock'ом ДО отпускания его на outbound-GET,
+// поэтому конкурентные промахи (флуд случайных kid) коллапсируют в один фетч (не
+// thundering herd), а не в N одновременных исходящих HTTPS-соединений.
 func (v *Verifier) keyFor(ctx context.Context, kid string) (crypto.PublicKey, error) {
 	v.mu.Lock()
+	now := v.now()
 	key, ok := v.keys[kid]
-	fresh := v.now().Sub(v.fetched) < v.ttl
-	v.mu.Unlock()
+	fresh := now.Sub(v.fetched) < v.ttl
 	if ok && fresh {
+		v.mu.Unlock()
 		return key, nil
 	}
+	// Нужен рефетч (протухший кэш ИЛИ неизвестный kid). Троттлим: не чаще одного
+	// рефетча на minRefresh. Захватываем слот (lastRefresh = now) под lock'ом до
+	// отпускания его на HTTP-GET — конкурентные промахи в этом окне получают
+	// throttled-fail, а не собственный outbound-фетч.
+	if now.Sub(v.lastRefresh) < v.minRefresh {
+		v.mu.Unlock()
+		return nil, fmt.Errorf("unknown kid %q", kid)
+	}
+	v.lastRefresh = now
+	v.mu.Unlock()
 
 	if err := v.refresh(ctx); err != nil {
 		return nil, err
@@ -207,7 +241,7 @@ func (v *Verifier) refresh(ctx context.Context) error {
 	var doc struct {
 		Keys []jsonWebKey `json:"keys"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJWKSBytes)).Decode(&doc); err != nil {
 		return fmt.Errorf("jwks decode: %w", err)
 	}
 

@@ -22,9 +22,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/PRO-Robotech/kacho-corelib/authz"
-	"github.com/PRO-Robotech/kacho-corelib/ids"
 	"github.com/PRO-Robotech/kacho-corelib/operations"
-	corevalidate "github.com/PRO-Robotech/kacho-corelib/validate"
 
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
@@ -61,12 +59,6 @@ func registryObjectRef(registryID string) string {
 // repositoryObjectRef — FGA object репозитория "registry_repository:<id>/<repo>".
 func repositoryObjectRef(registryID, repository string) string {
 	return domain.FGAObjectRef(domain.FGAObjectTypeRepository, registryID+"/"+repository)
-}
-
-// validateRegistryID отсекает malformed registry-id первым стейтментом RPC (prefix
-// `reg` → InvalidArgument "invalid registry id '<X>'").
-func validateRegistryID(id string) error {
-	return corevalidate.ResourceID("registry", ids.PrefixRegistry, id)
 }
 
 // repoAuthz — handler-level per-repo authz. Пустой az (breakglass) → bypass.

@@ -99,13 +99,16 @@ func (c *Client) getManifest(ctx context.Context, fullRepo, ref string) (manifes
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return manifestBody{}, errNotFound
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return manifestBody{}, failClosed("GET manifest non-2xx", "status", resp.StatusCode)
 	}
 	var mb manifestBody
 	if err := json.NewDecoder(resp.Body).Decode(&mb); err != nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return manifestBody{}, failClosed("GET manifest decode", "err", err)
 	}
 	return mb, nil

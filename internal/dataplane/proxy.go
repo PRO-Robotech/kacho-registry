@@ -36,7 +36,20 @@ func NewZotForwarder(zotEndpoint string, logger *slog.Logger) (*ZotForwarder, er
 	if target.Scheme == "" || target.Host == "" {
 		return nil, fmt.Errorf("dataplane: zot endpoint must be an absolute URL (got %q)", zotEndpoint)
 	}
-	rp := httputil.NewSingleHostReverseProxy(target)
+	// Rewrite (не deprecated Director): путь форвардится как есть (SetURL джойнит base-path
+	// target'а с inbound-путём — у zot base пуст), inbound Host сохраняется (паритет с
+	// прежним NewSingleHostReverseProxy). Вычищаем caller-identity credentials до форварда:
+	// authz уже энфорснут per-request Check выше, zot'у bearer/cookie caller'а не нужны, а
+	// осевшие в его access-логах они расширяли бы harvest-поверхность (реплей в пределах TTL
+	// токена, CWE-522/200).
+	rp := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(target)
+			pr.Out.Host = pr.In.Host
+			pr.Out.Header.Del("Authorization")
+			pr.Out.Header.Del("Cookie")
+		},
+	}
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, e error) {
 		// zot недоступен/сбой на forward — fail-closed 502, причина только в лог.
 		logger.Warn("zot forward failed", "path", r.URL.Path, "err", e)

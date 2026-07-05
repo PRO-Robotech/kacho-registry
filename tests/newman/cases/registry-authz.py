@@ -21,12 +21,13 @@ viewer-tier юзер здесь не провиженятся:
   != 401 (unauthenticated-тело несёт generic-причину, не resource-existence leak).
 - **Viewer-tier** (GET-VIEWER-OK / UPDATE-VIEWER-DENY / DELETE-VIEWER-DENY) — требуют
   зарегистрированного viewer-юзера, которого стенд дать не может. Кейс fixture-gated:
-  при пустом `jwtProjectViewerA` — единичный informational-SKIP (green), при наличии
-  токена — полный энфорс реальных assertions. Граница «viewer держит v_get, но НЕ
-  v_update/v_delete → Update/Delete = NOT_FOUND (existence-hidden)» ДОПОЛНИТЕЛЬНО
-  покрыта всегда-исполняемым Go-тестом internal/check/viewer_boundary_test.go
-  (реальный corelib authz-interceptor поверх registry PermissionMap + fake CheckClient,
-  грантящий ровно v_get) — граница НЕ висит только на fixture-gated SKIP'е.
+  при пустом `jwtProjectViewerA` кейс НЕ эмитит зелёный pm.test (console-note + return
+  без assertion — не false-green, ban #13), при наличии токена — полный энфорс реальных
+  assertions. Граница «viewer держит v_get, но НЕ v_update/v_delete → Update/Delete =
+  NOT_FOUND (existence-hidden)» ДОПОЛНИТЕЛЬНО покрыта всегда-исполняемым Go-тестом
+  internal/check/viewer_boundary_test.go (реальный corelib authz-interceptor поверх
+  registry PermissionMap + fake CheckClient, грантящий ровно v_get) — граница НЕ висит
+  только на fixture-gated SKIP'е.
 
 Инвариант existence-hiding (authenticated-ungranted → 404, никогда 403, без leak'а)
 отдельно верифицируется GREEN control-plane-сьютом и data-plane-харнессом.
@@ -75,12 +76,17 @@ def _never_reveals_regid():
 def _viewer_gate():
     # Viewer-tier кейсы требуют зарегистрированного viewer-юзера. На single-user
     # стенде (external_id проецируется из Kratos-IdP, публичным API не создаётся)
-    # фикстуры нет — кейс проходит как informational SKIP; при наличии токена
-    # исполняются реальные viewer-assertions (полный энфорс).
+    # фикстуры нет. В этом случае кейс НЕ эмитит зелёный pm.test: раньше здесь стоял
+    # pm.test('SKIPPED', () => pm.expect(true).to.eql(true)) — no-op assertion, которая
+    # не может упасть и рапортовала непроверенную границу как green (ban #13, inflate
+    # pass-count). Теперь при отсутствии фикстуры — console-note + return БЕЗ assertion
+    # (кейс отражается как «нет тестов», а не false-green). При наличии токена —
+    # реальные viewer-assertions (полный энфорс). Сама граница v_get→NOT_FOUND всегда
+    # покрыта Go-тестом internal/check/viewer_boundary_test.go.
     return [
         "const _viewer = pm.environment.get('jwtProjectViewerA') || '';",
         "if (!_viewer) {",
-        "  pm.test('SKIPPED (fixture-gated: needs registered viewer user; external_id is Kratos-projected)', () => pm.expect(true).to.eql(true));",
+        "  console.log('SKIP viewer-tier (no jwtProjectViewerA fixture); boundary covered by internal/check/viewer_boundary_test.go');",
         "  return;",
         "}",
     ]

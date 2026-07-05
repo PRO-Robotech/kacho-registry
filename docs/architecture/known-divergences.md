@@ -198,3 +198,37 @@ introduce an authz-scoped list use-case returning already-filtered domain result
 hidden-existence sentinel, and reduce the handler to sentinel→gRPC-status translation.
 Until a second caller exists, the single filtered path is the whole surface and the risk
 the finding describes (a future caller forgetting to filter) has no live instance.
+
+## 7. Newman black-box suite is not gated by the per-repo `ci.yaml`
+
+**Rule.** testing.md: the Newman/Postman suite is the primary regression infra; a new
+RPC/field ships its Newman case in the same PR.
+
+**Divergence.** `.github/workflows/ci.yaml` runs only build-vet-test (unit `-short`),
+integration (testcontainers `./internal/repo/...`), lint and govuln. The black-box
+Newman collections (`tests/newman/cases/registry.py`, `registry-authz.py`) and the
+data-plane harness (`scripts/dataplane-e2e.sh`) are **not** invoked by any workflow in
+this repo — they run against a deployed stand via `tests/newman/scripts/run.sh` /
+`dataplane-e2e.sh`.
+
+**Why accepted.**
+- Newman is a **through-the-gateway black box**: it needs a live api-gateway + Hydra
+  token-exchange + IAM/OpenFGA + zot + Postgres — i.e. the aggregate deployed stack. Per
+  `polyrepo.md`, e2e-through-api-gateway is owned by the deployed stand
+  (`kacho-deploy` / `kacho-test`), not by a per-service unit-CI runner that has no such
+  stack. Spinning the full multi-service topology inside this repo's `ci.yaml` would
+  duplicate the deploy repo's responsibility.
+- The cases/collections **are** authored, `validate-cases.py`/`gen.py`-clean and
+  committed, so the regression assets exist and are review-gated; only their *execution*
+  is deferred to the stand. Shipping a CI job that cannot bring up the stack would be a
+  perpetually-red or perpetually-skipped job (no signal), which the verification
+  discipline forbids.
+- REST-contract / gateway-wiring / cross-service-authz regressions are additionally
+  guarded here by build-time seams: `internal/handler/*_test.go` (ScopeFiltered authz),
+  `internal/check/viewer_boundary_test.go` (real corelib interceptor + PermissionMap),
+  and the dataplane unit suite.
+
+**What would revisit this.** A shared CI action in `kacho-deploy`/`kacho-test` that
+stands the stack up and runs `run.sh` + `dataplane-e2e.sh` on registry PRs (e.g. via a
+`repository_dispatch` from this repo). At that point wire this repo's PRs to trigger it;
+until the stand-in-CI exists, the suite is gated at the aggregate-e2e layer.

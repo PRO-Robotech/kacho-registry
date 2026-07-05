@@ -31,7 +31,7 @@ func (u *UseCase) ListOperations(ctx context.Context, q ListOperationsQuery) ([]
 	if q.RegistryID == "" {
 		return nil, "", failInvalidArg("registry_id is required")
 	}
-	if err := validateRegistryID(q.RegistryID); err != nil {
+	if err := ValidateRegistryID(q.RegistryID); err != nil {
 		return nil, "", err
 	}
 	ops, next, err := u.ops.List(ctx, operations.ListFilter{

@@ -33,7 +33,7 @@ func (u *UseCase) Delete(ctx context.Context, registryID string) (*operations.Op
 	if registryID == "" {
 		return nil, failInvalidArg("registryId is required")
 	}
-	if err := validateRegistryID(registryID); err != nil {
+	if err := ValidateRegistryID(registryID); err != nil {
 		return nil, err
 	}
 

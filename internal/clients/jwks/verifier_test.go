@@ -13,9 +13,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -329,23 +331,92 @@ func TestJWKS_Verify_Caches(t *testing.T) {
 
 // REG-TX-21(b) — неизвестный kid → рефетч JWKS (key rotation). Новый ES256-ключ,
 // добавленный Hydra после первого фетча, подхватывается рефетчем → verify OK.
+// Рефетч по неизвестному kid'у троттлится (minRefresh), поэтому второй Verify
+// выполняется по часам, продвинутым за окно троттла (иначе — throttled-fail).
 func TestJWKS_Verify_RefetchOnUnknownKid(t *testing.T) {
 	js := newJWKSServer(t, "kid-rsa")
 	v := New(js.srv.URL, testAud, testHydraIss)
+	clock := time.Now()
+	v.now = func() time.Time { return clock }
 
-	tok1 := js.mintRS256(t, "kid-rsa", hydraClaims("cid-ci", time.Now().Add(time.Hour)))
+	tok1 := js.mintRS256(t, "kid-rsa", hydraClaims("cid-ci", clock.Add(time.Hour)))
 	_, err := v.Verify(context.Background(), tok1)
 	require.NoError(t, err)
 	require.Equal(t, int32(1), js.fetch.Load())
 
-	// ротация Hydra: добавляем ES256 kid-ec2 в JWKS.
+	// ротация Hydra: добавляем ES256 kid-ec2 в JWKS. Продвигаем часы за окно троттла
+	// (кэш ещё свеж по TTL: minRefresh << ttl), чтобы рефетч по новому kid'у не был
+	// подавлен троттлом.
 	js.addEC(t, "kid-ec2")
-	tok2 := js.mintES256(t, "kid-ec2", hydraClaims("cid-ci2", time.Now().Add(time.Hour)))
+	clock = clock.Add(defaultMinRefresh + time.Second)
+	tok2 := js.mintES256(t, "kid-ec2", hydraClaims("cid-ci2", clock.Add(time.Hour)))
 
 	sub, err := v.Verify(context.Background(), tok2)
 	require.NoError(t, err)
 	require.Equal(t, "cid-ci2", sub)
 	require.Equal(t, int32(2), js.fetch.Load(), "unknown kid triggered a refetch")
+}
+
+// SEC (CWE-770/400) — флуд токенов со свежим случайным kid не должен форсить рефетч
+// JWKS на каждый запрос: после первого успешного фетча неизвестный kid в пределах окна
+// minRefresh получает throttled-fail БЕЗ дополнительного outbound-GET (pre-auth
+// DoS-амплификация закрыта).
+func TestJWKS_Verify_UnknownKidThrottled_NoRefetch(t *testing.T) {
+	js := newJWKSServer(t, "kid-rsa")
+	v := New(js.srv.URL, testAud, testHydraIss)
+	clock := time.Now()
+	v.now = func() time.Time { return clock }
+
+	tok := js.mintRS256(t, "kid-rsa", hydraClaims("cid-ci", clock.Add(time.Hour)))
+	_, err := v.Verify(context.Background(), tok)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), js.fetch.Load())
+
+	// Тот же момент времени (внутри окна minRefresh): 5 токенов с разными случайными
+	// kid'ами. Ни один не форсит рефетч — kid читается до верификации подписи.
+	for i := 0; i < 5; i++ {
+		bogus := joseSigningInput("RS256", fmt.Sprintf("bogus-%d", i),
+			hydraClaims("cid-x", clock.Add(time.Hour))) + ".QUFB"
+		_, verr := v.Verify(context.Background(), bogus)
+		require.Error(t, verr)
+	}
+	require.Equal(t, int32(1), js.fetch.Load(),
+		"unknown-kid flood within minRefresh must not trigger additional JWKS fetches")
+}
+
+// SEC (CWE-770/400) — конкурентный флуд неизвестных kid'ов коллапсирует в один рефетч:
+// слот рефетча захватывается под lock'ом до отпускания на HTTP-GET, поэтому N
+// одновременных промахов не веерятся в N исходящих JWKS-фетчей (thundering herd).
+func TestJWKS_Verify_ConcurrentUnknownKid_BoundsRefetch(t *testing.T) {
+	js := newJWKSServer(t, "kid-rsa")
+	v := New(js.srv.URL, testAud, testHydraIss)
+	clock := time.Now()
+	v.now = func() time.Time { return clock }
+
+	tok := js.mintRS256(t, "kid-rsa", hydraClaims("cid-ci", clock.Add(time.Hour)))
+	_, err := v.Verify(context.Background(), tok)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), js.fetch.Load())
+
+	// Продвигаем часы за окно троттла, затем стартуем конкурентный флуд. Ровно один
+	// goroutine захватывает слот рефетча; остальные — throttled-fail. clock после этой
+	// строки не мутируется — конкурентное чтение из v.now безопасно.
+	clock = clock.Add(defaultMinRefresh + time.Second)
+
+	const n = 16
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			bogus := joseSigningInput("RS256", fmt.Sprintf("cc-bogus-%d", i),
+				hydraClaims("cid-x", clock.Add(time.Hour))) + ".QUFB"
+			_, _ = v.Verify(context.Background(), bogus)
+		}(i)
+	}
+	wg.Wait()
+	require.Equal(t, int32(2), js.fetch.Load(),
+		"concurrent unknown-kid flood must collapse to a single JWKS refetch")
 }
 
 // REG-TX-21(a) — JWKS недоступен И ключа нет в кэше → fail-closed (не пропускаем).
