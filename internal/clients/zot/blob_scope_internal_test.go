@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,10 +27,43 @@ type concCountingZot struct {
 	tags     []string
 	target   string // digest, который «лежит» в манифесте matchTag (для early-exit теста)
 	matchTag string
+
+	// Барьер — детерминированный пол параллелизма без real-clock окна. Если задан
+	// (barrierN>0), manifest-хендлер паркует запросы, пока не прибудет barrierN
+	// одновременных: пока они запаркованы, cur ≥ barrierN, поэтому maxSeen ≥ barrierN
+	// структурно (не зависит от того, успел ли планировщик перекрыть sleep-окно).
+	// barrierTimeout — предохранитель: сериализованное исполнение (регрессия cap→0)
+	// не виснет, а проваливает assert (пик остаётся 1).
+	barrierN       int
+	barrierTimeout time.Duration
+	bmu            sync.Mutex
+	arrived        int
+	release        chan struct{}
+}
+
+// awaitBarrier паркует manifest-запрос до прибытия barrierN одновременных (или до
+// barrierTimeout как предохранитель). Барьер выключен (barrierN<=0) → no-op.
+func (z *concCountingZot) awaitBarrier() {
+	if z.barrierN <= 0 {
+		return
+	}
+	z.bmu.Lock()
+	z.arrived++
+	if z.arrived == z.barrierN {
+		close(z.release)
+	}
+	z.bmu.Unlock()
+	select {
+	case <-z.release:
+	case <-time.After(z.barrierTimeout):
+	}
 }
 
 func (z *concCountingZot) server(t *testing.T) *httptest.Server {
 	t.Helper()
+	if z.barrierN > 0 && z.release == nil {
+		z.release = make(chan struct{})
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		switch {
@@ -43,7 +77,7 @@ func (z *concCountingZot) server(t *testing.T) *httptest.Server {
 					break
 				}
 			}
-			time.Sleep(10 * time.Millisecond) // окно перекрытия параллельных fetch'ей
+			z.awaitBarrier() // структурное окно перекрытия параллельных fetch'ей
 			z.cur.Add(-1)
 			ref := path[strings.Index(path, "/manifests/")+len("/manifests/"):]
 			cfg := "sha256:cfg-" + ref
@@ -75,8 +109,12 @@ func manyTags(n int) []string {
 // TestBlobInRepo_BoundsFanoutConcurrency — на repo с 40 тегами и отсутствующим блобом
 // (полный скан) пик одновременных manifest-GET'ов не превышает blobScopeConcurrency,
 // но параллелизм реально используется (>1) — cap работает, не деградируя в sequential.
+// Пол параллелизма (≥2) проверяется структурным барьером (barrierN=2), а не 10ms
+// sleep-окном: два fetch'а паркуются до взаимного прибытия, поэтому maxSeen≥2
+// детерминирован (нет зависимости от планировщика/реальных часов). Серийная регрессия
+// (cap→sequential) высвобождается по barrierTimeout с пиком 1 → assert падает штатно.
 func TestBlobInRepo_BoundsFanoutConcurrency(t *testing.T) {
-	z := &concCountingZot{tags: manyTags(40)}
+	z := &concCountingZot{tags: manyTags(40), barrierN: 2, barrierTimeout: 2 * time.Second}
 	cli := New(z.server(t).URL)
 
 	in, err := cli.BlobInRepo(context.Background(), "reg-A", "app", "sha256:absent")

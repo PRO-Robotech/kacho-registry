@@ -42,6 +42,33 @@ func TestDataplane_ZotForward_StreamsAndCapturesStatus(t *testing.T) {
 	require.Equal(t, "sha256:deadbeef", rec.Header().Get("Docker-Content-Digest"), "zot headers passed back")
 }
 
+// SEC (CWE-522/200) — caller-identity credentials НЕ форвардятся в zot: authz уже
+// энфорснут per-request Check выше, а bearer/cookie в access-логах zot расширяли бы
+// harvest-поверхность (реплей в пределах TTL токена). Director вычищает Authorization
+// и Cookie до проксирования.
+func TestDataplane_ZotForward_StripsCallerCredentials(t *testing.T) {
+	var gotAuth, gotCookie string
+	zot := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotCookie = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer zot.Close()
+
+	fw, err := NewZotForwarder(zot.URL, nil)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/reg-A/app/manifests/v1", nil)
+	req.Header.Set("Authorization", "Bearer identity-jwt-secret")
+	req.Header.Set("Cookie", "session=abc")
+	rec := httptest.NewRecorder()
+	status := fw.Forward(rec, req)
+
+	require.Equal(t, http.StatusOK, status)
+	require.Empty(t, gotAuth, "caller Authorization must not be forwarded to zot")
+	require.Empty(t, gotCookie, "caller Cookie must not be forwarded to zot")
+}
+
 // zot-forward fail-closed: zot недоступен → 502 (не паника, причина не течёт).
 func TestDataplane_ZotForward_ZotDown_502(t *testing.T) {
 	zot := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))

@@ -29,7 +29,7 @@ func (u *UseCase) Update(ctx context.Context, spec UpdateSpec) (*operations.Oper
 	if spec.RegistryID == "" {
 		return nil, failInvalidArg("registryId is required")
 	}
-	if err := validateRegistryID(spec.RegistryID); err != nil {
+	if err := ValidateRegistryID(spec.RegistryID); err != nil {
 		return nil, err
 	}
 

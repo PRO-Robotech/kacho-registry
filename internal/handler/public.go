@@ -125,7 +125,7 @@ func (h *RegistryHandler) Delete(ctx context.Context, req *registryv1.DeleteRegi
 // пагинацией, даже если ghost-скрытие/фильтр схлопнули отдельную страницу.
 func (h *RegistryHandler) ListRepositories(ctx context.Context, req *registryv1.ListRepositoriesRequest) (*registryv1.ListRepositoriesResponse, error) {
 	registryID := req.GetRegistryId()
-	if err := validateRegistryID(registryID); err != nil {
+	if err := registry.ValidateRegistryID(registryID); err != nil {
 		return nil, mapErr(err)
 	}
 	if err := h.authz.namespaceGate(ctx, registryID); err != nil {
@@ -155,7 +155,7 @@ func (h *RegistryHandler) ListRepositories(ctx context.Context, req *registryv1.
 // теги чужого repo не раскрываются). Пагинация — по имени тега.
 func (h *RegistryHandler) ListTags(ctx context.Context, req *registryv1.ListTagsRequest) (*registryv1.ListTagsResponse, error) {
 	registryID, repository := req.GetRegistryId(), req.GetRepository()
-	if err := validateRegistryID(registryID); err != nil {
+	if err := registry.ValidateRegistryID(registryID); err != nil {
 		return nil, mapErr(err)
 	}
 	if repository == "" {
@@ -189,7 +189,7 @@ func (h *RegistryHandler) ListTags(ctx context.Context, req *registryv1.ListTags
 // worker НЕ запускается (async-Operation с error раскрыл бы факт приёма мутации).
 func (h *RegistryHandler) DeleteTag(ctx context.Context, req *registryv1.DeleteTagRequest) (*operationProto, error) {
 	registryID, repository, tag := req.GetRegistryId(), req.GetRepository(), req.GetTag()
-	if err := validateRegistryID(registryID); err != nil {
+	if err := registry.ValidateRegistryID(registryID); err != nil {
 		return nil, mapErr(err)
 	}
 	if repository == "" {

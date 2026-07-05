@@ -27,7 +27,7 @@ func (u *UseCase) DeleteTag(ctx context.Context, registryID, repository, tag str
 	if err := u.assertWired(); err != nil {
 		return nil, err
 	}
-	if err := validateRegistryID(registryID); err != nil {
+	if err := ValidateRegistryID(registryID); err != nil {
 		return nil, err
 	}
 	if repository == "" {
@@ -97,7 +97,7 @@ func (u *UseCase) TriggerGC(ctx context.Context, registryID string) (*operations
 	if err := u.assertWired(); err != nil {
 		return nil, err
 	}
-	if err := validateRegistryID(registryID); err != nil {
+	if err := ValidateRegistryID(registryID); err != nil {
 		return nil, err
 	}
 

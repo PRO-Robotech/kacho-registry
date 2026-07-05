@@ -9,7 +9,7 @@
 | Surface | Module | Cases / scenarios | Assertions | Failed | Verification |
 |---|---|---|---|---|---|
 | Control-plane CRUD | `cases/registry.py` | 30 | 150 | 0 | **GREEN on fe3455** |
-| Control-plane authz | `cases/registry-authz.py` | 9 | all executed | 0 | **GREEN on fe3455** (3 viewer-tier cases fixture-gated → informational SKIP) |
+| Control-plane authz | `cases/registry-authz.py` | 9 | all executed | 0 | **GREEN on fe3455** (3 viewer-tier cases fixture-gated → console-only SKIP, no green assertion) |
 | Data-plane OCI proxy + token-exchange | `scripts/dataplane-e2e.sh` | full handshake→push→pull→delete flow | all hard assertions | 0 | **ALL hard assertions GREEN on fe3455** |
 
 ### Control-plane CRUD (`cases/registry.py`, 30 cases) — 150 assertions GREEN
@@ -50,12 +50,15 @@ Existence-hiding + verb-tier invariants black-box through api-gateway:
   → 401) is GREEN as-is.
 - **Viewer-tier cases — fixture-gated (SKIP on single-user stand).**
   `REG-AZ-GET-VIEWER-OK`, `REG-AZ-UPDATE-VIEWER-DENY`, `REG-AZ-DELETE-VIEWER-DENY`
-  each begin with a guard: when `jwtProjectViewerA` is empty they emit a single
-  passing informational test (`SKIPPED (fixture-gated: needs registered viewer user;
-  external_id is Kratos-projected)`) and return; with a real viewer token present the
-  full assertions run and are enforced. fe3455 has exactly one registered IAM user
-  (the cluster-admin) and a user's `external_id` is Kratos-IdP-projected — it cannot
-  be created via the public API — so a viewer-tier user is not provisionable here.
+  each begin with a guard: when `jwtProjectViewerA` is empty they emit a **console-only
+  SKIP note and return with no assertion** (previously a passing `pm.test('SKIPPED …')`
+  no-op — a green test that verified nothing, inflating the pass count; removed as
+  borderline ban #13). With a real viewer token present the full assertions run and are
+  enforced. The v_get→NOT_FOUND boundary these cases target is covered unconditionally by
+  the Go seam `internal/check/viewer_boundary_test.go`, so the SKIP path reports no
+  green, not a false green. fe3455 has exactly one registered IAM user (the
+  cluster-admin) and a user's `external_id` is Kratos-IdP-projected — it cannot be
+  created via the public API — so a viewer-tier user is not provisionable here.
 
 ### Data-plane OCI proxy + token-exchange (`scripts/dataplane-e2e.sh`) — ALL hard assertions GREEN
 
@@ -130,7 +133,7 @@ the Hydra token-exchange. All hard assertions GREEN on fe3455:
 | Surface | Authored | Live-verified | Environment / evidence |
 |---|---|---|---|
 | Control-plane CRUD (`registry.py`, 30) | ✅ | ✅ | fe3455 — 150 assertions, 0 failed |
-| Control-plane authz (`registry-authz.py`, 9) | ✅ | ✅ | fe3455 — stranger/anon GREEN; 3 viewer-tier fixture-gated (SKIP) |
+| Control-plane authz (`registry-authz.py`, 9) | ✅ | ✅ | fe3455 — stranger/anon GREEN; 3 viewer-tier fixture-gated (console-only SKIP, no green) |
 | Data-plane OCI proxy + token-exchange (`dataplane-e2e.sh`) | ✅ | ✅ | fe3455 — all hard assertions GREEN (docker CLI + `/v2/` + Hydra) |
 | InternalRegistryService (:9091, mTLS) | 🔬 integration | 🔬 | Go integration only (no public REST) |
 

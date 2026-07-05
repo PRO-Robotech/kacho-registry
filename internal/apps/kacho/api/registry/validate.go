@@ -8,10 +8,12 @@ import (
 	corevalidate "github.com/PRO-Robotech/kacho-corelib/validate"
 )
 
-// validateRegistryID отсекает malformed registry-id синхронно первым стейтментом
+// ValidateRegistryID отсекает malformed registry-id синхронно первым стейтментом
 // RPC: prefix `reg` (family-agnostic) → InvalidArgument "invalid registry id '<X>'".
-// Пустой id пропускается (required-проверка — отдельно у caller'а).
-func validateRegistryID(id string) error {
+// Пустой id пропускается (required-проверка — отдельно у caller'а). Экспортирован —
+// единый канонический валидатор для use-case и handler-предчека ScopeFiltered-RPC
+// (текст ошибки — часть контракта, не дублируем правило по слоям).
+func ValidateRegistryID(id string) error {
 	return corevalidate.ResourceID("registry", ids.PrefixRegistry, id)
 }
 
