@@ -8,6 +8,8 @@ import (
 
 	"github.com/PRO-Robotech/kacho-corelib/authz"
 	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
+
+	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
 
 // FGA-скоупинг kacho-registry (verb-bearing модель Kachō, anti-#241: verb-relations
@@ -19,16 +21,19 @@ import (
 // registry_registry:<new-id> ещё нет). List/ListRepositories/ListTags/DeleteTag
 // дополнительно per-repo row-filter'уются В ХЕНДЛЕРЕ (gateway List-exempt) — запись
 // в PermissionMap здесь работает как namespace call-gate.
+// object-type / verb-relation vocabulary — единый источник в internal/domain;
+// здесь только локальные alias'ы (никаких независимых строковых литералов —
+// rename в domain автоматически распространяется на оба plane'а, drift исключён).
 const (
-	objectTypeRegistry   = "registry_registry"
-	objectTypeRepository = "registry_repository"
+	objectTypeRegistry   = domain.FGAObjectTypeRegistry
+	objectTypeRepository = domain.FGAObjectTypeRepository
 	objectTypeProject    = "iam_project"
 
-	relVGet    = "v_get"
-	relVList   = "v_list"
-	relVCreate = "v_create"
-	relVUpdate = "v_update"
-	relVDelete = "v_delete"
+	relVGet    = domain.FGARelationVGet
+	relVList   = domain.FGARelationVList
+	relVCreate = domain.FGARelationVCreate
+	relVUpdate = domain.FGARelationVUpdate
+	relVDelete = domain.FGARelationVDelete
 )
 
 // registryObject — extractor (registry_registry, <registryId>) из request'ов,

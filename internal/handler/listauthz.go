@@ -36,22 +36,23 @@ type Authorizer interface {
 	Check(ctx context.Context, subject, relation, object string) (bool, error)
 }
 
-// verb-relations per-repo authz (зеркалят check.PermissionMap; для ScopeFiltered
-// registry-RPC authz энфорсится ЗДЕСЬ, не в interceptor'е — anti-#241: repo-verb НЕ
-// наследуется от namespace-tier).
+// verb-relations per-repo authz — локальные alias'ы единого источника internal/domain
+// (для ScopeFiltered registry-RPC authz энфорсится ЗДЕСЬ, не в interceptor'е —
+// anti-#241: repo-verb НЕ наследуется от namespace-tier). check.PermissionMap /
+// dataplane/authz ссылаются на те же domain-константы: drift между planes исключён.
 const (
-	relationVList   = "v_list"
-	relationVDelete = "v_delete"
+	relationVList   = domain.FGARelationVList
+	relationVDelete = domain.FGARelationVDelete
 )
 
 // registryObjectRef — FGA object namespace-реестра "registry_registry:<id>".
 func registryObjectRef(registryID string) string {
-	return domain.FGAObjectTypeRegistry + ":" + registryID
+	return domain.FGAObjectRef(domain.FGAObjectTypeRegistry, registryID)
 }
 
 // repositoryObjectRef — FGA object репозитория "registry_repository:<id>/<repo>".
 func repositoryObjectRef(registryID, repository string) string {
-	return domain.FGAObjectTypeRepository + ":" + registryID + "/" + repository
+	return domain.FGAObjectRef(domain.FGAObjectTypeRepository, registryID+"/"+repository)
 }
 
 // validateRegistryID отсекает malformed registry-id первым стейтментом RPC (prefix

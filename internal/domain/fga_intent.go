@@ -6,6 +6,7 @@ package domain
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // FGA-register-intent — чистые domain-value-типы transactional-outbox owner-tuple
@@ -48,6 +49,36 @@ const (
 const (
 	FGAEventRegister   = "fga.register"
 	FGAEventUnregister = "fga.unregister"
+)
+
+// FGA verb-relation-строки (verb-bearing модель Kachō, anti-#241: repo-verb НЕ
+// наследуется от namespace-tier). ЕДИНЫЙ источник истины для обоих planes —
+// check.PermissionMap (control-plane interceptor-gate), handler/listauthz
+// (ScopeFiltered row-filter) и dataplane/authz (OCI push/pull) ссылаются сюда,
+// не переобъявляя литералы (иначе rename одной строки рассинхронит планы).
+const (
+	FGARelationVGet    = "v_get"
+	FGARelationVList   = "v_list"
+	FGARelationVCreate = "v_create"
+	FGARelationVUpdate = "v_update"
+	FGARelationVDelete = "v_delete"
+)
+
+// FGA subject-type namespaces аутентифицированного principal (parity с kacho-iam
+// FGA-моделью). Разделяемы обоими encoders (FGASubjectFromPrincipal — control-plane
+// по Principal.Type; FGASubjectFromID — data-plane по id-prefix), чтобы тип-строка
+// жила в одном месте.
+const (
+	FGASubjectTypeUser           = "user"
+	FGASubjectTypeServiceAccount = "service_account"
+)
+
+// Kachō principal id-prefix'ы (parity с kacho-iam domain PrefixUser/PrefixServiceAccount).
+// Data-plane имеет только id из верифицированного JWT (без Principal.Type), поэтому
+// выводит subject-тип по этим префиксам — единственный доступный ему дискриминатор.
+const (
+	principalIDPrefixUser           = "usr"
+	principalIDPrefixServiceAccount = "sva"
 )
 
 // FGATuple — один owner-hierarchy tuple intent "<subject> #<relation> @<object>".
@@ -137,6 +168,30 @@ func FGASubjectFromPrincipal(principalType, principalID string) string {
 		return ""
 	}
 	return principalType + ":" + principalID
+}
+
+// FGASubjectFromID — FGA subject-строка из одного Kachō principal id (data-plane
+// имеет только `sub` из верифицированного JWT, без Principal.Type). Тип выводится по
+// id-prefix — единственному дискриминатору, доступному без обращения к iam: usr_ →
+// user, sva_ → service_account. В схеме ids Kachō id-prefix и Principal.Type
+// согласованы (usr_ всегда type=user), поэтому результат совпадает с
+// control-plane FGASubjectFromPrincipal для тех же principal'ов. Пустой id → ""
+// (невалидный caller — AuthN не должен был его пропустить). Неизвестный prefix
+// трактуется как service_account (docker login сейчас — SA-key only; сохраняет
+// прежнее поведение data-plane heuristic'а).
+func FGASubjectFromID(principalID string) string {
+	switch {
+	case principalID == "":
+		return ""
+	case strings.HasPrefix(principalID, principalIDPrefixUser):
+		return FGAObjectRef(FGASubjectTypeUser, principalID)
+	case strings.HasPrefix(principalID, principalIDPrefixServiceAccount):
+		return FGAObjectRef(FGASubjectTypeServiceAccount, principalID)
+	default:
+		// docker login сейчас — SA-key only (identity-only токен); неизвестный prefix
+		// → service_account (сохраняет прежнее поведение data-plane heuristic'а).
+		return FGAObjectRef(FGASubjectTypeServiceAccount, principalID)
+	}
 }
 
 // RegisterIntentForCreate — intent на Create реестра: project-tuple ПЕРВЫМ, затем
