@@ -354,3 +354,51 @@ func TestJWKS_Verify_Malformed(t *testing.T) {
 	_, err := v.Verify(context.Background(), "not-a-jwt")
 	require.Error(t, err)
 }
+
+// rsaJWK строит jsonWebKey (kty=RSA) из публичной части RSA-ключа (base64url n/e).
+func rsaJWK(pub *rsa.PublicKey) jsonWebKey {
+	return jsonWebKey{
+		Kty: "RSA",
+		N:   b64u(pub.N.Bytes()),
+		E:   b64u(big.NewInt(int64(pub.E)).Bytes()),
+	}
+}
+
+// SEC — слишком короткий RSA-модуль (< 2048 бит) — риск подделки токена: атакующий
+// может факторизовать модуль и подписать произвольный JWT. toRSA обязан отвергнуть
+// такой ключ с внятной ошибкой, чтобы он не попал в кэш верификатора.
+func TestJWKS_toRSA_RejectsSmallModulus(t *testing.T) {
+	small, err := rsa.GenerateKey(rand.Reader, 1024)
+	require.NoError(t, err)
+
+	_, err = rsaJWK(&small.PublicKey).toRSA()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "modulus")
+}
+
+// SEC — нормальный 2048-битный ключ (Ory Hydra default) проходит toRSA без изменений
+// поведения (регресс-страховка к минимальному размеру модуля).
+func TestJWKS_toRSA_Accepts2048(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	got, err := rsaJWK(&key.PublicKey).toRSA()
+	require.NoError(t, err)
+	require.Equal(t, 0, key.PublicKey.N.Cmp(got.N))
+	require.Equal(t, key.PublicKey.E, got.E)
+}
+
+// SEC (end-to-end) — JWKS с коротким (1024-бит) RSA-ключом: refresh пропускает такой
+// ключ, поэтому токен, подписанный им, отвергается (kid не попал в кэш). Верификатор
+// не должен принимать forgeable-токен даже если Hydra по ошибке отдала слабый ключ.
+func TestJWKS_Verify_SmallModulusKey_Rejected(t *testing.T) {
+	js := newJWKSServer(t)
+	weak, err := rsa.GenerateKey(rand.Reader, 1024)
+	require.NoError(t, err)
+	js.rsaKeys["kid-weak"] = weak
+	v := New(js.srv.URL, testAud, testHydraIss)
+	tok := js.mintRS256(t, "kid-weak", hydraClaims("cid-ci", time.Now().Add(time.Hour)))
+
+	_, err = v.Verify(context.Background(), tok)
+	require.Error(t, err)
+}
