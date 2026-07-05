@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -241,7 +242,7 @@ func (c *Client) repoTags(ctx context.Context, fullRepo string) ([]string, error
 	var tr tagsResponse
 	err := c.getJSON(ctx, "/v2/"+repoPath(fullRepo)+"/tags/list", &tr)
 	if err != nil {
-		if err == errNotFound {
+		if errors.Is(err, errNotFound) {
 			return nil, nil
 		}
 		return nil, err
@@ -308,13 +309,13 @@ func (c *Client) DeleteTag(ctx context.Context, registryID, repository, tag stri
 	fullRepo := registryID + "/" + repository
 	digest, _, _, err := c.headManifest(ctx, fullRepo, tag)
 	if err != nil {
-		if err == errNotFound {
+		if errors.Is(err, errNotFound) {
 			return nil // тег уже отсутствует — идемпотентно
 		}
 		return err
 	}
 	delErr := c.do(ctx, http.MethodDelete, "/v2/"+repoPath(fullRepo)+"/manifests/"+digest, nil, nil)
-	if delErr == errNotFound {
+	if errors.Is(delErr, errNotFound) {
 		return nil // манифест уже снят — идемпотентно
 	}
 	return delErr
@@ -455,7 +456,7 @@ func (c *Client) BlobInRepo(ctx context.Context, registryID, repo, digest string
 	for _, tag := range tags {
 		mb, merr := c.getManifest(ctx, fullRepo, tag)
 		if merr != nil {
-			if merr == errNotFound {
+			if errors.Is(merr, errNotFound) {
 				continue // тег исчез между list и read — пропускаем
 			}
 			return false, merr
