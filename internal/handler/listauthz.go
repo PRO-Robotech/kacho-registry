@@ -17,6 +17,7 @@ package handler
 import (
 	"context"
 
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -27,6 +28,13 @@ import (
 
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
+
+// repoAuthzConcurrency — верхняя граница параллельных per-repo authz-Check при
+// row-фильтрации ОДНОЙ страницы каталога. Паритет с data-plane serveCatalog
+// (catalogAuthzConcurrency): fan-out в iam ограничен, а не «по одному синхронно».
+// Само число Check ограничивается окном page_size ДО фильтра (см. ListRepositories),
+// поэтому здесь только concurrency-bound.
+const repoAuthzConcurrency = 8
 
 // Authorizer — узкий порт per-repo authz-Check (InternalIAMService.Check →
 // OpenFGA/ReBAC). subject — FGA subject-строка ("user:usr_…" / "service_account:…"),
@@ -133,18 +141,36 @@ func (a repoAuthz) filterRegistries(ctx context.Context, regs []*domain.Registry
 // filterRepos — per-repo row-filter каталога: оставляет только repos, на
 // registry_repository:<reg>/<repo> которых subject имеет v_list (REG-22/23). breakglass
 // → все; az-error → UNAVAILABLE (не отдаём нефильтрованный список — no-leak).
+//
+// Fan-out ограничен: (1) вызывающий (ListRepositories) передаёт УЖЕ окно page_size
+// (bounded число Check per RPC — anti-DoS, CWE-770), (2) сами Check выполняются
+// bounded-concurrency (repoAuthzConcurrency) — паритет с data-plane serveCatalog.
+// Результат детерминирован (indexed slice сохраняет входной порядок имён ASC).
 func (a repoAuthz) filterRepos(ctx context.Context, registryID string, repos []*domain.Repository) ([]*domain.Repository, error) {
 	if a.az == nil {
 		return repos, nil
 	}
 	subject := subjectFromContext(ctx)
+	allowed := make([]bool, len(repos))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(repoAuthzConcurrency)
+	for i, r := range repos {
+		i, r := i, r
+		g.Go(func() error {
+			ok, err := a.az.Check(gctx, subject, relationVList, repositoryObjectRef(registryID, r.Name))
+			if err != nil {
+				return err
+			}
+			allowed[i] = ok
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, errAuthzUnavailable()
+	}
 	out := make([]*domain.Repository, 0, len(repos))
-	for _, r := range repos {
-		allowed, err := a.az.Check(ctx, subject, relationVList, repositoryObjectRef(registryID, r.Name))
-		if err != nil {
-			return nil, errAuthzUnavailable()
-		}
-		if allowed {
+	for i, r := range repos {
+		if allowed[i] {
 			out = append(out, r)
 		}
 	}

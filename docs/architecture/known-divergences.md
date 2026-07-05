@@ -10,34 +10,38 @@ divergence, why it is accepted, and what would change the decision.
 **Rule.** Clean Architecture: `service/` (use-case) imports only `domain`; grpc-stubs
 / `status` / proto are adapter concerns and belong in `handler/`.
 
-**Divergence.** `internal/apps/kacho/api/registry` imports `google.golang.org/grpc/codes`
-+ `status` (direct `status.Error` for sync input-validation), `registryv1` proto-stubs
-and `anypb` (`ProtoRegistry`, `CreateRegistryMetadata`, `registryAny`).
+**Divergence.** `internal/apps/kacho/api/registry` imports `registryv1` proto-stubs and
+`anypb` (`ProtoRegistry`, `CreateRegistryMetadata`, `registryAny`) — the LRO envelope.
 
-**Why accepted.**
+**R3 update (2026-07-05, sec-hardening-r3).** The *error path* leak flagged by the 3rd
+audit is closed: the use-case no longer imports `google.golang.org/grpc/codes` /
+`status` and no longer hand-codes gRPC codes. Every use-case error is now expressed as a
+`regerrors.*` domain sentinel and mapped through the **single** `serviceerr.ToStatus`
+seam via the `errmap.go` helpers (`failInvalidArg` / `failFailedPrecondition` /
+`failAlreadyExists` / `failUnavailable`). `grep -R 'grpc/status\|grpc/codes'
+internal/apps/kacho/api/registry` is now empty. Exact error texts are preserved (the
+sentinel wraps the same message; `serviceerr` strips the sentinel prefix), so the wire
+contract is unchanged. The residual documented below is now **only** the proto/`Any` LRO
+envelope, not error transport.
+
+**Why the proto/`Any` residual is accepted.**
 - **Inherent to the kachō async-LRO pattern.** Every mutation returns an
   `operation.Operation`; its `response`/`metadata` are `google.protobuf.Any`, and the
   worker closure that finalises the operation lives *in the use-case* (it captures the
   request-ctx principal and the created domain object). Serialising the domain result
   into a proto `Any` therefore happens inside the use-case by construction — the proto
-  import cannot be removed from this package no matter how the error path is refactored.
-  This matches the established kachō LRO layout (godzila skill: "async Operation LRO
-  envelope", use-case owns the worker).
-- **No dual error contract in practice.** The hand-rolled `status.Error(codes.…)` calls
-  and the sentinel path both funnel through `handler/maperr.go → serviceerr.ToStatus`,
-  which passes pre-built gRPC statuses through unchanged (`serviceerr.go` FromError
-  arm). Sync return and async `Operation.error` are produced by the *same* mapper, so
-  there is exactly one observable code/text per condition.
-- **Error text is a Kachō style contract.** The exact messages ("Illegal argument: …",
-  "registry %s already exists", "project %s not found") are part of the API surface
-  (CLAUDE.md YC-style error-format). A blanket rewrite to sentinels risks silently
-  altering those strings for a low-severity purity gain.
+  import cannot be removed no matter how the error path is refactored. This matches the
+  established kachō LRO layout (godzila skill: "async Operation LRO envelope", use-case
+  owns the worker). `corelib operations.Run` maps the worker error via
+  `status.FromError`, so the worker closure must yield a gRPC status (a bare sentinel
+  would collapse to INTERNAL) — the `serviceerr` seam supplies exactly that.
+- **Established test contract.** 25+ use-case unit assertions call `status.Code()` on
+  the use-case return (the use-case *is* the layer producing the gRPC-shaped LRO
+  envelope); inverting to bare sentinels would require rewriting them for no wire change.
 
 **What would revisit this.** If a non-gRPC transport is ever added, extract the
-proto-`Any` serialisation behind a mapper injected at the composition root and move the
-sync-validation `status.Error` calls to `regerrors.*` sentinels mapped solely in the
-handler. Until then the coupling is confined to the LRO envelope and reconciled by a
-single mapper.
+proto-`Any` serialisation behind a mapper injected at the composition root. Until then
+the coupling is confined to the LRO envelope and reconciled by a single mapper.
 
 ## 2. Data-plane OCI proxy has no separate use-case layer
 
@@ -66,3 +70,96 @@ materialises repo authz object" decision, or the verb-mapping policy grows beyon
 current fixed table, extract a `dataplane` use-case (AuthorizePush / AuthorizePull /
 RegisterOnFirstPush) owning the decision and leave the handler to translate it to HTTP
 status codes.
+
+## 3. Cross-service (registry ↔ zot) TOCTOU windows are software-validated, not DB-enforced
+
+**Rule.** CLAUDE.md «Within-service refs — DB-уровень обязателен» (#10): every reference
+and invariant *inside one service DB* must be a DB construct (FK / UNIQUE / EXCLUDE /
+CAS); software `check → act` is forbidden.
+
+**Divergence (by rule's own cross-service exception).** Two narrow windows exist across
+the registry-DB ↔ zot boundary — a *different DB / different service* boundary that rule
+#10 and #8 explicitly exempt (no cross-DB FK possible):
+
+- **Delete-vs-push** (`internal/apps/kacho/api/registry/delete.go`): `doDelete` CAS-marks
+  the registry `DELETING`, re-checks `zot.NamespaceEmpty` **after** the CAS, then
+  physically DELETEs the row + emits the unregister-intent. A push authorized *before*
+  tuple removal could land content in the gap between the second `NamespaceEmpty()==true`
+  check and the final DELETE.
+- **DeleteTag emptiness** (`deletetag.go` `unregisterRepoIfEmpty`): after deleting the
+  last tag it reads `zot.ListTags`; if empty it emits the repo unregister-intent. A push
+  landing a new tag between the read and the emit strips a parent-tuple the push just
+  created.
+
+**Why accepted.**
+- **The boundary is cross-service** (registry Postgres vs zot's own store) — DB
+  constraints cannot span it (database-per-service, #8). Rule #10 keeps software
+  validation + graceful dangling-ref as the sanctioned pattern precisely here.
+- **Defense-in-depth already in place.** Delete is `forward-only` and re-checks
+  `NamespaceEmpty` *after* the CAS→DELETING (a real second guard, not a single
+  check-then-act), and `zot`-unavailable → `Unavailable`/`FailedPrecondition`
+  (fail-closed, retriable) rather than a destructive erase.
+- **Self-healing.** Register-on-first-push re-materialises any stripped repo/namespace
+  authz object on the next push; the transient state is an existence-hiding `NOT_FOUND`,
+  never a cross-tenant leak or data-loss of committed metadata.
+
+**What would revisit this.** A true write-fence: gate data-plane push authorization on
+registry status (deny push while `DELETING`) so `DELETING` becomes a hard fence, and/or
+order the register/unregister intents by a per-repo monotonic marker (the
+`registry_outbox.source_version` BIGSERIAL from migration 0002 already gives
+commit-order monotonicity for registries — extending it to repo intents would let
+register-on-push always win). Both are behavioural changes to the push path and are
+tracked as follow-ups rather than folded into a contracts-frozen hardening pass.
+
+## 4. Platform config via envconfig struct-tags (not viper/koanf YAML)
+
+**Rule.** evgeniy regime: service config is YAML via viper/koanf, not `envconfig`
+struct-tags.
+
+**Divergence.** `internal/apps/kacho/config/config.go` loads config from env via
+`corelib config.LoadPrefixed` with `envconfig:"…"` struct-tags.
+
+**Why accepted.** This is the **platform-wide** corelib convention
+(`corecfg.LoadPrefixed` is used identically by every `kacho-*` service). It is a
+regime-conformance choice made once at the corelib layer, not a registry-local defect;
+changing it is a workspace-wide migration of `kacho-corelib/config` under a dedicated
+release phase, out of scope for a single-service hardening pass. No runtime defect —
+only the layered-profile / hot-reload affordances of viper/koanf are unavailable.
+
+**What would revisit this.** A platform decision to migrate `kacho-corelib/config` to
+viper/koanf YAML with env override; then every service (including this one) follows.
+
+## 5. Authenticated-deny → 404 existence-hiding: live e2e assertion blocked on test infra
+
+**Rule.** CLAUDE.md #12: security invariants are enforced end-to-end, not only by unit
+fakes.
+
+**Gap (test-infrastructure, not code).** The core tenant-isolation invariant —
+*authenticated non-member sees `NOT_FOUND` (existence-hidden), never a 403 leak, never
+success-with-data* — has no **live** black-box (Newman-through-gateway) assertion. The
+single-user dev stand registers exactly one IAM identity (cluster-admin); a dev-JWT with
+an unregistered `sub` is treated as `UNAUTHENTICATED` (401), so `jwtStranger` cases
+cannot drive an *authenticated-but-ungranted* request, and the viewer-tier cases are
+fixture-gated (SKIP while `jwtProjectViewerA` is empty). See
+`tests/newman/cases/registry-authz.py` docstring.
+
+**Current mitigation (runnable in CI, no stand).**
+- Real authz-seam: `internal/check/viewer_boundary_test.go` runs the **real** corelib
+  authz-interceptor over the registry `PermissionMap` with a fake `CheckClient` granting
+  exactly `v_get`, asserting Update/Delete → `NOT_FOUND` (existence-hidden) for an
+  authenticated principal. Not a handler fake — the production interceptor + map.
+- Handler ScopeFiltered path: `internal/handler/listauthz_test.go`
+  (`TestHandler_REG22_ListRepositories_NamespaceDeny_NotFound`, `REG24` deny) drives an
+  **authenticated** principal (`carolCtx`) with a denying authorizer →
+  `NOT_FOUND`, and `filterRegistries`/`filterRepos` return empty (not 403) — the exact
+  production `repoAuthz` logic, only the network Check faked.
+
+**Why not closed here.** Closing the *live* gap requires provisioning a second IdP
+identity + a project-scoped viewer grant on the deployed stand — test-environment
+infrastructure, not a contract-safe code change, and not exercisable from a
+build/test-only hardening pass. Shipping Newman Python that cannot be run here would be
+unverified test code (against the verification discipline).
+
+**What would revisit this.** Provision `jwtProjectViewerA` (second IdP identity + viewer
+role grant) on the stand; the three fixture-gated viewer cases in `registry-authz.py`
+then enforce authenticated-deny→404 automatically with no code change.

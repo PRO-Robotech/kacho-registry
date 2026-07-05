@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	registry "github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/api/registry"
+	"github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/shared/namepage"
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
 )
@@ -31,12 +32,15 @@ import (
 const zotFanout = 8
 
 // ListRepositories возвращает repos namespace через search-ext GraphQL. GlobalSearch
-// даёт per-repo агрегаты (Size / LastUpdated / DownloadCount) одним запросом и служит
-// источником имён репо; per-repo ImageList (распараллелен, zotFanout) — теги для
-// tag_count / artifact-типов / last-pull. Имя repo — БЕЗ namespace-префикса. Repo с
-// НУЛЁМ тегов (все теги удалены, GC ещё не снял запись) — скрывается: пустой repo для
-// tenant'а эквивалентен удалённому. Результат отсортирован по имени. Полная проекция
-// (authz-фильтр и пагинацию применяет handler ПОСЛЕ фильтра).
+// даёт per-repo агрегаты (Size / LastUpdated / DownloadCount) + имена одним дешёвым
+// запросом. Имена сортируются и режутся ОКНОМ (page_size/page_token) ДО per-repo
+// ImageList-fan-out — иначе один вызов развернулся бы в N round-trip'ов к zot по всей
+// проекции namespace (CWE-770 memory/backend-амплификация; N не контролируется
+// вызывающим). ImageList (теги для tag_count/artifact-типов/last-pull) запрашивается
+// ТОЛЬКО для окна, распараллелен zotFanout. Имя repo — БЕЗ namespace-префикса. Repo с
+// НУЛЁМ тегов (все теги удалены, GC ещё не снял запись) — скрывается. Возвращает
+// окно (отсортировано ASC) + next-token (по сырым именам окна, ghost-скрытие/authz-
+// фильтр handler'а страницу не «удлиняют» — все repos достижимы пагинацией).
 func (c *Client) ListRepositories(ctx context.Context, q registry.RepoListQuery) ([]*domain.Repository, string, error) {
 	if err := c.ready(); err != nil {
 		return nil, "", err
@@ -46,20 +50,35 @@ func (c *Client) ListRepositories(ctx context.Context, q registry.RepoListQuery)
 	if err := c.gqlQuery(ctx, globalSearchQuery(prefix), &gs); err != nil {
 		return nil, "", err
 	}
-	summaries := gs.GlobalSearch.Repos
-	repos := make([]*domain.Repository, len(summaries)) // индексируем — компактим ниже
+
+	// GlobalSearch — substring-поиск: оставляем только свой namespace (defence-in-depth),
+	// сортируем по имени ASC (стабильный ключ курсора).
+	kept := make([]gqlRepoSummary, 0, len(gs.GlobalSearch.Repos))
+	for _, rs := range gs.GlobalSearch.Repos {
+		if strings.HasPrefix(rs.Name, prefix) {
+			kept = append(kept, rs)
+		}
+	}
+	sort.Slice(kept, func(i, j int) bool { return kept[i].Name < kept[j].Name })
+
+	// Окно по (page_size, page_token) ДО ImageList-fan-out — bound per-request нагрузки
+	// к zot. keyOf = имя БЕЗ префикса (курсор байт-совместим с тем, что видит клиент).
+	window, next, err := namepage.Window(kept, func(rs gqlRepoSummary) string {
+		return strings.TrimPrefix(rs.Name, prefix)
+	}, q.PageSize, q.PageToken)
+	if err != nil {
+		return nil, "", err
+	}
+
+	repos := make([]*domain.Repository, len(window)) // индексируем — компактим ниже
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(zotFanout)
-	for i, rs := range summaries {
+	for i, rs := range window {
 		i, rs := i, rs
-		// GlobalSearch — substring-поиск: отбрасываем чужой namespace (defence-in-depth).
-		if !strings.HasPrefix(rs.Name, prefix) {
-			continue
-		}
 		g.Go(func() error {
 			var data gqlImageListData
 			if err := c.gqlQuery(gctx, imageListQuery(rs.Name), &data); err != nil {
-				return err // zot недоступен → fail-closed для всего списка
+				return err // zot недоступен → fail-closed для всего окна
 			}
 			results := data.ImageList.Results
 			if len(results) == 0 {
@@ -78,8 +97,7 @@ func (c *Client) ListRepositories(ctx context.Context, q registry.RepoListQuery)
 			out = append(out, r)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, "", nil
+	return out, next, nil
 }
 
 // repositoryFromSummaries собирает проекцию repo из GlobalSearch-агрегата (rs) и тегов

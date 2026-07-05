@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/emptypb"
 
@@ -33,7 +31,7 @@ func (u *UseCase) Delete(ctx context.Context, registryID string) (*operations.Op
 		return nil, err
 	}
 	if registryID == "" {
-		return nil, status.Error(codes.InvalidArgument, "registryId is required")
+		return nil, failInvalidArg("registryId is required")
 	}
 	if err := validateRegistryID(registryID); err != nil {
 		return nil, err
@@ -47,7 +45,7 @@ func (u *UseCase) Delete(ctx context.Context, registryID string) (*operations.Op
 		return nil, mapRepoErr(err)
 	}
 	if !empty {
-		return nil, status.Error(codes.FailedPrecondition, "registry is not empty")
+		return nil, failFailedPrecondition("registry is not empty")
 	}
 
 	op, err := operations.NewFromContext(ctx,
@@ -96,7 +94,7 @@ func (u *UseCase) doDelete(ctx context.Context, registryID string) (*anypb.Any, 
 		return nil, mapRepoErr(err)
 	}
 	if !empty {
-		return nil, status.Error(codes.FailedPrecondition, "registry is not empty")
+		return nil, failFailedPrecondition("registry is not empty")
 	}
 
 	// zot-namespace lazy: провизионится на push, снимать нечего пока data-plane нет.

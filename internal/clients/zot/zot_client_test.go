@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,6 +88,8 @@ type fakeZot struct {
 	gqlRepos     map[string]*gqlRepoFixture // search-ext GraphQL-фикстуры
 	gqlFail      bool                       // 500 на GraphQL (транспортная недоступность)
 	gqlErrors    bool                       // непустой errors-массив в GraphQL-ответе
+
+	imageListCalls atomic.Int64 // счётчик ImageList-round-trip (bound fan-out — #4)
 }
 
 func newFakeZot() *fakeZot {
@@ -309,6 +312,7 @@ func (f *fakeZot) writeGlobalSearch(w http.ResponseWriter, query string) {
 }
 
 func (f *fakeZot) writeImageList(w http.ResponseWriter, query string) {
+	f.imageListCalls.Add(1)
 	repo := extractGqlArg(query, "repo")
 	fx := f.gqlRepos[repo]
 	results := make([]map[string]any, 0)
@@ -384,6 +388,37 @@ func TestZot_REG22_ListRepositories_NamespaceScoped(t *testing.T) {
 	// Результат отсортирован по имени.
 	require.Equal(t, "app", repos[0].Name)
 	require.Equal(t, "web", repos[1].Name)
+}
+
+// REG-DOS(#4) — ListRepositories режет ОКНО (page_size) ДО per-repo ImageList-fan-out:
+// при большом namespace дешёвый запрос НЕ разворачивается в N round-trip к zot. Регресс-
+// гейт против CWE-770 memory/backend-амплификации на уровне адаптера.
+func TestZot_ListRepositories_PaginatedBoundsImageListFanout(t *testing.T) {
+	fz := newFakeZot()
+	const total = 60
+	for i := 0; i < total; i++ {
+		name := "reg-A/repo-" + strconv.Itoa(1000+i) // 1000.. → лексикографически стабильно
+		fz.addGqlTag(name, containerTag("v1", "sha256:d"+strconv.Itoa(i), 100, "linux", "amd64"))
+	}
+	srv := fz.server(t)
+	cli := zotclient.New(srv.URL)
+
+	repos, next, err := cli.ListRepositories(t.Context(),
+		registry.RepoListQuery{RegistryID: "reg-A", PageSize: 5})
+	require.NoError(t, err)
+	require.Len(t, repos, 5, "страница ограничена page_size")
+	require.NotEmpty(t, next, "есть ещё репо → next-token")
+	require.Equal(t, int64(5), fz.imageListCalls.Load(),
+		"ImageList fan-out ограничен окном (5), а не всей проекцией (%d)", total)
+
+	// Курсор доводит до всех репо: следующая страница продолжает без пропусков.
+	fz.imageListCalls.Store(0)
+	repos2, _, err := cli.ListRepositories(t.Context(),
+		registry.RepoListQuery{RegistryID: "reg-A", PageSize: 5, PageToken: next})
+	require.NoError(t, err)
+	require.Len(t, repos2, 5)
+	require.Equal(t, int64(5), fz.imageListCalls.Load(), "вторая страница — тоже только окно")
+	require.Equal(t, "repo-1005", repos2[0].Name, "продолжение строго после курсора первой страницы")
 }
 
 // REG-22 — ListRepositories агрегирует размер/last-update/download-count из GlobalSearch,

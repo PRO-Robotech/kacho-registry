@@ -4,9 +4,6 @@
 package registry
 
 import (
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	"github.com/PRO-Robotech/kacho-corelib/ids"
 	corevalidate "github.com/PRO-Robotech/kacho-corelib/validate"
 )
@@ -57,7 +54,7 @@ func resolveUpdateMask(spec UpdateSpec) (UpdateSpec, error) {
 	}
 	for _, p := range spec.Mask {
 		if msg, ok := immutableUpdateFields[p]; ok {
-			return spec, status.Error(codes.InvalidArgument, msg)
+			return spec, failInvalidArg("%s", msg)
 		}
 	}
 	if len(spec.Mask) == 0 {

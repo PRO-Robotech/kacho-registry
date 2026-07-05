@@ -9,8 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
 )
 
 // pageCursor — непрозрачный курсор, кодируемый в page_token (base64 JSON).
@@ -42,7 +41,10 @@ func decodePageToken(token string) (pageCursor, error) {
 	return c, nil
 }
 
-// invalidPageTokenErr превращает мусорный page_token в gRPC InvalidArgument.
+// invalidPageTokenErr оборачивает мусорный page_token в domain-sentinel
+// ErrInvalidArg (repo НЕ формирует gRPC-статус — маппинг sentinel→gRPC в serviceerr).
+// serviceerr.ToStatus срежет префикс → клиент видит "invalid page_token: <причина>"
+// с кодом INVALID_ARGUMENT (контракт сообщения сохранён).
 func invalidPageTokenErr(err error) error {
-	return status.Errorf(codes.InvalidArgument, "invalid page_token: %v", err)
+	return fmt.Errorf("%w: invalid page_token: %v", regerrors.ErrInvalidArg, err)
 }

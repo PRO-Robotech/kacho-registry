@@ -6,9 +6,6 @@ package registry
 import (
 	"context"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	"github.com/PRO-Robotech/kacho-corelib/operations"
 )
 
@@ -32,7 +29,7 @@ func (u *UseCase) ListOperations(ctx context.Context, q ListOperationsQuery) ([]
 		return nil, "", err
 	}
 	if q.RegistryID == "" {
-		return nil, "", status.Error(codes.InvalidArgument, "registry_id is required")
+		return nil, "", failInvalidArg("registry_id is required")
 	}
 	if err := validateRegistryID(q.RegistryID); err != nil {
 		return nil, "", err

@@ -7,8 +7,6 @@ import (
 	"context"
 	"fmt"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
 
 	"github.com/PRO-Robotech/kacho-corelib/ids"
@@ -29,7 +27,7 @@ func (u *UseCase) Update(ctx context.Context, spec UpdateSpec) (*operations.Oper
 		return nil, err
 	}
 	if spec.RegistryID == "" {
-		return nil, status.Error(codes.InvalidArgument, "registryId is required")
+		return nil, failInvalidArg("registryId is required")
 	}
 	if err := validateRegistryID(spec.RegistryID); err != nil {
 		return nil, err
@@ -43,7 +41,7 @@ func (u *UseCase) Update(ctx context.Context, spec UpdateSpec) (*operations.Oper
 		// Имя mutable, но валидируется теми же правилами, что и Create (DNS-safe,
 		// длина). Конфликт по partial-UNIQUE(project,name) ловит DB → AlreadyExists.
 		if verr := domain.ValidateName("name", spec.Name); verr != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "Illegal argument: %s", verr.Error())
+			return nil, failInvalidArg("Illegal argument: %s", verr.Error())
 		}
 	}
 	if spec.ApplyDescription {
