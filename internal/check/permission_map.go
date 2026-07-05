@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/PRO-Robotech/kacho-corelib/authz"
-	registryv1 "github.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1"
+	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
 )
 
 // FGA-скоупинг kacho-registry (verb-bearing модель Kachō, anti-#241: verb-relations
@@ -44,6 +44,8 @@ func registryObject() authz.ObjectExtractor {
 		case *registryv1.DeleteRegistryRequest:
 			id = r.GetRegistryId()
 		case *registryv1.ListRepositoriesRequest:
+			id = r.GetRegistryId()
+		case *registryv1.ListRegistryOperationsRequest:
 			id = r.GetRegistryId()
 		case *registryv1.TriggerGarbageCollectionRequest:
 			id = r.GetRegistryId()
@@ -101,10 +103,17 @@ func PermissionMap() authz.RPCMap {
 			Extract:    registryObject(),
 			Permission: "registry.registries.get",
 		},
+		// List (registries collection) авторизуется В ХЕНДЛЕРЕ (ScopeFiltered):
+		// interceptor пропускает per-RPC Check, а handler делает listauthz row-filter
+		// по registry_registry v_list. Единичный per-RPC Check здесь семантически
+		// неверен — collection не несёт single object (extract вернул бы пустой
+		// object-id коллекции → "empty object id" → 403 на всю выборку). non-member →
+		// 200+empty (exempt-parity). Relation/Extract сохранены как catalog-doc.
 		"/kacho.cloud.registry.v1.RegistryService/List": {
-			Relation:   relVList,
-			Extract:    projectObject(),
-			Permission: "registry.registries.list",
+			Relation:      relVList,
+			Extract:       projectObject(),
+			Permission:    "registry.registries.list",
+			ScopeFiltered: true,
 		},
 		"/kacho.cloud.registry.v1.RegistryService/Create": {
 			Relation:   relVCreate,
@@ -121,21 +130,45 @@ func PermissionMap() authz.RPCMap {
 			Extract:    registryObject(),
 			Permission: "registry.registries.delete",
 		},
-		"/kacho.cloud.registry.v1.RegistryService/ListRepositories": {
+		// ListOperations — per-resource история операций реестра. Interceptor-gated
+		// single-object Check v_list на registry_registry:<id> (как Get), НЕ
+		// ScopeFiltered: коллекция принадлежит одному реестру, row-filter не нужен.
+		"/kacho.cloud.registry.v1.RegistryService/ListOperations": {
 			Relation:   relVList,
 			Extract:    registryObject(),
-			Permission: "registry.repositories.list",
+			Permission: "registry.registries.listOperations",
+		},
+		// ListRepositories/ListTags/DeleteTag авторизуются В ХЕНДЛЕРЕ (ScopeFiltered):
+		// interceptor пропускает per-RPC Check, а handler делает call-gate + per-repo
+		// row-filter + existence-hiding (deny→NOT_FOUND). Единичный interceptor-Check
+		// не покрыл бы row-filter каталога и вернул бы PermissionDenied вместо NOT_FOUND
+		// (раскрыв факт существования чужого repo). Relation/Extract сохранены как
+		// permission-catalog документация; энфорс — handler.
+		"/kacho.cloud.registry.v1.RegistryService/ListRepositories": {
+			Relation:      relVList,
+			Extract:       registryObject(),
+			Permission:    "registry.repositories.list",
+			ScopeFiltered: true,
 		},
 		"/kacho.cloud.registry.v1.RegistryService/ListTags": {
-			Relation:   relVList,
-			Extract:    repositoryObject(),
-			Permission: "registry.repositories.list",
+			Relation:      relVList,
+			Extract:       repositoryObject(),
+			Permission:    "registry.repositories.list",
+			ScopeFiltered: true,
 		},
 		"/kacho.cloud.registry.v1.RegistryService/DeleteTag": {
-			Relation:   relVDelete,
-			Extract:    repositoryObject(),
-			Permission: "registry.repositories.delete",
+			Relation:      relVDelete,
+			Extract:       repositoryObject(),
+			Permission:    "registry.repositories.delete",
+			ScopeFiltered: true,
 		},
+
+		// ---- OperationService (LRO poll, proto `kacho.cloud.operation`, NOT `.v1`) ----
+		// op-id opaque; авторизация на data-уровне (op принадлежит ресурсу вызывающего).
+		// Public exempt из per-RPC Check — иначе gateway opsProxy форвардит Get/Cancel
+		// сюда, а fail-closed interceptor отвергает unmapped RPC → poll недостижим.
+		"/kacho.cloud.operation.OperationService/Get":    {Public: true},
+		"/kacho.cloud.operation.OperationService/Cancel": {Public: true},
 
 		// ---- admin InternalRegistryService (cluster-internal :9091) ----
 		"/kacho.cloud.registry.v1.InternalRegistryService/TriggerGarbageCollection": {

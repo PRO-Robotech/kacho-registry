@@ -45,9 +45,17 @@ type Config struct {
 	AuthMode string `envconfig:"KACHO_REGISTRY_AUTH_MODE" default:"dev"`
 
 	// AuthZIAMGRPCAddr — internal endpoint kacho-iam (:9091) для per-RPC Check
-	// (ребро registry→iam authz) И для клиента ProjectService.Get / fga-proxy
-	// RegisterResource. Пусто + Breakglass=false → интерсептор НЕ подключается.
+	// (ребро registry→iam authz) И для fga-proxy RegisterResource/UnregisterResource
+	// (Internal-only). Пусто + Breakglass=false → интерсептор НЕ подключается.
 	AuthZIAMGRPCAddr string `envconfig:"KACHO_REGISTRY_AUTHZ_IAM_GRPC_ADDR" default:""`
+
+	// IAMProjectGRPCAddr — PUBLIC endpoint kacho-iam (:9090) для ProjectService.Get
+	// (existence-валидация project на Create). ProjectService зарегистрирован ТОЛЬКО
+	// на public :9090; на internal :9091 (AuthZIAMGRPCAddr) его НЕТ — вызов там
+	// возвращает Unimplemented. Поэтому project-ребро держит СОБСТВЕННЫЙ conn на :9090,
+	// отдельный от authz/register-ребра на :9091 (единый conn на :9091 давал
+	// Unimplemented на Get → фикс. INTERNAL на Create ещё до insert'а).
+	IAMProjectGRPCAddr string `envconfig:"KACHO_REGISTRY_IAM_PROJECT_GRPC_ADDR" default:"kacho-iam.kacho.svc.cluster.local:9090"`
 	// AuthZBreakglass — аварийный режим: пропускать все RPC без Check + WARN
 	// (только dev / break-glass).
 	AuthZBreakglass bool `envconfig:"KACHO_REGISTRY_AUTHZ_BREAKGLASS" default:"false"`
@@ -56,6 +64,29 @@ type Config struct {
 	// никогда не публично достижим; клиент ходит на cluster-internal endpoint.
 	ZotAddr string `envconfig:"KACHO_REGISTRY_ZOT_ADDR" default:""`
 
+	// ===== data-plane OCI auth-proxy (registry.kacho.local) =====
+
+	// DataplaneAddr — адрес data-plane HTTP-листенера (Docker Registry v2 / OCI).
+	// Отдельный порт от gRPC :9090/:9091. Пусто → data-plane не поднимается.
+	DataplaneAddr string `envconfig:"KACHO_REGISTRY_DATAPLANE_ADDR" default:":8080"`
+	// HydraJWKSURL — Hydra-public JWKS-endpoint для верификации identity-JWT
+	// data-plane. Токен теперь Hydra-issued (client_credentials для docker,
+	// jwt-bearer для k8s); подпись — RS256 (Ory default) либо ES256. Пусто + не
+	// breakglass → data-plane fail-closed на старте.
+	HydraJWKSURL string `envconfig:"KACHO_REGISTRY_HYDRA_JWKS_URL" default:"http://kacho-umbrella-hydra-public.kacho.svc:4444/.well-known/jwks.json"`
+	// TokenRealm — realm для WWW-Authenticate; docker сам идёт туда за Bearer-токеном.
+	// Остаётся token-шимом (kacho-iam /iam/token): docker предъявляет SA-key шиму,
+	// шим брокерит токен у Hydra. Для data-plane realm — непрозрачный указатель на
+	// auth-сервер клиента, поэтому Hydra-переключение его не меняет.
+	TokenRealm string `envconfig:"KACHO_REGISTRY_TOKEN_REALM" default:"https://api.kacho.local/iam/token"`
+	// ServiceAud — expected audience identity-JWT (наш service) + значение service=
+	// в WWW-Authenticate. Токен обязан нести aud ⊇ ServiceAud (federation-out на
+	// другие RP registry-доступа не даёт).
+	ServiceAud string `envconfig:"KACHO_REGISTRY_SERVICE_AUD" default:"registry.kacho.local"`
+	// HydraIssuer — expected issuer identity-JWT (external Hydra issuer, напр.
+	// https://hydra.api.kacho.cloud). Пусто → iss не проверяется (задаётся деплоем).
+	HydraIssuer string `envconfig:"KACHO_REGISTRY_HYDRA_ISSUER" default:""`
+
 	// EndpointBase — tenant-facing base OCI-endpoint namespace. Output-only поле
 	// Registry.endpoint = "<EndpointBase>/<id>". Это tenant-facing ingress-host;
 	// инфра-адрес zot наружу не раскрывается (security.md §инфра-данные).
@@ -63,8 +94,15 @@ type Config struct {
 
 	// ===== per-edge mTLS =====
 
-	// IAMAuthzMTLS — client-creds для ребра registry→iam (:9091): Check + fga-proxy.
+	// IAMAuthzMTLS — client-creds для ребра registry→iam internal (:9091): Check + fga-proxy.
+	// ServerName = kacho-iam-internal.* (реальный dial-host :9091).
 	IAMAuthzMTLS grpcclient.TLSClient `envconfig:"IAM_AUTHZ_MTLS"`
+
+	// IAMProjectMTLS — client-creds для ребра registry→iam public (:9090): ProjectService.Get.
+	// Отдельное поле от IAMAuthzMTLS, потому что ServerName public dial-host'а
+	// (kacho-iam.*) ≠ internal (kacho-iam-internal.*): единый ServerName некорректен
+	// для обоих листенеров под RequireAndVerifyClientCert.
+	IAMProjectMTLS grpcclient.TLSClient `envconfig:"IAM_PROJECT_MTLS"`
 
 	// PublicServerMTLS — server-creds для публичного листенера (:9090).
 	PublicServerMTLS grpcsrv.TLSServer `envconfig:"PUBLIC_SERVER_MTLS"`

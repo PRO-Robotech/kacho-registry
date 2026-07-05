@@ -15,7 +15,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	registryv1 "github.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1"
+	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
 
 	registry "github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/api/registry"
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
@@ -171,15 +171,15 @@ func TestRegistry_REG06_List_PageSizeValidation(t *testing.T) {
 	require.Equal(t, codes.InvalidArgument, codeOf(t, err))
 }
 
-// REG-36 — update_mask discipline: immutable name/project → INVALID_ARGUMENT с
-// каноничным текстом (без Operation); unknown → INVALID_ARGUMENT.
+// REG-36 — update_mask discipline: immutable project → INVALID_ARGUMENT с
+// каноничным текстом (без Operation); unknown → INVALID_ARGUMENT. name — mutable
+// (см. TestRegistry_REG36_Update_MutableFields).
 func TestRegistry_REG36_Update_MaskDiscipline(t *testing.T) {
 	cases := []struct {
 		name string
 		mask []string
 		msg  string
 	}{
-		{"immutable_name", []string{"name"}, "name is immutable after Registry.Create"},
 		{"immutable_project", []string{"project_id"}, "projectId is immutable after Registry.Create"},
 	}
 	for _, tc := range cases {
@@ -250,12 +250,64 @@ func TestRegistry_REG36_Update_MutableFields(t *testing.T) {
 		require.True(t, repo.updateSpec.ApplyLabels)
 		require.Empty(t, repo.updateSpec.Labels)
 	})
+	t.Run("name_mutable", func(t *testing.T) {
+		// mask=[name] с валидным DNS-safe именем → ApplyName, репозиторий SET name.
+		repo := &mockRepo{}
+		ops := newMemOps()
+		uc := newUC(repo, &mockZot{}, &mockIAM{}, ops)
+		op, err := uc.Update(aliceCtx(), registry.UpdateSpec{
+			RegistryID: validRegID, Mask: []string{"name"}, Name: "renamed-registry",
+		})
+		require.NoError(t, err)
+		awaitOpDone(t, ops, op.ID)
+		require.True(t, repo.updateSpec.ApplyName)
+		require.Equal(t, "renamed-registry", repo.updateSpec.Name)
+		require.False(t, repo.updateSpec.ApplyDescription, "mask=[name] не трогает description")
+	})
+	t.Run("name_invalid_dns", func(t *testing.T) {
+		// невалидное имя (uppercase/underscore) → InvalidArgument (те же правила, что Create).
+		uc := newUC(&mockRepo{}, &mockZot{}, &mockIAM{}, newMemOps())
+		_, err := uc.Update(aliceCtx(), registry.UpdateSpec{
+			RegistryID: validRegID, Mask: []string{"name"}, Name: "Bad_Name",
+		})
+		require.Equal(t, codes.InvalidArgument, codeOf(t, err))
+	})
+	t.Run("empty_mask_applies_name_when_provided", func(t *testing.T) {
+		// full-object PATCH с непустым именем → ApplyName; без имени — не трогает name.
+		repo := &mockRepo{}
+		ops := newMemOps()
+		uc := newUC(repo, &mockZot{}, &mockIAM{}, ops)
+		op, err := uc.Update(aliceCtx(), registry.UpdateSpec{RegistryID: validRegID, Name: "patched-name"})
+		require.NoError(t, err)
+		awaitOpDone(t, ops, op.ID)
+		require.True(t, repo.updateSpec.ApplyName)
+		require.Equal(t, "patched-name", repo.updateSpec.Name)
+	})
+}
+
+// REG-27 — worker-principal propagation: async Update-worker обязан пробросить
+// principal в worker-ctx (baggage.Extract режет его), иначе downstream/peer-вызовы
+// уходят анонимно (authz_no_principal). writer.Update должен получить ctx с
+// principal вызывающего (usr-alice), а не system/bootstrap-fallback.
+func TestRegistry_REG27_Update_WorkerPrincipalPropagated(t *testing.T) {
+	repo := &mockRepo{}
+	ops := newMemOps()
+	uc := newUC(repo, &mockZot{}, &mockIAM{}, ops)
+
+	op, err := uc.Update(aliceCtx(), registry.UpdateSpec{
+		RegistryID: validRegID, Mask: []string{"description"}, Description: "x",
+	})
+	require.NoError(t, err)
+	awaitOpDone(t, ops, op.ID)
+
+	require.Equal(t, "user", repo.updatePrincipal.Type, "worker-ctx несёт principal вызывающего, не system")
+	require.Equal(t, "usr-alice", repo.updatePrincipal.ID)
 }
 
 // REG-07 — Delete happy: Operation → poll до done без error; zot-namespace снят;
 // unregister-intent (project-tuple) эмитится.
 func TestRegistry_REG07_Delete_HappyPath(t *testing.T) {
-	zot := &mockZot{}
+	zot := &mockZot{namespaceEmpty: true} // пустой namespace → Delete проходит precondition
 	repo := &mockRepo{
 		markFn: func(_ context.Context, id string) (*domain.Registry, error) {
 			return &domain.Registry{ID: id, ProjectID: "prj-P", Status: domain.RegistryStatusDeleting}, nil
@@ -283,7 +335,7 @@ func TestRegistry_REG09_Delete_Idempotent(t *testing.T) {
 		deleteFn: func(context.Context, string, domain.RegisterIntent) error { deleted = true; return nil },
 	}
 	ops := newMemOps()
-	uc := newUC(repo, &mockZot{}, &mockIAM{}, ops)
+	uc := newUC(repo, &mockZot{namespaceEmpty: true}, &mockIAM{}, ops)
 
 	op, err := uc.Delete(aliceCtx(), validRegID)
 	require.NoError(t, err)

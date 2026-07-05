@@ -63,6 +63,21 @@ func (r *RegistryRepo) Get(ctx context.Context, id string) (*domain.Registry, er
 	return reg, nil
 }
 
+// RegistryProjectID — узкий lookup owning-project реестра по id (data-plane
+// register-on-first-push: интент репо должен нести ParentProjectID для containment
+// scope в iam-mirror). pgx.ErrNoRows → ErrNotFound через errors.Wrap.
+func (r *RegistryRepo) RegistryProjectID(ctx context.Context, id string) (string, error) {
+	if err := r.ready(); err != nil {
+		return "", err
+	}
+	var projectID string
+	q := fmt.Sprintf(`SELECT project_id FROM %s.registries WHERE id = $1`, schema)
+	if err := r.pool.QueryRow(ctx, q, id).Scan(&projectID); err != nil {
+		return "", regerrors.Wrap(err, "Registry", id)
+	}
+	return projectID, nil
+}
+
 // List возвращает реестры project'а cursor-пагинацией (created_at,id) ASC.
 // filter — whitelist `name=` (corelib filter.Parse; garbage → InvalidArgument);
 // garbage page_token → InvalidArgument. Запрашивает pageSize+1 для next-cursor.
@@ -188,6 +203,13 @@ func (r *RegistryRepo) Update(ctx context.Context, spec registry.UpdateSpec, mir
 	sets := []string{}
 	args := []any{spec.RegistryID}
 	idx := 2
+	if spec.ApplyName {
+		// Смена имени: partial-UNIQUE(project_id,name) WHERE status<>'DELETING' →
+		// конфликт даёт 23505 → regerrors.Wrap → ErrAlreadyExists.
+		sets = append(sets, fmt.Sprintf("name = $%d", idx))
+		args = append(args, spec.Name)
+		idx++
+	}
 	if spec.ApplyDescription {
 		sets = append(sets, fmt.Sprintf("description = $%d", idx))
 		args = append(args, spec.Description)
@@ -284,6 +306,44 @@ func (r *RegistryRepo) Delete(ctx context.Context, id string, intent domain.Regi
 	return nil
 }
 
+// RegisterRepository эмитит register-intent (parent+owner tuple) нового repo в
+// registry_outbox. У repo нет собственной ресурсной строки в БД (source of truth =
+// zot) — outbox-строка durable сама по себе, поэтому пишется одиночной tx. Register-
+// drainer применяет её через fga-proxy идемпотентно (повторный push того же repo даёт
+// дубль-intent, iam дедуплицирует → AlreadyApplied).
+func (r *RegistryRepo) RegisterRepository(ctx context.Context, intent domain.RegisterIntent) error {
+	return r.emitRepoIntent(ctx, domain.FGAEventRegister, intent)
+}
+
+// UnregisterRepository эмитит unregister-intent repo (снятие parent-tuple) в
+// registry_outbox — снятие висячего authz-объекта на удалении последнего тега.
+func (r *RegistryRepo) UnregisterRepository(ctx context.Context, intent domain.RegisterIntent) error {
+	return r.emitRepoIntent(ctx, domain.FGAEventUnregister, intent)
+}
+
+// emitRepoIntent — durable-emit repo-intent одиночной tx (у repo нет ресурсной DML,
+// с которой надо было бы атомарить). Пустой набор tuple → no-op.
+func (r *RegistryRepo) emitRepoIntent(ctx context.Context, eventType string, intent domain.RegisterIntent) error {
+	if err := r.ready(); err != nil {
+		return err
+	}
+	if len(intent.Tuples) == 0 {
+		return nil
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return regerrors.Wrap(err, "registry_outbox", intent.ResourceID)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := emitFGAIntent(ctx, tx, eventType, intent); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return regerrors.Wrap(err, "registry_outbox", intent.ResourceID)
+	}
+	return nil
+}
+
 // ---- helpers ----
 
 // scanRegistry читает строку реестра из pgx.Row/pgx.Rows в domain.Registry.
@@ -376,3 +436,4 @@ func invalidFilterErr(err error) error {
 }
 
 var _ registry.RegistryRepo = (*RegistryRepo)(nil)
+var _ registry.RepoRegistrar = (*RegistryRepo)(nil)

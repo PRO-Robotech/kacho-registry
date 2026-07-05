@@ -9,6 +9,7 @@ package errors
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -61,7 +62,20 @@ func Wrap(err error, resource, id string) error {
 		case "23514": // check_violation
 			return fmt.Errorf("%w: invalid %s", ErrInvalidArg, resource)
 		}
+		// Неклассифицированный SQLSTATE (42P01 undefined_table после goose-divergence,
+		// 42703 undefined_column, 22P02 type-mismatch, …). Сырой pgx наружу НЕ отдаём
+		// (фиксированный INTERNAL), но ВНУТРЕННИЙ лог обязан нести причину — иначе живой
+		// сбой = «internal database error» без единой строки о SQLSTATE.
+		slog.Default().Error("registry repo: unclassified database error",
+			"sqlstate", pgErr.Code,
+			"pg_message", pgErr.Message,
+			"pg_detail", pgErr.Detail,
+			"resource", resource,
+			"resource_id", id)
+		return ErrInternal
 	}
-	// Защитно: сырой pgx-текст наружу не отдаем — фиксированный sentinel.
+	// Non-pg неизвестная ошибка — тоже логируем сырой текст перед схлопом (не течёт наружу).
+	slog.Default().Error("registry repo: unclassified error",
+		"err", err.Error(), "resource", resource, "resource_id", id)
 	return ErrInternal
 }

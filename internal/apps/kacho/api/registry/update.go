@@ -14,7 +14,7 @@ import (
 	"github.com/PRO-Robotech/kacho-corelib/ids"
 	"github.com/PRO-Robotech/kacho-corelib/operations"
 	corevalidate "github.com/PRO-Robotech/kacho-corelib/validate"
-	registryv1 "github.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1"
+	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
 
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
@@ -38,6 +38,13 @@ func (u *UseCase) Update(ctx context.Context, spec UpdateSpec) (*operations.Oper
 	spec, err := resolveUpdateMask(spec)
 	if err != nil {
 		return nil, err
+	}
+	if spec.ApplyName {
+		// Имя mutable, но валидируется теми же правилами, что и Create (DNS-safe,
+		// длина). Конфликт по partial-UNIQUE(project,name) ловит DB → AlreadyExists.
+		if verr := domain.ValidateName("name", spec.Name); verr != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "Illegal argument: %s", verr.Error())
+		}
 	}
 	if spec.ApplyDescription {
 		if verr := corevalidate.Description("description", spec.Description); verr != nil {
@@ -64,7 +71,9 @@ func (u *UseCase) Update(ctx context.Context, spec UpdateSpec) (*operations.Oper
 	}
 
 	operations.Run(ctx, u.ops, op.ID, func(workerCtx context.Context) (*anypb.Any, error) {
-		_ = operations.WithPrincipal(workerCtx, principal)
+		// Worker-ctx детачнут от request'а — принудительно несём principal (иначе
+		// mirror register-intent / любой downstream уходит анонимно, authz_no_principal).
+		workerCtx = operations.WithPrincipal(workerCtx, principal)
 		updated, uerr := u.writer.Update(workerCtx, spec, mirrorIntent)
 		if uerr != nil {
 			return nil, mapRepoErr(uerr)

@@ -9,8 +9,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/PRO-Robotech/kacho-corelib/operations"
-	operationpb "github.com/PRO-Robotech/kacho-corelib/proto/gen/go/kacho/cloud/operation"
-	registryv1 "github.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1"
+	operationpb "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/operation"
+	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
 
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
@@ -29,12 +29,23 @@ func toProtoRepository(r *domain.Repository) *registryv1.Repository {
 	if r == nil {
 		return nil
 	}
+	var types []registryv1.ArtifactType
+	if len(r.ArtifactTypes) > 0 {
+		types = make([]registryv1.ArtifactType, len(r.ArtifactTypes))
+		for i, at := range r.ArtifactTypes {
+			types[i] = registryv1.ArtifactType(at) // domain↔proto parity int32
+		}
+	}
 	return &registryv1.Repository{
-		RegistryId: r.RegistryID,
-		Name:       r.Name,
-		TagCount:   r.TagCount,
-		SizeBytes:  r.SizeBytes,
-		UpdatedAt:  ts(r.UpdatedAt),
+		RegistryId:    r.RegistryID,
+		Name:          r.Name,
+		TagCount:      r.TagCount,
+		SizeBytes:     r.SizeBytes,
+		UpdatedAt:     ts(r.UpdatedAt),
+		ArtifactType:  registryv1.ArtifactType(r.ArtifactType), // domain↔proto parity int32
+		ArtifactTypes: types,
+		LastPulledAt:  ts(r.LastPulledAt),
+		DownloadCount: r.DownloadCount,
 	}
 }
 
@@ -44,13 +55,17 @@ func toProtoTag(t *domain.Tag) *registryv1.Tag {
 		return nil
 	}
 	return &registryv1.Tag{
-		RegistryId: t.RegistryID,
-		Repository: t.Repository,
-		Tag:        t.Tag,
-		Digest:     t.Digest,
-		SizeBytes:  t.SizeBytes,
-		MediaType:  t.MediaType,
-		CreatedAt:  ts(t.CreatedAt),
+		RegistryId:    t.RegistryID,
+		Repository:    t.Repository,
+		Tag:           t.Tag,
+		Digest:        t.Digest,
+		SizeBytes:     t.SizeBytes,
+		MediaType:     t.MediaType,
+		CreatedAt:     ts(t.CreatedAt),
+		Architecture:  t.Architecture,
+		LastPulledAt:  ts(t.LastPulledAt),
+		PushedBy:      t.PushedBy,
+		DownloadCount: t.DownloadCount,
 	}
 }
 

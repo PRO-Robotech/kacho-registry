@@ -13,6 +13,7 @@ package serviceerr
 
 import (
 	"errors"
+	"log/slog"
 	"strings"
 
 	"google.golang.org/grpc/codes"
@@ -42,11 +43,17 @@ func ToStatus(err error) error {
 	case errors.Is(err, regerrors.ErrUnimplemented):
 		return status.Error(codes.Unimplemented, "method not implemented")
 	case errors.Is(err, regerrors.ErrInternal):
+		// ErrInternal-класс: сырой текст (если обёрнут контекстом) в лог, клиенту — фикс.
+		slog.Default().Error("registry: internal error mapped to gRPC INTERNAL", "err", err.Error())
 		return status.Error(codes.Internal, "internal database error")
 	}
 	if st, ok := status.FromError(err); ok && st.Code() != codes.Unknown {
 		return err
 	}
+	// Неклассифицированная ошибка (напр. corelib operations `repo.Create: <raw pg>`,
+	// не прошедшая через registry-adapter Wrap) — логируем сырую причину ПЕРЕД схлопом,
+	// иначе живой сбой Create = «internal database error» без единой лог-строки.
+	slog.Default().Error("registry: unclassified error mapped to gRPC INTERNAL", "err", err.Error())
 	return status.Error(codes.Internal, "internal database error")
 }
 

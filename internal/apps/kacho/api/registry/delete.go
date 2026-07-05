@@ -16,7 +16,7 @@ import (
 
 	"github.com/PRO-Robotech/kacho-corelib/ids"
 	"github.com/PRO-Robotech/kacho-corelib/operations"
-	registryv1 "github.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1"
+	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
 
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
@@ -37,6 +37,17 @@ func (u *UseCase) Delete(ctx context.Context, registryID string) (*operations.Op
 	}
 	if err := validateRegistryID(registryID); err != nil {
 		return nil, err
+	}
+
+	// REG-08 precondition (secure-by-default, НЕ cascade): непустой namespace нельзя
+	// молча стереть. Проверка читает zot синхронно ДО перехода в DELETING; zot
+	// недоступен → Unavailable (fail-closed — НЕ «считаем пустым и удаляем»).
+	empty, err := u.zot.NamespaceEmpty(ctx, registryID)
+	if err != nil {
+		return nil, mapRepoErr(err)
+	}
+	if !empty {
+		return nil, status.Error(codes.FailedPrecondition, "registry is not empty")
 	}
 
 	op, err := operations.NewFromContext(ctx,
