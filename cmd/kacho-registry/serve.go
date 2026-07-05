@@ -10,8 +10,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -329,6 +331,9 @@ func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoRe
 		if cfg.HydraJWKSURL == "" {
 			return nil, errors.New("data-plane requires KACHO_REGISTRY_HYDRA_JWKS_URL (or KACHO_REGISTRY_AUTHZ_BREAKGLASS=true to bypass)")
 		}
+		if err := requireSecureJWKSURL(cfg.AuthMode, cfg.HydraJWKSURL); err != nil {
+			return nil, err
+		}
 		if authzConn == nil {
 			return nil, errors.New("data-plane requires authz IAM conn (KACHO_REGISTRY_AUTHZ_IAM_GRPC_ADDR)")
 		}
@@ -338,6 +343,27 @@ func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoRe
 
 	return dataplane.New(verifier, authorizer, backend, forwarder, repoReg, regLookup,
 		cfg.TokenRealm, cfg.ServiceAud, logger), nil
+}
+
+// requireSecureJWKSURL — в production/production-strict JWKS-endpoint (единственный
+// trust-anchor верификации identity-JWT data-plane: jwks.Verifier тянет из него
+// публичные ключи) обязан быть https://. Plaintext-HTTP допускает MITM-подмену
+// JWKS-документа на пути к Hydra → forge-токен под любой subject → полный обход
+// data-plane AuthN. В dev (и breakglass — там verifier не поднимается) http://
+// допустим, симметрично DB sslmode=disable.
+func requireSecureJWKSURL(authMode, jwksURL string) error {
+	switch authMode {
+	case "production", "production-strict":
+		u, err := url.Parse(jwksURL)
+		if err != nil {
+			return fmt.Errorf("invalid KACHO_REGISTRY_HYDRA_JWKS_URL %q: %w", jwksURL, err)
+		}
+		if !strings.EqualFold(u.Scheme, "https") {
+			return fmt.Errorf("AuthMode=%s requires https:// KACHO_REGISTRY_HYDRA_JWKS_URL "+
+				"(JWKS trust anchor must not be fetched over plaintext; got scheme %q)", authMode, u.Scheme)
+		}
+	}
+	return nil
 }
 
 // validateAuthMode разбирает KACHO_REGISTRY_AUTH_MODE (whitelist) и строгость
