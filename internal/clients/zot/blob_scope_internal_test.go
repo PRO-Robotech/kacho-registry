@@ -1,0 +1,110 @@
+// Copyright (c) PRO-Robotech
+// SPDX-License-Identifier: BUSL-1.1
+
+// blob_scope_internal_test.go — BlobInRepo/Stats fan-out в zot ограничен
+// blobScopeConcurrency (иначе repo с тысячами тегов на один blob-GET открыл бы
+// тысячи одновременных backend-соединений — DoS-амплификация, CWE-400/770).
+// Internal-тест (package zot) — ссылается на unexported blobScopeConcurrency.
+package zot
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// concCountingZot — httptest-zot, считающий пик одновременных manifest-GET'ов.
+type concCountingZot struct {
+	cur      atomic.Int32
+	maxSeen  atomic.Int32
+	tags     []string
+	target   string // digest, который «лежит» в манифесте matchTag (для early-exit теста)
+	matchTag string
+}
+
+func (z *concCountingZot) server(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case strings.HasSuffix(path, "/tags/list"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "reg-A/app", "tags": z.tags})
+		case strings.Contains(path, "/manifests/"):
+			cur := z.cur.Add(1)
+			for {
+				old := z.maxSeen.Load()
+				if cur <= old || z.maxSeen.CompareAndSwap(old, cur) {
+					break
+				}
+			}
+			time.Sleep(10 * time.Millisecond) // окно перекрытия параллельных fetch'ей
+			z.cur.Add(-1)
+			ref := path[strings.Index(path, "/manifests/")+len("/manifests/"):]
+			cfg := "sha256:cfg-" + ref
+			if z.target != "" && ref == z.matchTag {
+				cfg = z.target
+			}
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+				"config": map[string]any{"mediaType": "application/vnd.oci.image.config.v1+json", "size": 1, "digest": cfg},
+				"layers": []any{},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func manyTags(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("v%03d", i)
+	}
+	return out
+}
+
+// TestBlobInRepo_BoundsFanoutConcurrency — на repo с 40 тегами и отсутствующим блобом
+// (полный скан) пик одновременных manifest-GET'ов не превышает blobScopeConcurrency,
+// но параллелизм реально используется (>1) — cap работает, не деградируя в sequential.
+func TestBlobInRepo_BoundsFanoutConcurrency(t *testing.T) {
+	z := &concCountingZot{tags: manyTags(40)}
+	cli := New(z.server(t).URL)
+
+	in, err := cli.BlobInRepo(context.Background(), "reg-A", "app", "sha256:absent")
+	if err != nil {
+		t.Fatalf("BlobInRepo err: %v", err)
+	}
+	if in {
+		t.Fatal("absent blob must not be in repo")
+	}
+	if got := z.maxSeen.Load(); got > int32(blobScopeConcurrency) {
+		t.Fatalf("fan-out concurrency %d exceeds cap %d", got, blobScopeConcurrency)
+	}
+	if got := z.maxSeen.Load(); got < 2 {
+		t.Fatalf("expected bounded parallelism (>1), got %d", got)
+	}
+}
+
+// TestBlobInRepo_EarlyExitOnMatch — найденный блоб коротит скан: планируется НЕ весь
+// набор тегов (реальный блоб не форсит чтение всех манифестов).
+func TestBlobInRepo_EarlyExitOnMatch(t *testing.T) {
+	z := &concCountingZot{tags: manyTags(200), target: "sha256:hit", matchTag: "v000"}
+	cli := New(z.server(t).URL)
+
+	in, err := cli.BlobInRepo(context.Background(), "reg-A", "app", "sha256:hit")
+	if err != nil {
+		t.Fatalf("BlobInRepo err: %v", err)
+	}
+	if !in {
+		t.Fatal("blob present in v000 manifest must be found")
+	}
+}

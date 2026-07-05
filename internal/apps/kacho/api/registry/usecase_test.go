@@ -344,6 +344,33 @@ func TestRegistry_REG09_Delete_Idempotent(t *testing.T) {
 	require.False(t, deleted, "no second destructive Delete on already-deleted resource")
 }
 
+// REG-08-TOCTOU — контент дозалился в окне между sync empty-check и async worker'ом:
+// worker re-check'ает NamespaceEmpty ПОСЛЕ CAS→DELETING и аборт'ит удаление, если
+// namespace снова непуст. Строка НЕ удаляется, unregister-intent НЕ эмитится →
+// authz-tuple'ы контента сохранены (не осиротили zot-контент).
+func TestRegistry_REG08_Delete_RechecksEmptinessInWorker(t *testing.T) {
+	deleted := false
+	repo := &mockRepo{
+		markFn: func(_ context.Context, id string) (*domain.Registry, error) {
+			return &domain.Registry{ID: id, ProjectID: "prj-P", Status: domain.RegistryStatusDeleting}, nil
+		},
+		deleteFn: func(context.Context, string, domain.RegisterIntent) error { deleted = true; return nil },
+	}
+	// sync-check: пусто (Delete принят) → worker-recheck: НЕпусто (контент дозалился).
+	zot := &mockZot{namespaceEmptySeq: []bool{true, false}}
+	ops := newMemOps()
+	uc := newUC(repo, zot, &mockIAM{}, ops)
+
+	op, err := uc.Delete(aliceCtx(), validRegID)
+	require.NoError(t, err, "sync empty-check passes → op accepted")
+	done := awaitOpDone(t, ops, op.ID)
+
+	require.NotNil(t, done.Error, "worker aborts delete: content reappeared")
+	require.Equal(t, int32(codes.FailedPrecondition), done.Error.Code)
+	require.False(t, deleted, "row NOT physically deleted when content reappeared")
+	require.Empty(t, repo.deleteIntent.Tuples, "no unregister-intent emitted")
+}
+
 // REG-05/07 — malformed id на мутациях → синхронный INVALID_ARGUMENT (без Operation).
 func TestRegistry_Delete_MalformedID(t *testing.T) {
 	uc := newUC(&mockRepo{}, &mockZot{}, &mockIAM{}, newMemOps())

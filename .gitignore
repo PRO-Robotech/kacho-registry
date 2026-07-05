@@ -30,3 +30,9 @@ CLAUDE.md
 AGENTS.md
 .codex/
 .agents/
+
+# Newman run artifacts (reporter output) — regenerated per run, never commit
+# (they capture injected bearer tokens — secrets hygiene).
+tests/newman/out/
+__pycache__/
+*.pyc

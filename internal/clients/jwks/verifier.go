@@ -309,8 +309,19 @@ func (k jsonWebKey) toRSA() (*rsa.PublicKey, error) {
 	if !e.IsInt64() || e.Int64() < 2 {
 		return nil, errors.New("invalid exponent")
 	}
-	return &rsa.PublicKey{N: new(big.Int).SetBytes(nb), E: int(e.Int64())}, nil
+	n := new(big.Int).SetBytes(nb)
+	// Минимальный размер модуля: < 2048 бит — forgeable-token risk (короткий модуль
+	// факторизуется, подпись подделывается). Отвергаем, чтобы слабый ключ не попал в
+	// кэш верификатора.
+	if n.BitLen() < minRSAModulusBits {
+		return nil, fmt.Errorf("RSA modulus too small: %d bits (min %d)", n.BitLen(), minRSAModulusBits)
+	}
+	return &rsa.PublicKey{N: n, E: int(e.Int64())}, nil
 }
+
+// minRSAModulusBits — минимальный допустимый размер RSA-модуля. Ключи короче
+// отвергаются как forgeable (недостаточная стойкость к факторизации).
+const minRSAModulusBits = 2048
 
 // toECDSA собирает *ecdsa.PublicKey из base64url x/y для кривой P-256 (ES256). Точка
 // валидируется как лежащая на кривой (ecdh.P256().NewPublicKey отвергает off-curve),

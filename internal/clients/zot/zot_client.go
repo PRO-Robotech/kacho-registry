@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -241,7 +244,7 @@ func (c *Client) repoTags(ctx context.Context, fullRepo string) ([]string, error
 	var tr tagsResponse
 	err := c.getJSON(ctx, "/v2/"+repoPath(fullRepo)+"/tags/list", &tr)
 	if err != nil {
-		if err == errNotFound {
+		if errors.Is(err, errNotFound) {
 			return nil, nil
 		}
 		return nil, err
@@ -308,13 +311,13 @@ func (c *Client) DeleteTag(ctx context.Context, registryID, repository, tag stri
 	fullRepo := registryID + "/" + repository
 	digest, _, _, err := c.headManifest(ctx, fullRepo, tag)
 	if err != nil {
-		if err == errNotFound {
+		if errors.Is(err, errNotFound) {
 			return nil // тег уже отсутствует — идемпотентно
 		}
 		return err
 	}
 	delErr := c.do(ctx, http.MethodDelete, "/v2/"+repoPath(fullRepo)+"/manifests/"+digest, nil, nil)
-	if delErr == errNotFound {
+	if errors.Is(delErr, errNotFound) {
 		return nil // манифест уже снят — идемпотентно
 	}
 	return delErr
@@ -377,7 +380,12 @@ func (c *Client) Stats(ctx context.Context, registryID string) (*domain.Registry
 		return nil, err
 	}
 	stats := &domain.RegistryStats{RegistryID: registryID, RepositoryCount: int32(len(fullNames))}
-	blobs := map[string]int64{}
+
+	// Собираем (full-repo, tag) пары; манифесты читаем bounded-concurrency fan-out'ом
+	// (cap blobScopeConcurrency) — namespace с тысячами тегов иначе последовательно
+	// прочёл бы тысячи манифестов на один Stats-вызов. blobs/tagCount под mutex'ом.
+	type repoTagPair struct{ full, tag string }
+	var pairs []repoTagPair
 	for _, full := range fullNames {
 		tags, terr := c.repoTags(ctx, full)
 		if terr != nil {
@@ -385,10 +393,25 @@ func (c *Client) Stats(ctx context.Context, registryID string) (*domain.Registry
 		}
 		stats.TagCount += int32(len(tags))
 		for _, tag := range tags {
-			mb, merr := c.getManifest(ctx, full, tag)
-			if merr != nil {
-				continue // best-effort: не валим Stats из-за одного манифеста
+			pairs = append(pairs, repoTagPair{full: full, tag: tag})
+		}
+	}
+
+	var mu sync.Mutex
+	blobs := map[string]int64{}
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(blobScopeConcurrency)
+	for _, p := range pairs {
+		p := p
+		g.Go(func() error {
+			if gctx.Err() != nil {
+				return nil
 			}
+			mb, merr := c.getManifest(gctx, p.full, p.tag)
+			if merr != nil {
+				return nil // best-effort: не валим Stats из-за одного манифеста
+			}
+			mu.Lock()
 			if mb.Config.Digest != "" {
 				blobs[mb.Config.Digest] = mb.Config.Size
 			}
@@ -397,8 +420,14 @@ func (c *Client) Stats(ctx context.Context, registryID string) (*domain.Registry
 					blobs[l.Digest] = l.Size
 				}
 			}
-		}
+			mu.Unlock()
+			return nil
+		})
 	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
 	for _, sz := range blobs {
 		stats.TotalSizeBytes += sz
 	}
@@ -438,11 +467,32 @@ func (c *Client) CatalogRepoNames(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
+// blobScopeConcurrency ограничивает число ПАРАЛЛЕЛЬНЫХ manifest-fetch'ей одного
+// BlobInRepo/Stats-скана. Cap fan-out в zot: repo с тысячами тегов иначе на один
+// blob-GET открыл бы тысячи одновременных backend-соединений (DoS-амплификация,
+// CWE-400/770). ctx-дедлайн запроса пробрасывается в каждый fetch (gctx) — скан
+// аборт'ится по дедлайну, не работая за его пределами.
+const blobScopeConcurrency = 8
+
+// manifestHasDigest — <digest> входит в config или layers манифеста.
+func manifestHasDigest(mb manifestBody, digest string) bool {
+	if mb.Config.Digest == digest {
+		return true
+	}
+	for _, l := range mb.Layers {
+		if l.Digest == digest {
+			return true
+		}
+	}
+	return false
+}
+
 // BlobInRepo проверяет per-repo blob-scope (REG-37): <digest> достижим только если
 // входит в config/layers манифеста(ов) авторизованного repo. Cross-reference:
-// перебирает теги repo, читает манифесты, собирает уникальные блоб-digest'ы. Чужой
-// content-addressable блоб (принадлежит манифесту другого repo) → false. zot
-// недоступен → ErrUnavailable (fail-closed).
+// перебирает теги repo (bounded-concurrency fan-out, cap blobScopeConcurrency),
+// читает манифесты, ищет digest. Чужой content-addressable блоб (принадлежит
+// манифесту другого repo) → false. Найден → перестаём планировать новые fetch'и
+// (early-exit). zot недоступен → ErrUnavailable (fail-closed).
 func (c *Client) BlobInRepo(ctx context.Context, registryID, repo, digest string) (bool, error) {
 	if err := c.ready(); err != nil {
 		return false, err
@@ -452,24 +502,36 @@ func (c *Client) BlobInRepo(ctx context.Context, registryID, repo, digest string
 	if err != nil {
 		return false, err
 	}
+
+	var found atomic.Bool
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(blobScopeConcurrency)
 	for _, tag := range tags {
-		mb, merr := c.getManifest(ctx, fullRepo, tag)
-		if merr != nil {
-			if merr == errNotFound {
-				continue // тег исчез между list и read — пропускаем
+		if found.Load() || gctx.Err() != nil {
+			break // блоб найден либо дедлайн исчерпан — новые fetch'и не планируем
+		}
+		tag := tag
+		g.Go(func() error {
+			if found.Load() {
+				return nil
 			}
-			return false, merr
-		}
-		if mb.Config.Digest == digest {
-			return true, nil
-		}
-		for _, l := range mb.Layers {
-			if l.Digest == digest {
-				return true, nil
+			mb, merr := c.getManifest(gctx, fullRepo, tag)
+			if merr != nil {
+				if errors.Is(merr, errNotFound) {
+					return nil // тег исчез между list и read — пропускаем
+				}
+				return merr
 			}
-		}
+			if manifestHasDigest(mb, digest) {
+				found.Store(true)
+			}
+			return nil
+		})
 	}
-	return false, nil
+	if err := g.Wait(); err != nil {
+		return false, err
+	}
+	return found.Load(), nil
 }
 
 // ---- HTTP helpers ---------------------------------------------------------

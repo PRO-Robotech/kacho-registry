@@ -40,8 +40,6 @@ func ToStatus(err error) error {
 		return status.Error(codes.InvalidArgument, strip(err, regerrors.ErrInvalidArg))
 	case errors.Is(err, regerrors.ErrUnavailable):
 		return status.Error(codes.Unavailable, strip(err, regerrors.ErrUnavailable))
-	case errors.Is(err, regerrors.ErrUnimplemented):
-		return status.Error(codes.Unimplemented, "method not implemented")
 	case errors.Is(err, regerrors.ErrInternal):
 		// ErrInternal-класс: сырой текст (если обёрнут контекстом) в лог, клиенту — фикс.
 		slog.Default().Error("registry: internal error mapped to gRPC INTERNAL", "err", err.Error())

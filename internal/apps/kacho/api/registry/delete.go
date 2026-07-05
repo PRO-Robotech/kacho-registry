@@ -84,6 +84,21 @@ func (u *UseCase) doDelete(ctx context.Context, registryID string) (*anypb.Any, 
 		return nil, mapRepoErr(err)
 	}
 
+	// Cross-service TOCTOU re-check: sync empty-check (Delete-RPC) и физический DELETE
+	// строки разнесены во времени (async worker), а data-plane push НЕ гейтится по
+	// status — контент мог дозалиться в это окно. Пере-проверяем NamespaceEmpty ПОСЛЕ
+	// CAS→DELETING и аборт'им, если namespace снова непуст: иначе стёрли бы метадату +
+	// authz-tuple'ы при живом zot-контенте (осиротили бы образы). zot недоступен →
+	// Unavailable (fail-closed, retriable). Delete forward-only: строка остаётся
+	// DELETING, повторный Delete-RPC довершит удаление, когда контент уйдёт.
+	empty, err := u.zot.NamespaceEmpty(ctx, registryID)
+	if err != nil {
+		return nil, mapRepoErr(err)
+	}
+	if !empty {
+		return nil, status.Error(codes.FailedPrecondition, "registry is not empty")
+	}
+
 	// zot-namespace lazy: провизионится на push, снимать нечего пока data-plane нет.
 	// Best-effort — недоступность zot не блокирует forward-only удаление namespace-
 	// метаданных (при реальном zot RemoveNamespace станет авторитетным).

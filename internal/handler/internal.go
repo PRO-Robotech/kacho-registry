@@ -6,7 +6,7 @@
 // cluster-internal листенере (:9091) — никогда на внешнем TLS endpoint (ban #6).
 // GetRegistryStats несёт инфра-проекцию namespace (infra-sensitive → только :9091).
 //
-// Методы делегируют use-case'у; в скелете возвращают codes.Unimplemented.
+// Методы — тонкий transport: делегируют use-case'у, без бизнес-логики.
 package handler
 
 import (

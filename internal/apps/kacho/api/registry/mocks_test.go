@@ -114,6 +114,11 @@ type mockZot struct {
 	// namespaceEmptyErr — инъекция ошибки (zot недоступен, fail-closed).
 	namespaceEmpty    bool
 	namespaceEmptyErr error
+	// namespaceEmptySeq — per-call ответы NamespaceEmpty (i-й вызов → seq[i]); за
+	// пределами slice падаем на namespaceEmpty. Моделирует TOCTOU: sync-check пуст,
+	// worker-recheck непуст (контент дозалился в окне).
+	namespaceEmptySeq  []bool
+	namespaceEmptyCall int
 
 	deleteTagErr  error
 	deleteTagCall []deleteTagCall
@@ -152,8 +157,15 @@ func (z *mockZot) DeleteTag(ctx context.Context, registryID, repository, tag str
 	return z.deleteTagErr
 }
 func (z *mockZot) NamespaceEmpty(ctx context.Context, registryID string) (bool, error) {
+	z.mu.Lock()
+	defer z.mu.Unlock()
 	if z.namespaceEmptyErr != nil {
 		return false, z.namespaceEmptyErr
+	}
+	i := z.namespaceEmptyCall
+	z.namespaceEmptyCall++
+	if i < len(z.namespaceEmptySeq) {
+		return z.namespaceEmptySeq[i], nil
 	}
 	return z.namespaceEmpty, nil
 }
