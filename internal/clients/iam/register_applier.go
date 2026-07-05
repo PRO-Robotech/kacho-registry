@@ -75,8 +75,23 @@ func DecodeRegisterIntent(payload []byte) (domain.RegisterIntent, error) {
 
 // NewRegisterApplier — drainer.Applier[domain.RegisterIntent] поверх fga-proxy.
 // На каждый tuple вызывает RegisterResource (fga.register) либо UnregisterResource
-// (fga.unregister); первый non-OK (после классификации) short-circuit'ит, drainer
-// ретраит всю строку, а идемпотентность iam делает уже-применённые tuple no-op'ами.
+// (fga.unregister).
+//
+// КАЖДЫЙ tuple обрабатывается идемпотентно ВСЕГДА, до конца набора: ErrAlreadyApplied
+// на отдельном tuple — это per-tuple success (target «уже есть»), НЕ повод обрывать
+// остаток набора. Это критично для at-least-once retry-after-partial-apply: если
+// attempt-1 применил project-tuple, но упал на owner-tuple (transient) → drainer
+// ретраит строку; на attempt-2 iam отвечает AlreadyExists на уже-применённый
+// project-tuple, и applier обязан пойти ДАЛЬШЕ и всё-таки применить owner-tuple.
+// Ранний return на первом AlreadyExists ронял owner-tuple навсегда (drainer помечал
+// строку sent, не дойдя до второго tuple) — нарушение «owner-tuple не теряется».
+//
+// Только ErrPermanent (poison) и transient short-circuit'ят набор — drainer
+// ретраит/травит всю строку, и оставшиеся tuple будут повторно опрошены. Терминальный
+// ErrAlreadyApplied всплывает наверх лишь когда КАЖДЫЙ tuple ответил already-applied
+// (нулевая реальная работа) — тогда classify-метрика видит already_applied, а не
+// success; если хоть один tuple сделал реальную работу — возвращается nil (оба
+// класса → sent_at, но метрика точнее).
 func NewRegisterApplier(cli RegisterResourceClient) drainer.Applier[domain.RegisterIntent] {
 	return func(ctx context.Context, eventType string, intent domain.RegisterIntent) error {
 		if cli == nil {
@@ -87,9 +102,10 @@ func NewRegisterApplier(cli RegisterResourceClient) drainer.Applier[domain.Regis
 		// least-priv fga_writer приходит из mTLS client-cert.
 		ctx = auth.PropagateOutgoing(ctx)
 
+		var apply func(t domain.FGATuple) error
 		switch eventType {
 		case domain.FGAEventRegister:
-			for _, t := range intent.Tuples {
+			apply = func(t domain.FGATuple) error {
 				_, err := cli.RegisterResource(ctx, &iamv1.RegisterResourceRequest{
 					SubjectId:       t.SubjectID,
 					Relation:        t.Relation,
@@ -98,13 +114,10 @@ func NewRegisterApplier(cli RegisterResourceClient) drainer.Applier[domain.Regis
 					Labels:          intent.Labels,
 					ParentProjectId: intent.ParentProjectID,
 				})
-				if cerr := classifyRegisterErr(err); cerr != nil {
-					return cerr
-				}
+				return err
 			}
-			return nil
 		case domain.FGAEventUnregister:
-			for _, t := range intent.Tuples {
+			apply = func(t domain.FGATuple) error {
 				_, err := cli.UnregisterResource(ctx, &iamv1.UnregisterResourceRequest{
 					SubjectId:       t.SubjectID,
 					Relation:        t.Relation,
@@ -113,14 +126,32 @@ func NewRegisterApplier(cli RegisterResourceClient) drainer.Applier[domain.Regis
 					Labels:          intent.Labels,
 					ParentProjectId: intent.ParentProjectID,
 				})
-				if cerr := classifyRegisterErr(err); cerr != nil {
-					return cerr
-				}
+				return err
 			}
-			return nil
 		default:
 			return fmt.Errorf("%w: registry_outbox: unknown event_type %q", drainer.ErrPermanent, eventType)
 		}
+
+		// allAlreadyApplied — становится false, как только хоть один tuple сделал
+		// реальную работу (nil-ответ). Стартовое true покрывает пустой набор (decoder
+		// такой уже отсеял как poison, но keep-honest на случай прямого вызова).
+		allAlreadyApplied := true
+		for _, t := range intent.Tuples {
+			switch cerr := classifyRegisterErr(apply(t)); {
+			case cerr == nil:
+				allAlreadyApplied = false
+			case errors.Is(cerr, drainer.ErrAlreadyApplied):
+				// per-tuple идемпотентный success — идём к следующему tuple, НЕ обрываем.
+			default:
+				// ErrPermanent или transient — обрываем; drainer ретраит/травит строку,
+				// оставшиеся tuple будут опрошены заново на следующем attempt'е.
+				return cerr
+			}
+		}
+		if allAlreadyApplied && len(intent.Tuples) > 0 {
+			return fmt.Errorf("%w: all tuples already applied", drainer.ErrAlreadyApplied)
+		}
+		return nil
 	}
 }
 
