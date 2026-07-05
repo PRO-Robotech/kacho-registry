@@ -4,14 +4,13 @@
 package handler
 
 import (
-	"time"
-
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/PRO-Robotech/kacho-corelib/operations"
 	operationpb "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/operation"
 	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
 
+	"github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/shared/prototime"
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
 
@@ -41,10 +40,10 @@ func toProtoRepository(r *domain.Repository) *registryv1.Repository {
 		Name:          r.Name,
 		TagCount:      r.TagCount,
 		SizeBytes:     r.SizeBytes,
-		UpdatedAt:     ts(r.UpdatedAt),
+		UpdatedAt:     prototime.Truncate(r.UpdatedAt),
 		ArtifactType:  registryv1.ArtifactType(r.ArtifactType), // domain↔proto parity int32
 		ArtifactTypes: types,
-		LastPulledAt:  ts(r.LastPulledAt),
+		LastPulledAt:  prototime.Truncate(r.LastPulledAt),
 		DownloadCount: r.DownloadCount,
 	}
 }
@@ -61,9 +60,9 @@ func toProtoTag(t *domain.Tag) *registryv1.Tag {
 		Digest:        t.Digest,
 		SizeBytes:     t.SizeBytes,
 		MediaType:     t.MediaType,
-		CreatedAt:     ts(t.CreatedAt),
+		CreatedAt:     prototime.Truncate(t.CreatedAt),
 		Architecture:  t.Architecture,
-		LastPulledAt:  ts(t.LastPulledAt),
+		LastPulledAt:  prototime.Truncate(t.LastPulledAt),
 		PushedBy:      t.PushedBy,
 		DownloadCount: t.DownloadCount,
 	}
@@ -80,15 +79,8 @@ func toProtoStats(s *domain.RegistryStats) *registryv1.RegistryStats {
 		TagCount:        s.TagCount,
 		TotalSizeBytes:  s.TotalSizeBytes,
 		BlobCount:       s.BlobCount,
-		LastGcAt:        ts(s.LastGCAt),
+		LastGcAt:        prototime.Truncate(s.LastGCAt),
 	}
-}
-
-func ts(t time.Time) *timestamppb.Timestamp {
-	if t.IsZero() {
-		return nil
-	}
-	return timestamppb.New(t.Truncate(time.Second))
 }
 
 // operationToProto конвертирует corelib operations.Operation в proto-форму

@@ -18,8 +18,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	"github.com/PRO-Robotech/kacho-corelib/filter"
 
@@ -430,9 +428,12 @@ func statusFromString(s string) domain.RegistryStatus {
 	return domain.RegistryStatusActive
 }
 
-// invalidFilterErr превращает ошибку парсинга filter в gRPC InvalidArgument.
+// invalidFilterErr оборачивает ошибку парсинга filter в domain-sentinel
+// ErrInvalidArg (repo НЕ формирует gRPC-статус — единый маппинг sentinel→gRPC в
+// serviceerr; §CLAUDE.md dependency rule). serviceerr.ToStatus срежет префикс →
+// клиент видит стабильное "invalid filter: <причина>" с кодом INVALID_ARGUMENT.
 func invalidFilterErr(err error) error {
-	return status.Errorf(codes.InvalidArgument, "invalid filter: %v", err)
+	return fmt.Errorf("%w: invalid filter: %v", regerrors.ErrInvalidArg, err)
 }
 
 var _ registry.RegistryRepo = (*RegistryRepo)(nil)
