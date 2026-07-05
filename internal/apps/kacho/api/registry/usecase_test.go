@@ -145,6 +145,22 @@ func TestRegistry_REG04_Create_DuplicateName(t *testing.T) {
 	require.Contains(t, status.Convert(err).Message(), "team-images")
 }
 
+// REG-01 ordering (CWE-662) — pending-Operation персистится ДО durable INSERT
+// ресурса. Если создание Operation-envelope падает, реестр НЕ должен оказаться
+// закоммиченным без сопутствующей Operation (cross-transaction partial write):
+// writer.Insert не вызывается вовсе, Create возвращает ошибку. Инвертированный
+// порядок (Insert раньше Operation) оставил бы осиротевший ресурс без envelope.
+func TestRegistry_REG01_Create_OperationBeforeInsert(t *testing.T) {
+	repo := &mockRepo{}
+	ops := newMemOps()
+	ops.createErr = regerrors.ErrUnavailable // персист pending-Operation падает
+	uc := newUC(repo, &mockZot{}, &mockIAM{}, ops)
+
+	_, err := uc.Create(aliceCtx(), registry.CreateSpec{ProjectID: "prj-P", Name: "team-images"})
+	require.Error(t, err)
+	require.Nil(t, repo.insertReg, "resource must NOT be inserted when Operation-envelope create fails")
+}
+
 // REG-05 — Get: malformed id → INVALID_ARGUMENT первым стейтментом; well-formed-но-нет
 // → NOT_FOUND.
 func TestRegistry_REG05_Get(t *testing.T) {

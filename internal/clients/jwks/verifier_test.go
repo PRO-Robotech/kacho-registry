@@ -37,6 +37,9 @@ type jwksServer struct {
 	rsaKeys map[string]*rsa.PrivateKey
 	ecKeys  map[string]*ecdsa.PrivateKey
 	docFor  func() map[string]any
+	// cacheControl — значение заголовка Cache-Control ответа JWKS. Пусто → дефолт
+	// "max-age=300"; тест TTL-клампа выставляет заведомо огромный max-age.
+	cacheControl string
 }
 
 func b64u(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
@@ -66,7 +69,11 @@ func newJWKSServer(t *testing.T, rsaKids ...string) *jwksServer {
 	js.docFor = js.defaultDoc
 	js.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		js.fetch.Add(1)
-		w.Header().Set("Cache-Control", "max-age=300")
+		cc := js.cacheControl
+		if cc == "" {
+			cc = "max-age=300"
+		}
+		w.Header().Set("Cache-Control", cc)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(js.docFor())
 	}))
@@ -345,6 +352,30 @@ func TestJWKS_Verify_StaleCacheJWKSDown_FailClosed(t *testing.T) {
 
 	_, err = v.Verify(context.Background(), tok)
 	require.Error(t, err, "stale cache must not be served after TTL when JWKS is down")
+}
+
+// SEC (CWE-613) — сервер JWKS отдаёт непомерный Cache-Control max-age → verifier
+// НЕ должен адоптировать его дословно: TTL кэша клампится до maxTTL, иначе
+// ротированный/отозванный ключ оставался бы валидным годами (нарушение fail-closed
+// rotation-инварианта пакета). После refresh (первый Verify) v.ttl <= maxTTL.
+func TestJWKS_Verify_CacheControlTTL_ClampedToMax(t *testing.T) {
+	js := newJWKSServer(t, "kid-rsa")
+	js.cacheControl = "max-age=999999999" // ~31 год
+	v := New(js.srv.URL, testAud, testHydraIss)
+
+	clock := time.Now()
+	v.now = func() time.Time { return clock }
+
+	tok := js.mintRS256(t, "kid-rsa", hydraClaims("cid-ci", clock.Add(time.Hour)))
+	_, err := v.Verify(context.Background(), tok)
+	require.NoError(t, err)
+
+	v.mu.Lock()
+	got := v.ttl
+	v.mu.Unlock()
+	require.LessOrEqual(t, got, maxTTL,
+		"server-supplied max-age must be clamped to maxTTL (rotated key must not stay cached ~31y)")
+	require.Greater(t, got, time.Duration(0))
 }
 
 // Malformed token (не три сегмента) → отвергается.
