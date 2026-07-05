@@ -14,8 +14,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
+	"github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/shared/serviceerr"
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
+	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
 )
 
 // REG-38 — Stats happy: use-case Stats(registryID) отдаёт domain.RegistryStats из
@@ -55,4 +58,26 @@ func TestRegistry_REG38_Stats_MalformedID(t *testing.T) {
 	_, err := uc.Stats(context.Background(), "not-an-id")
 	require.Equal(t, codes.InvalidArgument, codeOf(t, err))
 	require.Empty(t, zot.statsCalls, "zot not touched on sync-reject")
+}
+
+// REG-38 — Stats zot-backend error: zot вернул Unavailable → use-case пробрасывает
+// domain-sentinel (не глотает), и единый handler-seam serviceerr.ToStatus (mapErr)
+// маппит его в gRPC Unavailable БЕЗ утечки backend-детали. Раньше backend-error ветка
+// Stats не покрывалась — mismap/leak на этом пути прошёл бы незамеченным (mirror
+// REG-25 DeleteTag_WorkerZotError / REG-08 Delete_ZotUnavailable).
+func TestRegistry_REG38_Stats_ZotError_Propagates(t *testing.T) {
+	zot := &mockZot{statsErr: regerrors.ErrUnavailable}
+	uc := newUC(&mockRepo{}, zot, &mockIAM{}, newMemOps())
+
+	got, err := uc.Stats(aliceCtx(), validRegID)
+	require.Nil(t, got)
+	require.ErrorIs(t, err, regerrors.ErrUnavailable, "zot backend error propagated, not swallowed")
+	require.Equal(t, []string{validRegID}, zot.statsCalls, "backend was reached with our id")
+
+	// Тот же маппинг, что применяет thin handler (mapErr → serviceerr.ToStatus).
+	st, ok := status.FromError(serviceerr.ToStatus(err))
+	require.True(t, ok)
+	require.Equal(t, codes.Unavailable, st.Code(), "mapped to Unavailable, not mismapped to Internal")
+	require.NotContains(t, st.Message(), "pgx", "no raw backend detail leaked")
+	require.NotContains(t, st.Message(), "http", "no raw backend detail leaked")
 }

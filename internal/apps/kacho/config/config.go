@@ -10,6 +10,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 
 	"google.golang.org/grpc"
 
@@ -33,6 +35,13 @@ type Config struct {
 	DBSSLMode string `envconfig:"KACHO_REGISTRY_DB_SSLMODE" default:"disable"`
 	// DBMaxConns — лимит pgx-пула (0 = дефолт pgx max(4, NumCPU)).
 	DBMaxConns int `envconfig:"KACHO_REGISTRY_DB_MAX_CONNS" default:"0"`
+	// DBStatementTimeout — server-side statement_timeout для pool-соединений (libpq
+	// value: "30s" / "30000"). Backstop против runaway-запроса, держащего pooled-conn
+	// весь client-контролируемый срок (CWE-770; pool-saturation soft-DoS). "0"/"" —
+	// backstop отключён. Ставится ТОЛЬКО на pool-DSN, не на migrator-DSN (DDL не
+	// клампится). Все read-пути keyset-пагинированы и индексированы, поэтому 30s с
+	// запасом.
+	DBStatementTimeout string `envconfig:"KACHO_REGISTRY_DB_STATEMENT_TIMEOUT" default:"30s"`
 
 	// GrpcPort — публичный control-plane листенер (RegistryService).
 	GrpcPort string `envconfig:"KACHO_REGISTRY_GRPC_PORT" default:"9090"`
@@ -120,35 +129,58 @@ func (c Config) InternalServerCreds() (grpc.ServerOption, error) {
 	return grpcsrv.TLSServerCreds(c.InternalServerMTLS)
 }
 
-// schemaOptionsParam — URL-encoded libpq `options=-c search_path=kacho_registry,public`.
-// Каждое соединение (pgxpool + goose database/sql) видит схему kacho_registry без
-// отдельного SET search_path на каждый стейтмент.
-const schemaOptionsParam = "options=-c%20search_path%3Dkacho_registry%2Cpublic"
+// searchPathOption — libpq `-c` startup-опция: каждое соединение видит схему
+// kacho_registry без отдельного SET search_path на каждый стейтмент.
+const searchPathOption = "-c search_path=kacho_registry,public"
 
-// baseDSN — стандартный postgres DSN (годится и для pgxpool, и для database/sql),
-// несёт search_path kacho_registry через libpq options.
-func (c Config) baseDSN() string {
+// baseDSN — стандартный postgres DSN (годится и для pgxpool, и для database/sql).
+// userinfo/host собираются через net/url (url.UserPassword + net.JoinHostPort) —
+// пароль/пользователь percent-энкодятся, поэтому URL-значимые символы (@ / : ? #)
+// в секрете не «раскусывают» DSN (CWE-116). extraOptions добавляются к libpq
+// `options` (несколько `-c`-флагов в одной опции — второй `options=` перезаписал бы
+// первый).
+func (c Config) baseDSN(extraOptions ...string) string {
 	mode := c.DBSSLMode
 	if mode == "" {
 		mode = "disable"
 	}
-	return fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=%s&%s",
-		c.DBUser, c.DBPassword, c.DBHost, c.DBPort, c.DBName, mode, schemaOptionsParam,
-	)
+	options := searchPathOption
+	for _, o := range extraOptions {
+		if o != "" {
+			options += " " + o
+		}
+	}
+	q := url.Values{}
+	q.Set("sslmode", mode)
+	q.Set("options", options)
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(c.DBUser, c.DBPassword),
+		Host:     net.JoinHostPort(c.DBHost, c.DBPort),
+		Path:     "/" + c.DBName,
+		RawQuery: q.Encode(),
+	}
+	return u.String()
 }
 
-// DSN — строка подключения для pgxpool (поддерживает pool_max_conns). НЕ для
-// database/sql (pool_max_conns → неизвестный PG-параметр → FATAL).
+// DSN — строка подключения для pgxpool (поддерживает pool_max_conns +
+// statement_timeout backstop). НЕ для database/sql (pool_max_conns → неизвестный
+// PG-параметр → FATAL).
 func (c Config) DSN() string {
-	dsn := c.baseDSN()
+	var extra []string
+	if c.DBStatementTimeout != "" && c.DBStatementTimeout != "0" {
+		// Каждый GUC в libpq `options` — отдельный `-c key=value` флаг.
+		extra = append(extra, "-c statement_timeout="+c.DBStatementTimeout)
+	}
+	dsn := c.baseDSN(extra...)
 	if c.DBMaxConns > 0 {
 		dsn += fmt.Sprintf("&pool_max_conns=%d", c.DBMaxConns)
 	}
 	return dsn
 }
 
-// MigrateDSN — строка подключения для goose/database/sql (без pgxpool-параметров).
+// MigrateDSN — строка подключения для goose/database/sql (без pgxpool-параметров и
+// без statement_timeout — долгий DDL не клампится).
 func (c Config) MigrateDSN() string {
 	return c.baseDSN()
 }

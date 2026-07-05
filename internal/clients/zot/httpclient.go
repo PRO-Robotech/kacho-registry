@@ -16,8 +16,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-
-	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
 )
 
 // acceptManifests — Accept-заголовок манифест-запросов (OCI + Docker media-types),
@@ -71,12 +69,12 @@ func (c *Client) headManifest(ctx context.Context, fullRepo, ref string) (digest
 	req, rerr := http.NewRequestWithContext(ctx, http.MethodHead,
 		c.baseURL+"/v2/"+repoPath(fullRepo)+"/manifests/"+url.PathEscape(ref), nil)
 	if rerr != nil {
-		return "", 0, "", regerrors.ErrUnavailable
+		return "", 0, "", failClosed("HEAD manifest request build", "err", rerr)
 	}
 	req.Header.Set("Accept", acceptManifests)
 	resp, derr := c.http.Do(req)
 	if derr != nil {
-		return "", 0, "", regerrors.ErrUnavailable
+		return "", 0, "", failClosed("HEAD manifest transport", "err", derr)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
@@ -84,7 +82,7 @@ func (c *Client) headManifest(ctx context.Context, fullRepo, ref string) (digest
 		return "", 0, "", errNotFound
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", 0, "", regerrors.ErrUnavailable
+		return "", 0, "", failClosed("HEAD manifest non-2xx", "status", resp.StatusCode)
 	}
 	return resp.Header.Get("Docker-Content-Digest"), resp.ContentLength, resp.Header.Get("Content-Type"), nil
 }
@@ -94,23 +92,23 @@ func (c *Client) getManifest(ctx context.Context, fullRepo, ref string) (manifes
 	req, rerr := http.NewRequestWithContext(ctx, http.MethodGet,
 		c.baseURL+"/v2/"+repoPath(fullRepo)+"/manifests/"+url.PathEscape(ref), nil)
 	if rerr != nil {
-		return manifestBody{}, regerrors.ErrUnavailable
+		return manifestBody{}, failClosed("GET manifest request build", "err", rerr)
 	}
 	req.Header.Set("Accept", acceptManifests)
 	resp, derr := c.http.Do(req)
 	if derr != nil {
-		return manifestBody{}, regerrors.ErrUnavailable
+		return manifestBody{}, failClosed("GET manifest transport", "err", derr)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return manifestBody{}, errNotFound
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return manifestBody{}, regerrors.ErrUnavailable
+		return manifestBody{}, failClosed("GET manifest non-2xx", "status", resp.StatusCode)
 	}
 	var mb manifestBody
 	if err := json.NewDecoder(resp.Body).Decode(&mb); err != nil {
-		return manifestBody{}, regerrors.ErrUnavailable
+		return manifestBody{}, failClosed("GET manifest decode", "err", err)
 	}
 	return mb, nil
 }
@@ -121,14 +119,14 @@ func (c *Client) getManifest(ctx context.Context, fullRepo, ref string) (manifes
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader, out any) error {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
-		return regerrors.ErrUnavailable
+		return failClosed("request build", "method", method, "path", path, "err", err)
 	}
 	if out != nil {
 		req.Header.Set("Accept", "application/json")
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return regerrors.ErrUnavailable
+		return failClosed("transport", "method", method, "path", path, "err", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
@@ -137,11 +135,11 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ou
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return regerrors.ErrUnavailable
+		return failClosed("non-2xx", "method", method, "path", path, "status", resp.StatusCode)
 	}
 	if out != nil {
 		if derr := json.NewDecoder(resp.Body).Decode(out); derr != nil {
-			return regerrors.ErrUnavailable
+			return failClosed("decode", "method", method, "path", path, "err", derr)
 		}
 	} else {
 		_, _ = io.Copy(io.Discard, resp.Body)
