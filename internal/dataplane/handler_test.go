@@ -4,8 +4,10 @@
 package dataplane
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -178,6 +180,34 @@ func TestDataplane_REG18_PushNoRights_404(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Equal(t, 0, fw.count())
 	require.Empty(t, rr.registered())
+}
+
+// REG-14c — register-on-first-push emit-failure branch (handler.go:211): успешный
+// первый manifest-PUT нового repo, но RegisterRepository durable-emit падает (редкий
+// DB-сбой). Контракт log-and-continue: клиент всё равно получает свой 2xx (уже
+// отданный ответ не рвём), сбой наблюдаемо логируется, паники нет. Регресс-гейт
+// против «push стал рвать клиента» или «сбой проглочен молча».
+func TestDataplane_REG14c_RegisterEmitFailure_PushStill2xx_Logged(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	fw := &fakeForwarder{status: 201}
+	be := &fakeBackend{exists: map[string]bool{}} // новый repo
+	rr := &fakeRepoReg{err: errors.New("outbox insert failed")}
+
+	var logbuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	h := New(&fakeVerifier{subject: "sva-ci"}, az, be, fw, rr,
+		&fakeRegistryLookup{}, "https://api.kacho.local/iam/token", "registry.kacho.local", logger)
+
+	up := doReq(h, http.MethodPost, "/v2/reg-A/app/blobs/uploads/", true)
+	require.Equal(t, 201, up.Code)
+
+	// manifest-PUT: forward успешен (201), register-emit падает — клиент НЕ страдает.
+	mf := doReq(h, http.MethodPut, "/v2/reg-A/app/manifests/v1", true)
+	require.Equal(t, 201, mf.Code, "push 2xx forwarded несмотря на сбой register-emit")
+
+	require.Len(t, rr.registered(), 1, "register-intent попытан ровно один раз")
+	require.Contains(t, logbuf.String(), "register-on-first-push emit failed",
+		"сбой durable-emit наблюдаемо залогирован (не проглочен)")
 }
 
 // REG-15 — push в СУЩЕСТВУЮЩИЙ repo: verb-map = v_update@registry_repository (НЕ
