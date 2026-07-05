@@ -9,6 +9,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/PRO-Robotech/kacho-corelib/operations"
 
 	registry "github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/api/registry"
+	"github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/shared/namepage"
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
 	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
@@ -29,17 +31,28 @@ import (
 // recordingAuthorizer — mock Authorizer: allow[object]=true → allowed; err → сбой
 // (iam недоступен, fail-closed). Записывает вызовы для трассировки.
 type recordingAuthorizer struct {
+	mu    sync.Mutex
 	allow map[string]bool
 	err   error
 	calls []string
 }
 
 func (r *recordingAuthorizer) Check(_ context.Context, _, relation, object string) (bool, error) {
+	r.mu.Lock()
 	r.calls = append(r.calls, relation+" "+object)
+	r.mu.Unlock()
 	if r.err != nil {
 		return false, r.err
 	}
 	return r.allow[object], nil
+}
+
+// callCount — число зафиксированных Check-вызовов (thread-safe: filterRepos —
+// bounded-concurrency).
+func (r *recordingAuthorizer) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.calls)
 }
 
 // validReg — well-formed registry id (prefix "reg") для handler-method тестов,
@@ -164,6 +177,67 @@ func TestHandler_REG22_ListRepositories_NamespaceDeny_NotFound(t *testing.T) {
 	require.Equal(t, codes.NotFound, codeOf(t, err))
 }
 
+// REG-DOS — ListRepositories ОБЯЗАН ограничивать per-repo authz-Check fan-out окном
+// страницы (page_size), а НЕ полной проекцией namespace. Регресс-гейт против
+// CWE-770/400 self-amplifying DoS: N репо + page_size=k → не больше k repo-Check
+// (+1 namespace-gate), а не N последовательных iam.Check до пагинации.
+func TestHandler_ListRepositories_BoundsCheckFanoutToPage(t *testing.T) {
+	const total = 200
+	repos := make([]*domain.Repository, total)
+	allow := map[string]bool{registryObjectRef(validReg): true}
+	for i := range repos {
+		name := fmt.Sprintf("repo-%04d", i)
+		repos[i] = &domain.Repository{RegistryID: validReg, Name: name}
+		allow[repositoryObjectRef(validReg, name)] = true
+	}
+	az := &recordingAuthorizer{allow: allow}
+	h := newTestHandler(&fakeZotH{repos: repos}, az)
+
+	resp, err := h.ListRepositories(carolCtx(),
+		&registryv1.ListRepositoriesRequest{RegistryId: validReg, PageSize: 5})
+	require.NoError(t, err)
+	require.Len(t, resp.GetRepositories(), 5, "страница ограничена page_size")
+	require.NotEmpty(t, resp.GetNextPageToken(), "есть ещё репо → next-token")
+
+	// namespace-gate (1 Check) + окно (page_size Check) — НЕ по всему каталогу.
+	require.LessOrEqualf(t, az.callCount(), 1+5,
+		"per-repo Check fan-out обязан быть ограничен окном страницы, а не %d репо", total)
+}
+
+// REG-DOS — пагинация корректна при window-before-filter: обходя все страницы,
+// клиент видит РОВНО разрешённое подмножество (фильтр может схлопнуть страницу, но
+// next-token над сырыми именами достижимо доводит до всех разрешённых репо).
+func TestHandler_ListRepositories_PaginateWindowBeforeFilter_AllAllowedReachable(t *testing.T) {
+	repos := make([]*domain.Repository, 12)
+	allow := map[string]bool{registryObjectRef(validReg): true}
+	wantAllowed := map[string]bool{}
+	for i := range repos {
+		name := fmt.Sprintf("r%02d", i)
+		repos[i] = &domain.Repository{RegistryID: validReg, Name: name}
+		if i%3 == 0 { // только каждый третий разрешён
+			allow[repositoryObjectRef(validReg, name)] = true
+			wantAllowed[name] = true
+		}
+	}
+	h := newTestHandler(&fakeZotH{repos: repos}, &recordingAuthorizer{allow: allow})
+
+	got := map[string]bool{}
+	token := ""
+	for i := 0; i < 100; i++ { // guard против бесконечного цикла
+		resp, err := h.ListRepositories(carolCtx(),
+			&registryv1.ListRepositoriesRequest{RegistryId: validReg, PageSize: 2, PageToken: token})
+		require.NoError(t, err)
+		for _, r := range resp.GetRepositories() {
+			got[r.GetName()] = true
+		}
+		token = resp.GetNextPageToken()
+		if token == "" {
+			break
+		}
+	}
+	require.Equal(t, wantAllowed, got, "все разрешённые репо достижимы пагинацией, чужие — нет")
+}
+
 // REG-24 — ListTags per-repo allow → теги; deny → NOT_FOUND.
 func TestHandler_REG24_ListTags_PerRepoCheck(t *testing.T) {
 	zot := &fakeZotH{tags: []*domain.Tag{{RegistryID: validReg, Repository: "app", Tag: "v1", Digest: "sha256:x"}}}
@@ -240,8 +314,12 @@ type fakeZotH struct {
 	deleteTagCalls int
 }
 
-func (f *fakeZotH) ListRepositories(context.Context, registry.RepoListQuery) ([]*domain.Repository, string, error) {
-	return f.repos, "", nil
+// ListRepositories имитирует реальный zot-адаптер: режет окно у источника
+// (page_size/page_token) ДО отдачи handler'у — так handler-тесты проверяют, что
+// authz-фильтр применяется к УЖЕ-ограниченному окну (а не всей проекции).
+func (f *fakeZotH) ListRepositories(_ context.Context, q registry.RepoListQuery) ([]*domain.Repository, string, error) {
+	return namepage.Window(f.repos, func(r *domain.Repository) string { return r.Name },
+		q.PageSize, q.PageToken)
 }
 func (f *fakeZotH) ListTags(context.Context, registry.TagListQuery) ([]*domain.Tag, string, error) {
 	return f.tags, "", nil

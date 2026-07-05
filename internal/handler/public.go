@@ -114,7 +114,16 @@ func (h *RegistryHandler) Delete(ctx context.Context, req *registryv1.DeleteRegi
 // уровня В ХЕНДЛЕРЕ (RPC ScopeFiltered, interceptor пропускает): (1) namespace
 // call-gate v_list на registry_registry:<reg> (deny→NOT_FOUND, existence-hiding);
 // (2) per-repo row-filter — только repos, на которые subject имеет v_list
-// (namespace-viewer НЕ видит все repos автоматически). Пагинация — ПОСЛЕ фильтра.
+// (namespace-viewer НЕ видит все repos автоматически).
+//
+// Пагинация — ДО per-repo authz-фильтра И ДО zot ImageList-fan-out (anti-DoS,
+// CWE-770/400): окно режется В АДАПТЕРЕ У ИСТОЧНИКА (zot GlobalSearch → sort → window
+// → fan-out только для окна), иначе дешёвый ListRepositories(page_size=1) развернулся
+// бы в N per-repo iam.Check + N zot round-trip по ВСЕЙ проекции namespace (N не
+// контролируется вызывающим; паритет с data-plane serveCatalog-гейтом). Handler лишь
+// довершает bounded-concurrency authz-фильтр уже-ограниченного окна. next-token
+// (по сырым именам окна) сохраняется, поэтому все разрешённые репо достижимы
+// пагинацией, даже если ghost-скрытие/фильтр схлопнули отдельную страницу.
 func (h *RegistryHandler) ListRepositories(ctx context.Context, req *registryv1.ListRepositoriesRequest) (*registryv1.ListRepositoriesResponse, error) {
 	registryID := req.GetRegistryId()
 	if err := validateRegistryID(registryID); err != nil {
@@ -123,21 +132,20 @@ func (h *RegistryHandler) ListRepositories(ctx context.Context, req *registryv1.
 	if err := h.authz.namespaceGate(ctx, registryID); err != nil {
 		return nil, err
 	}
-	items, _, err := h.uc.ListRepositories(ctx, registry.RepoListQuery{RegistryID: registryID})
+	window, next, err := h.uc.ListRepositories(ctx, registry.RepoListQuery{
+		RegistryID: registryID,
+		PageSize:   int64(req.GetPageSize()),
+		PageToken:  req.GetPageToken(),
+	})
 	if err != nil {
 		return nil, mapErr(err)
 	}
-	filtered, err := h.authz.filterRepos(ctx, registryID, items)
+	filtered, err := h.authz.filterRepos(ctx, registryID, window)
 	if err != nil {
 		return nil, err
 	}
-	page, next, err := pageByName(filtered, func(r *domain.Repository) string { return r.Name },
-		int64(req.GetPageSize()), req.GetPageToken())
-	if err != nil {
-		return nil, mapErr(err)
-	}
 	resp := &registryv1.ListRepositoriesResponse{NextPageToken: next}
-	for _, r := range page {
+	for _, r := range filtered {
 		resp.Repositories = append(resp.Repositories, toProtoRepository(r))
 	}
 	return resp, nil
