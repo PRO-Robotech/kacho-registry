@@ -7,8 +7,6 @@ import (
 	"context"
 	"fmt"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
 
 	"github.com/PRO-Robotech/kacho-corelib/ids"
@@ -33,10 +31,10 @@ func (u *UseCase) DeleteTag(ctx context.Context, registryID, repository, tag str
 		return nil, err
 	}
 	if repository == "" {
-		return nil, status.Error(codes.InvalidArgument, "repository is required")
+		return nil, failInvalidArg("repository is required")
 	}
 	if tag == "" {
-		return nil, status.Error(codes.InvalidArgument, "tag is required")
+		return nil, failInvalidArg("tag is required")
 	}
 
 	op, err := operations.NewFromContext(ctx,

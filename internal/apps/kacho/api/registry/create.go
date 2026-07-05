@@ -8,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
 
 	"github.com/PRO-Robotech/kacho-corelib/ids"
@@ -35,7 +33,7 @@ func (u *UseCase) Create(ctx context.Context, spec CreateSpec) (*operations.Oper
 	}
 
 	if spec.ProjectID == "" {
-		return nil, status.Error(codes.InvalidArgument, "projectId is required")
+		return nil, failInvalidArg("projectId is required")
 	}
 	if err := corevalidate.Labels("labels", spec.Labels); err != nil {
 		return nil, err
@@ -52,7 +50,7 @@ func (u *UseCase) Create(ctx context.Context, spec CreateSpec) (*operations.Oper
 	// Self-validating domain: name DNS-safe (OCI-namespace segment), status,
 	// project_id. Ошибка → InvalidArgument (каноничный "Illegal argument"-класс).
 	if err := reg.Validate(); err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "Illegal argument: %s", err.Error())
+		return nil, failInvalidArg("Illegal argument: %s", err.Error())
 	}
 
 	// Cross-domain existence project'а на request-path (data-integrity.md §cross-domain):
@@ -94,7 +92,7 @@ func (u *UseCase) Create(ctx context.Context, spec CreateSpec) (*operations.Oper
 	if err != nil {
 		syncErr := mapRepoErr(err)
 		if errors.Is(err, regerrors.ErrAlreadyExists) {
-			syncErr = status.Errorf(codes.AlreadyExists, "registry %s already exists", reg.Name)
+			syncErr = failAlreadyExists("registry %s already exists", reg.Name)
 		}
 		// Финализируем осиротевший pending-Operation тем же статусом (worker переведёт
 		// его в done=true+error). Клиент всё равно получает sync-ошибку ниже.
@@ -134,9 +132,9 @@ func (u *UseCase) registryAny(r *domain.Registry) (*anypb.Any, error) {
 func projectExistsErr(projectID string, err error) error {
 	switch {
 	case errors.Is(err, regerrors.ErrInvalidArg), errors.Is(err, regerrors.ErrNotFound):
-		return status.Errorf(codes.InvalidArgument, "project %s not found", projectID)
+		return failInvalidArg("project %s not found", projectID)
 	case errors.Is(err, regerrors.ErrUnavailable):
-		return status.Error(codes.Unavailable, "project existence check unavailable")
+		return failUnavailable("project existence check unavailable")
 	}
 	return mapRepoErr(err)
 }
