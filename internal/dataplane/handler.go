@@ -8,7 +8,11 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
@@ -256,9 +260,22 @@ func (h *Handler) serveMount(w http.ResponseWriter, r *http.Request, p parsed, s
 	h.forwarder.Forward(w, r)
 }
 
-// serveCatalog — GET /v2/_catalog: per-repo listauthz-фильтр полного zot-каталога
-// (Check v_list на registry_repository:<full-name>) — межтенантно/межрепозиторно не
-// течёт. Синтезирует отфильтрованный ответ, а не проксирует сырой каталог.
+// catalogMaxPageSize — жёсткий потолок числа сырых repo-имён, обрабатываемых за один
+// _catalog-запрос (и, значит, число per-repo authz-Check). Применяется ВСЕГДА, даже
+// без `?n=` — иначе один дешёвый GET /v2/_catalog развернулся бы в N последовательных
+// iam.Check по всему кросс-тенантному каталогу (N = глобальное число репо, которое
+// вызывающий не контролирует; CWE-770/400 self-amplifying DoS).
+const catalogMaxPageSize = 1000
+
+// catalogAuthzConcurrency — верхняя граница параллельных authz-Check при фильтрации
+// одной страницы _catalog (bound fan-out в iam, как blob-scope в zot-адаптере).
+const catalogAuthzConcurrency = 8
+
+// serveCatalog — GET /v2/_catalog: per-repo listauthz-фильтр zot-каталога (Check
+// v_list на registry_repository:<full-name>) — межтенантно/межрепозиторно не течёт.
+// Синтезирует отфильтрованный ответ, а не проксирует сырой каталог. OCI-пагинация
+// `n=`/`last=` ограничивает окно ДО authz-цикла (bounded Check-count), Check'и окна —
+// bounded-concurrency; при усечении отдаётся Link: rel="next".
 func (h *Handler) serveCatalog(w http.ResponseWriter, r *http.Request, subject string) {
 	if r.Method != http.MethodGet {
 		writeNotFound(w)
@@ -269,20 +286,81 @@ func (h *Handler) serveCatalog(w http.ResponseWriter, r *http.Request, subject s
 		h.failClosed(w, "catalog read failed", err)
 		return
 	}
-	visible := make([]string, 0, len(names))
-	for _, full := range names {
-		allowed, cerr := h.checkAllowed(r.Context(), subject, relVList, repositoryObjectFull(full))
-		if cerr != nil {
-			h.failClosed(w, "catalog filter check failed", cerr)
-			return
-		}
-		if allowed {
+
+	pageSize := parseCatalogPageSize(r.URL.Query().Get("n"))
+	window, more := catalogWindow(names, r.URL.Query().Get("last"), pageSize)
+
+	// Bounded-concurrency authz-фильтр окна; результат собирается в порядке имён
+	// (indexed slice) — детерминированная сортировка сохраняется.
+	allowedFlags := make([]bool, len(window))
+	g, gctx := errgroup.WithContext(r.Context())
+	g.SetLimit(catalogAuthzConcurrency)
+	for i, full := range window {
+		i, full := i, full
+		g.Go(func() error {
+			allowed, cerr := h.checkAllowed(gctx, subject, relVList, repositoryObjectFull(full))
+			if cerr != nil {
+				return cerr
+			}
+			allowedFlags[i] = allowed
+			return nil
+		})
+	}
+	if werr := g.Wait(); werr != nil {
+		h.failClosed(w, "catalog filter check failed", werr)
+		return
+	}
+
+	visible := make([]string, 0, len(window))
+	for i, full := range window {
+		if allowedFlags[i] {
 			visible = append(visible, full)
 		}
+	}
+
+	if more && len(window) > 0 {
+		last := window[len(window)-1]
+		next := "/v2/_catalog?" + url.Values{
+			"n":    []string{strconv.Itoa(pageSize)},
+			"last": []string{last},
+		}.Encode()
+		w.Header().Set("Link", `<`+next+`>; rel="next"`)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{"repositories": visible})
+}
+
+// parseCatalogPageSize разбирает OCI `n=` (размер страницы _catalog). Пусто/битое/
+// ≤0 → потолок catalogMaxPageSize; больше потолка → потолок (кламп, чтобы клиент не
+// снял границу Check-count). Возвращает всегда положительное значение в [1..max].
+func parseCatalogPageSize(n string) int {
+	if n == "" {
+		return catalogMaxPageSize
+	}
+	v, err := strconv.Atoi(n)
+	if err != nil || v <= 0 || v > catalogMaxPageSize {
+		return catalogMaxPageSize
+	}
+	return v
+}
+
+// catalogWindow выделяет страницу из отсортированных имён: пропускает имена ≤ last
+// (курсор предыдущей страницы, OCI `last=`), берёт до pageSize. more=true, если за
+// окном остались ещё имена (клиенту нужен Link: rel="next"). names ожидается
+// отсортированным (CatalogRepoNames сортирует).
+func catalogWindow(names []string, last string, pageSize int) (window []string, more bool) {
+	start := 0
+	if last != "" {
+		for start < len(names) && names[start] <= last {
+			start++
+		}
+	}
+	rest := names[start:]
+	if len(rest) > pageSize {
+		return rest[:pageSize], true
+	}
+	return rest, false
 }
 
 // check — single per-request Check против repo/namespace-объекта. allow → true

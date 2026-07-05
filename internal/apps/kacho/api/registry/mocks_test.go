@@ -244,6 +244,10 @@ type memOps struct {
 	// listErr — если задан, List возвращает его (no-leak тест: сырой repo-текст
 	// не должен протечь наружу в gRPC Internal).
 	listErr error
+	// createErr — если задан, Create/CreateWithPrincipal возвращают его (симуляция
+	// сбоя персиста pending-Operation; проверка LRO-ordering: ресурс не должен быть
+	// записан, если Operation-envelope не удалось создать).
+	createErr error
 }
 
 func newMemOps() *memOps { return &memOps{ops: map[string]*operations.Operation{}} }
@@ -255,8 +259,17 @@ func (m *memOps) put(op operations.Operation) {
 	m.ops[op.ID] = &cp
 }
 
-func (m *memOps) Create(ctx context.Context, op operations.Operation) error { m.put(op); return nil }
+func (m *memOps) Create(ctx context.Context, op operations.Operation) error {
+	if m.createErr != nil {
+		return m.createErr
+	}
+	m.put(op)
+	return nil
+}
 func (m *memOps) CreateWithPrincipal(ctx context.Context, op operations.Operation, p operations.Principal) error {
+	if m.createErr != nil {
+		return m.createErr
+	}
 	op.Principal = p
 	m.put(op)
 	return nil

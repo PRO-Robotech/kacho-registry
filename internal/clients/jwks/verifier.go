@@ -48,6 +48,12 @@ var ErrInvalidToken = errors.New("jwks: invalid token")
 // defaultTTL — TTL кэша JWKS (fallback, если сервер не задал Cache-Control).
 const defaultTTL = 5 * time.Minute
 
+// maxTTL — верхняя граница TTL кэша ключей. Cache-Control max-age сервера JWKS
+// клампится до этого значения: непомерный/ошибочный max-age (напр. годы) не должен
+// оставлять ротированный/отозванный ключ валидным дольше окна ротации. Держит
+// обещание docstring'а («ограниченный TTL ... но не бесконечно», CWE-613).
+const maxTTL = time.Hour
+
 // Verifier — потокобезопасный верификатор Hydra-issued identity-JWT по Hydra JWKS.
 type Verifier struct {
 	jwksURL string
@@ -218,6 +224,9 @@ func (v *Verifier) refresh(ctx context.Context) error {
 	}
 
 	ttl := parseMaxAge(resp.Header.Get("Cache-Control"))
+	if ttl > maxTTL {
+		ttl = maxTTL // кламп: непомерный server max-age не растягивает rotation-окно
+	}
 	v.mu.Lock()
 	v.keys = fresh
 	v.fetched = v.now()

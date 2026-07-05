@@ -66,27 +66,43 @@ func (u *UseCase) Create(ctx context.Context, spec CreateSpec) (*operations.Oper
 	principal := operations.PrincipalFromContext(ctx)
 	intent := domain.RegisterIntentForCreate(reg, principal.Type, principal.ID)
 
-	// Атомарно: строка registry + register-intent (project-tuple ПЕРВЫМ, затем
-	// owner-tuple) в одной writer-tx. partial UNIQUE(project_id,name)WHERE
-	// status<>'DELETING' → 23505 → ALREADY_EXISTS с именем.
-	created, err := u.writer.Insert(ctx, reg, intent)
-	if err != nil {
-		if errors.Is(err, regerrors.ErrAlreadyExists) {
-			return nil, status.Errorf(codes.AlreadyExists, "registry %s already exists", reg.Name)
-		}
-		return nil, mapRepoErr(err)
-	}
-
+	// LRO-ordering (project-rule #9 / CWE-662): pending-Operation персистится ПЕРВЫМ,
+	// затем — durable INSERT. Иначе Insert-commit с последующим сбоем Operation-create
+	// (две разные транзакции) оставил бы закоммиченный ресурс + owner-tuple без
+	// сопутствующего Operation-envelope (осиротевший ресурс). reg.ID/reg.Name уже
+	// известны (id сгенерирован выше) — метадату можно построить до INSERT.
 	op, err := operations.NewFromContext(ctx,
 		ids.PrefixOperationReg,
-		fmt.Sprintf("Create Registry %s", created.Name),
-		&registryv1.CreateRegistryMetadata{RegistryId: created.ID},
+		fmt.Sprintf("Create Registry %s", reg.Name),
+		&registryv1.CreateRegistryMetadata{RegistryId: reg.ID},
 	)
 	if err != nil {
 		return nil, mapRepoErr(err)
 	}
 	if err := u.ops.CreateWithPrincipal(ctx, op, principal); err != nil {
 		return nil, mapRepoErr(err)
+	}
+
+	// Атомарно: строка registry + register-intent (project-tuple ПЕРВЫМ, затем
+	// owner-tuple) в одной writer-tx. partial UNIQUE(project_id,name)WHERE
+	// status<>'DELETING' → 23505 → ALREADY_EXISTS с именем. INSERT — синхронно
+	// (сохраняет sync-reject семантику REG-04): дубликат → немедленный gRPC
+	// AlreadyExists клиенту, а не async-Operation с error. При ошибке INSERT
+	// уже созданный pending-Operation финализируется как failed (не оставляем
+	// подвисший done=false envelope, который клиент поллил бы вечно).
+	created, err := u.writer.Insert(ctx, reg, intent)
+	if err != nil {
+		syncErr := mapRepoErr(err)
+		if errors.Is(err, regerrors.ErrAlreadyExists) {
+			syncErr = status.Errorf(codes.AlreadyExists, "registry %s already exists", reg.Name)
+		}
+		// Финализируем осиротевший pending-Operation тем же статусом (worker переведёт
+		// его в done=true+error). Клиент всё равно получает sync-ошибку ниже.
+		finalErr := syncErr
+		operations.Run(ctx, u.ops, op.ID, func(_ context.Context) (*anypb.Any, error) {
+			return nil, finalErr
+		})
+		return nil, syncErr
 	}
 
 	operations.Run(ctx, u.ops, op.ID, func(_ context.Context) (*anypb.Any, error) {

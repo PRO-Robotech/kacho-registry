@@ -259,6 +259,66 @@ func TestDataplane_REG23_Catalog_PerRepoFilter(t *testing.T) {
 	require.Equal(t, []string{"reg-A/app"}, body.Repositories)
 }
 
+// REG-23 pagination (CWE-770) — GET /v2/_catalog с `?n=` ограничивает число
+// per-repo authz-Check'ов ОКНОМ страницы ДО authz-цикла: запрос не разворачивается в
+// N последовательных iam.Check по всему кросс-тенантному каталогу. При n=2 из 5 репо
+// проверяется ровно 2, отдаётся ≤2 видимых, а Link-заголовок сигналит следующую
+// страницу (rel="next", cursor last=<последнее имя окна>).
+func TestDataplane_REG23_Catalog_PaginationBoundsChecks(t *testing.T) {
+	az := &fakeAuthz{} // allow-all
+	be := &fakeBackend{catalog: []string{"reg-A/a", "reg-A/b", "reg-A/c", "reg-B/x", "reg-B/y"}}
+	h := newTestHandler(&fakeVerifier{subject: "sva-ci"}, az, be, &fakeForwarder{}, &fakeRepoReg{})
+
+	rec := doReq(h, http.MethodGet, "/v2/_catalog?n=2", true)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Repositories []string `json:"repositories"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, []string{"reg-A/a", "reg-A/b"}, body.Repositories, "first page = first n sorted names")
+	require.Len(t, az.checkedObjects(), 2, "authz Check count bounded by page size, not whole catalog")
+
+	link := rec.Header().Get("Link")
+	require.Contains(t, link, `rel="next"`, "truncated catalog advertises next page")
+	require.Contains(t, link, "last=reg-A%2Fb", "next cursor = last name of window")
+	require.Contains(t, link, "n=2")
+}
+
+// REG-23 pagination cursor — `?n=2&last=reg-A/b` продолжает со следующего имени после
+// курсора (окно = ["reg-A/c","reg-B/x"]); authz-Check только по окну.
+func TestDataplane_REG23_Catalog_PaginationCursor(t *testing.T) {
+	az := &fakeAuthz{}
+	be := &fakeBackend{catalog: []string{"reg-A/a", "reg-A/b", "reg-A/c", "reg-B/x", "reg-B/y"}}
+	h := newTestHandler(&fakeVerifier{subject: "sva-ci"}, az, be, &fakeForwarder{}, &fakeRepoReg{})
+
+	rec := doReq(h, http.MethodGet, "/v2/_catalog?n=2&last=reg-A/b", true)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body struct {
+		Repositories []string `json:"repositories"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, []string{"reg-A/c", "reg-B/x"}, body.Repositories)
+	require.Len(t, az.checkedObjects(), 2)
+}
+
+// REG-23 pagination last page — окно покрывает хвост каталога → без Link (нет
+// следующей страницы). authz-фильтр по-прежнему применяется.
+func TestDataplane_REG23_Catalog_LastPageNoLink(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_list registry_repository:reg-B/y": true}}
+	be := &fakeBackend{catalog: []string{"reg-A/a", "reg-A/b", "reg-B/y"}}
+	h := newTestHandler(&fakeVerifier{subject: "sva-ci"}, az, be, &fakeForwarder{}, &fakeRepoReg{})
+
+	rec := doReq(h, http.MethodGet, "/v2/_catalog?n=100", true)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Empty(t, rec.Header().Get("Link"), "full window → no next page")
+	var body struct {
+		Repositories []string `json:"repositories"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, []string{"reg-B/y"}, body.Repositories)
+}
+
 // REG-24 — GET /v2/<repo>/tags/list: v_list на repo allow → forward; без прав → 404.
 func TestDataplane_REG24_TagsList(t *testing.T) {
 	az := &fakeAuthz{allow: map[string]bool{"v_list registry_repository:reg-A/app": true}}
@@ -322,6 +382,65 @@ func TestDataplane_REG20_CrossRepoMount_ExfilGuard(t *testing.T) {
 	hAllow := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azAllow, &fakeBackend{}, fwAllow, &fakeRepoReg{})
 	require.Equal(t, 201, doReq(hAllow, http.MethodPost, "/v2/reg-A/dst/blobs/uploads/?mount=sha256:x&from=reg-A/src", true).Code)
 	require.Equal(t, 1, fwAllow.count())
+}
+
+// REG-20 traversal — cross-repo mount `from` с path-traversal (raw ".." и
+// URL-encoded "%2e%2e") → 400 NAME_INVALID ДО любого authz-Check; блоб не
+// монтируется, forwarder не вызывается. Закрывает пробел покрытия guard'а
+// serveMount (CWE-22 / OWASP A01): без этого теста рефактор, ослабивший
+// strings.Contains(from,"..")-проверку, прошёл бы незамеченным.
+func TestDataplane_REG20_MountFromTraversal_400(t *testing.T) {
+	traversals := []string{
+		"reg-A/../reg-B/src", // выход из namespace в чужой reg-B
+		"../secret",          // выход выше корня
+		"reg-A/%2e%2e/reg-B", // URL-encoded ".." (Query декодирует до "..")
+		"%2e%2e/secret",      // URL-encoded ведущий ".."
+	}
+	for _, from := range traversals {
+		az := &fakeAuthz{} // allow-all — 400 всё равно, до Check
+		fw := &fakeForwarder{}
+		h := newTestHandler(&fakeVerifier{subject: "sva-ci"}, az, &fakeBackend{}, fw, &fakeRepoReg{})
+		target := "/v2/reg-A/dst/blobs/uploads/?mount=sha256:x&from=" + from
+		rec := doReq(h, http.MethodPost, target, true)
+		require.Equal(t, http.StatusBadRequest, rec.Code, from)
+		var body struct {
+			Errors []struct{ Code string } `json:"errors"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.Len(t, body.Errors, 1, from)
+		require.Equal(t, "NAME_INVALID", body.Errors[0].Code, from)
+		require.Equal(t, 0, fw.count(), "traversal mount never forwarded: "+from)
+		require.Empty(t, az.checkedObjects(), "traversal rejected before any authz Check: "+from)
+	}
+}
+
+// REG-20 cross-registry — mount из ДРУГОГО реестра (from=reg-B/src в dst reg-A/dst):
+// exfil-guard делает ДВА Check (v_get на src-объекте reg-B/src И v_create на
+// dst-объекте reg-A/dst). Оба allow → forward; src deny → 404 (чужой блоб из reg-B
+// не вытекает в reg-A).
+func TestDataplane_REG20_CrossRegistryMount_TwoChecks(t *testing.T) {
+	// оба allow → forward + ровно два Check на правильные объекты.
+	az := &fakeAuthz{allow: map[string]bool{
+		"v_get registry_repository:reg-B/src":    true,
+		"v_create registry_repository:reg-A/dst": true,
+	}}
+	fw := &fakeForwarder{status: 201}
+	h := newTestHandler(&fakeVerifier{subject: "sva-ci"}, az, &fakeBackend{}, fw, &fakeRepoReg{})
+	rec := doReq(h, http.MethodPost, "/v2/reg-A/dst/blobs/uploads/?mount=sha256:x&from=reg-B/src", true)
+	require.Equal(t, 201, rec.Code)
+	require.Equal(t, 1, fw.count())
+	calls := az.checkedObjects()
+	require.Len(t, calls, 2, "cross-registry mount checks src AND dst")
+	require.Contains(t, calls, checkCall{"service_account:sva-ci", "v_get", "registry_repository:reg-B/src"})
+	require.Contains(t, calls, checkCall{"service_account:sva-ci", "v_create", "registry_repository:reg-A/dst"})
+
+	// src (reg-B) deny → 404, блоб чужого реестра не смонтирован.
+	azDeny := &fakeAuthz{allow: map[string]bool{"v_create registry_repository:reg-A/dst": true}}
+	fwDeny := &fakeForwarder{}
+	hDeny := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azDeny, &fakeBackend{}, fwDeny, &fakeRepoReg{})
+	recDeny := doReq(hDeny, http.MethodPost, "/v2/reg-A/dst/blobs/uploads/?mount=sha256:x&from=reg-B/src", true)
+	require.Equal(t, http.StatusNotFound, recDeny.Code)
+	require.Equal(t, 0, fwDeny.count(), "cross-registry blob not mounted without src v_get")
 }
 
 // helper: убеждаемся, что Authorization без "Bearer " схемы → 401.
