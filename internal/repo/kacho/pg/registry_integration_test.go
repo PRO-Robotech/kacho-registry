@@ -179,11 +179,18 @@ func TestRepo_REG06_ListPaginationFilter(t *testing.T) {
 	repo := kachopg.NewRegistryRepo(pool)
 	ctx := context.Background()
 
-	for _, name := range []string{"alpha", "bravo", "charlie"} {
+	// created_at выставляется явными возрастающими значениями (НЕ wall-clock sleep):
+	// (created_at,id)-курсор детерминирован без зависимости от разрешения/монотонности
+	// системных часов под нагрузкой CI (иначе два now() в одну микросекунду → ORDER BY
+	// падает на random-ULID tiebreak и позиционный assert флапает).
+	for i, name := range []string{"alpha", "bravo", "charlie"} {
 		r := newReg("prj-P", name, nil)
 		_, err := repo.Insert(ctx, r, domain.RegisterIntentForCreate(r, "user", "usr-alice"))
 		require.NoError(t, err)
-		time.Sleep(2 * time.Millisecond) // различить created_at для стабильного курсора
+		_, err = pool.Exec(ctx,
+			`UPDATE kacho_registry.registries SET created_at = $2 WHERE id = $1`,
+			r.ID, time.Date(2026, 1, 1, 0, 0, i, 0, time.UTC))
+		require.NoError(t, err)
 	}
 	// Чужой project не течёт.
 	other := newReg("prj-Q", "delta", nil)

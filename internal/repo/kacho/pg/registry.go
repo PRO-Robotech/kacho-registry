@@ -366,10 +366,10 @@ func scanRegistry(row pgx.Row) (*domain.Registry, error) {
 }
 
 // emitFGAIntent пишет register/unregister intent в registry_outbox в текущей tx.
-// source_version штампуется DB-часами (now) на INSERT'е внутри writer-tx —
-// монотонный per-object маркер (последовательные мутации коммитятся по порядку →
-// now строго растёт → last-source-state-wins в iam-mirror). Пустой набор tuple →
-// no-op (нечего регистрировать).
+// source_version штампуется BEFORE INSERT триггером как BIGSERIAL id самой строки
+// (миграция 0002) — commit-order-monotonic per-object маркер: воркер, закоммитивший
+// позже, получил больший id (его INSERT выполнился позже под row-lock сериализацией),
+// поэтому last-source-state-wins в iam-mirror корректен. Пустой набор tuple → no-op.
 func emitFGAIntent(ctx context.Context, tx pgx.Tx, eventType string, intent domain.RegisterIntent) error {
 	if len(intent.Tuples) == 0 {
 		return nil
@@ -380,7 +380,7 @@ func emitFGAIntent(ctx context.Context, tx pgx.Tx, eventType string, intent doma
 	}
 	q := fmt.Sprintf(`
 		INSERT INTO %s.registry_outbox (event_type, payload, resource_kind, resource_id)
-		VALUES ($1, jsonb_set($2::jsonb, '{source_version}', to_jsonb(now())), $3, $4)`, schema)
+		VALUES ($1, $2::jsonb, $3, $4)`, schema)
 	if _, err := tx.Exec(ctx, q, eventType, string(payload), intent.Kind, intent.ResourceID); err != nil {
 		return regerrors.Wrap(err, "registry_outbox", intent.ResourceID)
 	}
