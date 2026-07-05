@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/PRO-Robotech/kacho-corelib/authz"
-	registryv1 "github.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1"
+	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
 )
 
 // FGA-скоупинг kacho-registry (verb-bearing модель Kachō, anti-#241: verb-relations

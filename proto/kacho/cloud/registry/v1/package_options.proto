@@ -1,8 +1,0 @@
-// Copyright (c) PRO-Robotech
-// SPDX-License-Identifier: BUSL-1.1
-
-syntax = "proto3";
-
-package kacho.cloud.registry.v1;
-
-option go_package = "github.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1;registryv1";

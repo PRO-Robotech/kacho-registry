@@ -6,7 +6,7 @@ package handler
 import (
 	"testing"
 
-	registryv1 "github.com/PRO-Robotech/kacho-registry/proto/gen/go/kacho/cloud/registry/v1"
+	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
 
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
