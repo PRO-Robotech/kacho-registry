@@ -8,7 +8,7 @@ import (
 )
 
 // verb-relations data-plane authz — локальные alias'ы единого источника
-// internal/domain (verb-bearing модель Kachō, anti-#241: repo-verb НЕ наследуется
+// internal/domain (verb-bearing модель Kachō: repo-verb НЕ наследуется
 // от namespace-tier). check.PermissionMap / handler/listauthz ссылаются на те же
 // domain-константы: rename относительной строки — в одном месте, drift между
 // planes исключён.

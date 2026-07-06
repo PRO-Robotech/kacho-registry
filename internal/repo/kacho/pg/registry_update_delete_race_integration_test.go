@@ -6,9 +6,8 @@
 // MarkDeleting (CAS ACTIVE→DELETING) + Delete на ОДНОЙ строке. Инвариант DB-уровня:
 // row-lock сериализует, поэтому Update, увидевший уже-DELETING (или удалённую) строку,
 // получает 0 rows → ErrNotFound — НИКОГДА не «воскрешает» удаляемый реестр и никогда
-// не коммитит Update против DELETING/absent строки. Покрывает project-rule #10/#12
-// (contested CAS/status-transition путь требует concurrent-goroutine теста).
-// Finding: KAC sec-hardening-r4 2026-07-05.
+// не коммитит Update против DELETING/absent строки. Contested CAS/status-transition
+// путь требует concurrent-goroutine теста.
 package pg_test
 
 import (

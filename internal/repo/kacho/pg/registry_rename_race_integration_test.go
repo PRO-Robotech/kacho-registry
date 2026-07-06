@@ -4,8 +4,7 @@
 // registry_rename_race_integration_test.go — Update-rename onto an existing live
 // name арбитрируется той же partial UNIQUE(project_id,name)WHERE status<>'DELETING',
 // что и Create-dup: SQLSTATE 23505 → regerrors.ErrAlreadyExists на UPDATE-пути
-// (не только на INSERT-пути). Покрывает project-rule #12 п.5 (concurrent-race на
-// каждый спорный UNIQUE-путь). Finding: KAC sec-hardening 2026-07-05.
+// (не только на INSERT-пути). Concurrent-race на каждый спорный UNIQUE-путь.
 package pg_test
 
 import (
@@ -26,7 +25,9 @@ func renameSpec(id, name string) registry.UpdateSpec {
 	return registry.UpdateSpec{RegistryID: id, ApplyName: true, Name: name}
 }
 
-func mirrorUpdate(rr *domain.Registry) domain.RegisterIntent { return domain.RegisterIntentForUpdate(rr) }
+func mirrorUpdate(rr *domain.Registry) domain.RegisterIntent {
+	return domain.RegisterIntentForUpdate(rr)
+}
 
 // TestRepo_RenameOntoExistingLiveName_AlreadyExists — Update B.name → A (живое имя
 // того же project'а) даёт ErrAlreadyExists; B остаётся неизменным (rollback UPDATE).

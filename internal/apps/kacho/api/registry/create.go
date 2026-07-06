@@ -53,7 +53,7 @@ func (u *UseCase) Create(ctx context.Context, spec CreateSpec) (*operations.Oper
 		return nil, failInvalidArg("Illegal argument: %s", err.Error())
 	}
 
-	// Cross-domain existence project'а на request-path (data-integrity.md §cross-domain):
+	// Cross-domain existence project'а на request-path:
 	// not-found → InvalidArgument; iam недоступен → Unavailable (мутация fail-closed).
 	if err := u.iam.ProjectExists(ctx, spec.ProjectID); err != nil {
 		return nil, projectExistsErr(spec.ProjectID, err)
@@ -64,7 +64,7 @@ func (u *UseCase) Create(ctx context.Context, spec CreateSpec) (*operations.Oper
 	principal := operations.PrincipalFromContext(ctx)
 	intent := domain.RegisterIntentForCreate(reg, principal.Type, principal.ID)
 
-	// LRO-ordering (project-rule #9 / CWE-662): pending-Operation персистится ПЕРВЫМ,
+	// LRO-ordering (CWE-662): pending-Operation персистится ПЕРВЫМ,
 	// затем — durable INSERT. Иначе Insert-commit с последующим сбоем Operation-create
 	// (две разные транзакции) оставил бы закоммиченный ресурс + owner-tuple без
 	// сопутствующего Operation-envelope (осиротевший ресурс). reg.ID/reg.Name уже

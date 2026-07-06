@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// viewer_boundary_test.go — verb-tier boundary (anti-#241): субъект, ДЕРЖАЩИЙ v_get,
+// viewer_boundary_test.go — verb-tier boundary: субъект, ДЕРЖАЩИЙ v_get,
 // но НЕ v_update/v_delete на существующем registry_registry:<id>, обязан получить
 // NOT_FOUND (existence-hiding) на Update/Delete — а не молча унаследовать mutate от
 // namespace-tier. Раньше это пиналось только fixture-gated newman-кейсом, который на

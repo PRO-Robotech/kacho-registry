@@ -44,7 +44,7 @@ type Authorizer interface {
 
 // verb-relations per-repo authz — локальные alias'ы единого источника internal/domain
 // (для ScopeFiltered registry-RPC authz энфорсится ЗДЕСЬ, не в interceptor'е —
-// anti-#241: repo-verb НЕ наследуется от namespace-tier). check.PermissionMap /
+// repo-verb НЕ наследуется от namespace-tier). check.PermissionMap /
 // dataplane/authz ссылаются на те же domain-константы: drift между planes исключён.
 const (
 	relationVList   = domain.FGARelationVList

@@ -452,7 +452,7 @@ func statusFromString(s string) domain.RegistryStatus {
 
 // invalidFilterErr оборачивает ошибку парсинга filter в domain-sentinel
 // ErrInvalidArg (repo НЕ формирует gRPC-статус — единый маппинг sentinel→gRPC в
-// serviceerr; §CLAUDE.md dependency rule). serviceerr.ToStatus срежет префикс →
+// serviceerr; CLAUDE.md dependency rule). serviceerr.ToStatus срежет префикс →
 // клиент видит стабильное "invalid filter: <причина>" с кодом INVALID_ARGUMENT.
 func invalidFilterErr(err error) error {
 	return fmt.Errorf("%w: invalid filter: %v", regerrors.ErrInvalidArg, err)

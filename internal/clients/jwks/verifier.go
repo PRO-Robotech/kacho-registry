@@ -70,8 +70,8 @@ const maxJWKSBytes = 1 << 20 // 1 MiB
 
 // Verifier — потокобезопасный верификатор Hydra-issued identity-JWT по Hydra JWKS.
 type Verifier struct {
-	jwksURL string
-	aud     string        // ожидаемый audience (наш service); обязателен
+	jwksURL    string
+	aud        string        // ожидаемый audience (наш service); обязателен
 	iss        string        // ожидаемый issuer (Hydra); "" → проверка iss пропускается
 	ttl        time.Duration // ограниченный TTL кэша ключей
 	minRefresh time.Duration // минимальный интервал между рефетчами по неизвестному kid
