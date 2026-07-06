@@ -14,8 +14,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// Truncate конвертирует time.Time → proto Timestamp, усечённый до секунд
-// (api-conventions.md §timestamp-precision). Нулевое время → nil (поле опущено).
+// Truncate конвертирует time.Time → proto Timestamp, усечённый до секунд.
+// Нулевое время → nil (поле опущено).
 func Truncate(t time.Time) *timestamppb.Timestamp {
 	if t.IsZero() {
 		return nil

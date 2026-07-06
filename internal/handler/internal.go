@@ -3,7 +3,7 @@
 
 // Package handler — internal.go: admin-RPC InternalRegistryService
 // (TriggerGarbageCollection / GetRegistryStats). Регистрируется ТОЛЬКО на
-// cluster-internal листенере (:9091) — никогда на внешнем TLS endpoint (ban #6).
+// cluster-internal листенере (:9091) — никогда на внешнем TLS endpoint.
 // GetRegistryStats несёт инфра-проекцию namespace (infra-sensitive → только :9091).
 //
 // Методы — тонкий transport: делегируют use-case'у, без бизнес-логики.

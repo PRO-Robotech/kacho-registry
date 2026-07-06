@@ -10,7 +10,6 @@
 // Фикс: pg_advisory_xact_lock(hashtext(resource_id)) в начале emitRepoIntent-tx —
 // concurrent register/unregister ОДНОГО repo-объекта сериализуются (второй ждёт commit
 // первого → получает больший id), а РАЗНЫЕ repo-объекты не блокируют друг друга.
-// Finding: DATA-medium, sec-hardening R5 2026-07-05.
 package pg_test
 
 import (

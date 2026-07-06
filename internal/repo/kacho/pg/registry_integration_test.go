@@ -215,7 +215,7 @@ func TestRepo_REG06_ListPaginationFilter(t *testing.T) {
 	require.Equal(t, "bravo", filtered[0].Name)
 
 	// garbage page_token → sentinel ErrInvalidArg (repo НЕ форматирует gRPC-статус —
-	// маппинг sentinel→gRPC живёт в serviceerr; §CLAUDE.md dependency rule).
+	// маппинг sentinel→gRPC живёт в serviceerr; CLAUDE.md dependency rule).
 	_, _, err = repo.List(ctx, registry.ListQuery{ProjectID: "prj-P", PageToken: "!!!garbage"})
 	require.ErrorIs(t, err, regerrors.ErrInvalidArg)
 

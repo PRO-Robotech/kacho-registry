@@ -100,7 +100,7 @@ type Config struct {
 
 	// EndpointBase — tenant-facing base OCI-endpoint namespace. Output-only поле
 	// Registry.endpoint = "<EndpointBase>/<id>". Это tenant-facing ingress-host;
-	// инфра-адрес zot наружу не раскрывается (security.md §инфра-данные).
+	// инфра-адрес zot наружу не раскрывается (infra-sensitive, не на публичной поверхности).
 	EndpointBase string `envconfig:"KACHO_REGISTRY_ENDPOINT_BASE" default:"registry.kacho.local"`
 
 	// ===== per-edge mTLS =====

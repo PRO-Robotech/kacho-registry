@@ -26,7 +26,7 @@ const FGAObjectTypeRegistry = "registry_registry"
 
 // FGAObjectTypeRepository — FGA object-type конкретного репозитория (parent =
 // registry_registry). object-id — "<registryID>/<repo>". Per-repo verb-relations
-// развязаны от namespace-tier (anti-#241): доступ к repo требует отдельного
+// развязаны от namespace-tier: доступ к repo требует отдельного
 // verb-tuple, namespace-viewer НЕ видит все repos автоматически.
 const FGAObjectTypeRepository = "registry_repository"
 
@@ -51,7 +51,7 @@ const (
 	FGAEventUnregister = "fga.unregister"
 )
 
-// FGA verb-relation-строки (verb-bearing модель Kachō, anti-#241: repo-verb НЕ
+// FGA verb-relation-строки (verb-bearing модель Kachō: repo-verb НЕ
 // наследуется от namespace-tier). ЕДИНЫЙ источник истины для обоих planes —
 // check.PermissionMap (control-plane interceptor-gate), handler/listauthz
 // (ScopeFiltered row-filter) и dataplane/authz (OCI push/pull) ссылаются сюда,

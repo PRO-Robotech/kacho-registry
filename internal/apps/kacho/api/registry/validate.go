@@ -34,8 +34,8 @@ var knownUpdateFields = map[string]struct{}{
 	"labels":      {},
 }
 
-// immutableUpdateFields → каноничный immutable-текст (api-conventions.md
-// §update_mask): поле в mask, но менять нельзя после Create. name — mutable
+// immutableUpdateFields → каноничный immutable-текст (update_mask
+// discipline): поле в mask, но менять нельзя после Create. name — mutable
 // (смена не трогает endpoint/zot по id), поэтому здесь только project_id.
 var immutableUpdateFields = map[string]string{
 	"project_id": "projectId is immutable after Registry.Create",

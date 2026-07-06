@@ -12,7 +12,7 @@ import (
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
 
-// FGA-скоупинг kacho-registry (verb-bearing модель Kachō, anti-#241: verb-relations
+// FGA-скоупинг kacho-registry (verb-bearing модель Kachō: verb-relations
 // развязаны от grant-tier). Два FGA-типа:
 //   - registry_registry     — namespace (List/Create/Delete + list-filter).
 //   - registry_repository    — конкретный repo (pull/push/delete, parent=registry).
@@ -98,7 +98,7 @@ func repositoryObject() authz.ObjectExtractor {
 }
 
 // PermissionMap сопоставляет каждый registry-RPC → требуемое verb-relation +
-// object extractor (зеркалит §2 дизайна). List/ListRepositories/ListTags/DeleteTag
+// object extractor (зеркалит раздел 2 дизайна). List/ListRepositories/ListTags/DeleteTag
 // несут namespace/repo call-gate; финальный per-repo row-filter — в хендлере.
 func PermissionMap() authz.RPCMap {
 	return authz.RPCMap{

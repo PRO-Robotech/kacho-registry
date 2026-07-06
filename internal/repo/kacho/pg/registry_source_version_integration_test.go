@@ -4,7 +4,7 @@
 // registry_source_version_integration_test.go — outbox source_version обязан быть
 // commit-order-monotonic per-object маркером (BIGSERIAL id outbox-строки), а НЕ
 // to_jsonb(now()) (now() фиксируется на BEGIN → под конкуренцией мог оказаться в
-// обратном commit-порядку). Finding: KAC sec-hardening 2026-07-05.
+// обратном commit-порядку).
 package pg_test
 
 import (

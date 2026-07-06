@@ -89,7 +89,7 @@ type fakeZot struct {
 	gqlFail      bool                       // 500 на GraphQL (транспортная недоступность)
 	gqlErrors    bool                       // непустой errors-массив в GraphQL-ответе
 
-	imageListCalls atomic.Int64 // счётчик ImageList-round-trip (bound fan-out — #4)
+	imageListCalls atomic.Int64 // счётчик ImageList-round-trip (bound fan-out)
 }
 
 func newFakeZot() *fakeZot {
@@ -390,7 +390,7 @@ func TestZot_REG22_ListRepositories_NamespaceScoped(t *testing.T) {
 	require.Equal(t, "web", repos[1].Name)
 }
 
-// REG-DOS(#4) — ListRepositories режет ОКНО (page_size) ДО per-repo ImageList-fan-out:
+// REG-DOS — ListRepositories режет ОКНО (page_size) ДО per-repo ImageList-fan-out:
 // при большом namespace дешёвый запрос НЕ разворачивается в N round-trip к zot. Регресс-
 // гейт против CWE-770 memory/backend-амплификации на уровне адаптера.
 func TestZot_ListRepositories_PaginatedBoundsImageListFanout(t *testing.T) {
@@ -575,7 +575,7 @@ func TestZot_ListTags_MultiArch(t *testing.T) {
 	require.Equal(t, "multi-arch", tags[0].Architecture)
 }
 
-// SEC(#770) — ListTags режет ОКНО (page_size) по имени тега (ASC) В АДАПТЕРЕ ДО
+// SEC (CWE-770) — ListTags режет ОКНО (page_size) по имени тега (ASC) В АДАПТЕРЕ ДО
 // проекции в domain.Tag — материализация/аллокация ограничена запрошенной страницей,
 // а не полным набором тегов repo (паритет с ListRepositories window-before-fan-out).
 // Курсор (opaque base64 имени) байт-совместим с прежней handler-пагинацией.

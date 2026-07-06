@@ -21,11 +21,11 @@ import (
 
 	"github.com/PRO-Robotech/kacho-corelib/operations"
 
+	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
 	registry "github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/api/registry"
 	"github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/shared/namepage"
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
-	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
 )
 
 // recordingAuthorizer — mock Authorizer: allow[object]=true → allowed; err → сбой

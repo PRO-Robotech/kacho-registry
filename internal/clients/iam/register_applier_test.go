@@ -223,8 +223,8 @@ func TestRegisterApplier_UnknownEventType_Permanent(t *testing.T) {
 	assert.Empty(t, fake.registerReqs, "unknown event must not touch iam")
 }
 
-// TestClassifyRegisterErr — table-driven классификация gRPC-ответа (medium TEST
-// finding: applier ранее без покрытия).
+// TestClassifyRegisterErr — table-driven классификация gRPC-ответа
+// (applier ранее без покрытия).
 func TestClassifyRegisterErr(t *testing.T) {
 	tests := []struct {
 		name    string
