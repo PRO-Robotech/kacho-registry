@@ -109,7 +109,7 @@ func repositoryFromSummaries(registryID, name string, rs gqlRepoSummary, results
 	repo := &domain.Repository{
 		RegistryID:    registryID,
 		Name:          name,
-		TagCount:      int32(len(results)),
+		TagCount:      int32(len(results)), // #nosec G115 -- tag count of one registry, bounded well below int32 max
 		SizeBytes:     parseInt64(rs.Size),
 		UpdatedAt:     parseZotTS(rs.LastUpdated),
 		DownloadCount: rs.DownloadCount,
