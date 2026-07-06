@@ -232,3 +232,40 @@ this repo — they run against a deployed stand via `tests/newman/scripts/run.sh
 stands the stack up and runs `run.sh` + `dataplane-e2e.sh` on registry PRs (e.g. via a
 `repository_dispatch` from this repo). At that point wire this repo's PRs to trigger it;
 until the stand-in-CI exists, the suite is gated at the aggregate-e2e layer.
+
+## 8. `AuthMode` Go-config default is `dev` (production posture set by the deploy profile)
+
+**Rule.** security.md: «Любой деплой — production-mode (anonymous fail-closed) + mTLS/JWT»
+— every deployment must run in production posture; the dev anonymous-fallback is for local
+fixtures only, never a deployed stand.
+
+**Divergence.** `internal/apps/kacho/config/config.go` defaults `AuthMode` to `"dev"` (and,
+consistently, `HydraJWKSURL` to a plaintext `http://` in-cluster URL, `HydraIssuer` to `""`,
+`DBSSLMode` to `disable`). When `KACHO_REGISTRY_AUTH_MODE` is unset the service falls back to
+`dev`, in which the data-plane guards `requireSecureJWKSURL` / `requireIssuerPinned`
+(serve.go) are skipped — so the identity-JWT trust anchor may be fetched over http:// with
+issuer-pinning off.
+
+**Why accepted.**
+- **Platform-wide convention, not a registry-local choice.** Every `kacho-*` service
+  defaults its `<SVC>_AUTH_MODE` to `dev` in Go config (e.g. `kacho-geo`
+  `KACHO_GEO_AUTH_MODE default:"dev"`) and hardens via the deploy layer: the umbrella
+  prod profile (`kacho-deploy/helm/umbrella/values.prod.yaml`, per-subchart `values.yaml`)
+  sets `AUTH_MODE=production` + DB `sslmode=require`. security.md's «любой деплой —
+  production-mode» is satisfied by that deploy-profile override, not by the Go default —
+  the `dev` default exists purely for local `make dev-up` ergonomics.
+- **Blast radius is bounded independently of `AuthMode`.** `validateSecurityConfig`
+  (serve.go) fail-closes the *control-plane* regardless of mode: without breakglass, per-RPC
+  authz `Check` (IAM addr) **and** mTLS on **both** gRPC listeners (:9090/:9091) are
+  mandatory or the process refuses to boot. `AuthMode` toggles only the *data-plane* JWKS
+  transport/issuer-pinning strictness and a DB-SSL warning — it never relaxes gRPC authN/authZ.
+- **Fail-closed in production.** Under `AUTH_MODE=production[-strict]` the data-plane rejects
+  a non-https JWKS URL or an empty issuer at startup (`requireSecureJWKSURL` /
+  `requireIssuerPinned`, regression-tested in `serve_test.go`), so a real deployment cannot
+  silently run the weak trust anchor.
+
+**What would revisit this.** A platform decision to flip the corelib/service convention to a
+secure-by-Go-default (`AuthMode` default `production`, with an explicit `dev` opt-in for local
+stands) — applied uniformly across all `kacho-*` services so registry does not diverge from
+its siblings. Until then the deploy profile is the single enforcement point and this default
+matches every peer service.

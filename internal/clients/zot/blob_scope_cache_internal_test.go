@@ -10,9 +10,11 @@ package zot
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -110,4 +112,75 @@ func TestBlobInRepo_CacheExpiresAfterTTL(t *testing.T) {
 	if z.manifestFetches.Load() <= after1 {
 		t.Fatal("cache must expire after TTL and re-scan")
 	}
+}
+
+// TestMembershipCache_ConcurrentGetSet_RaceSafe — BlobInRepo сидит на горячем
+// data-plane blob-pull-пути (serveBlob → BlobInRepo), обслуживаемом HTTP-сервером
+// конкурентно. Мьютекс-защищённые get/set membershipCache обязаны выдерживать
+// параллельные горутины под -race, включая eviction-петлю set() при переполнении
+// (маленький maxSize форсирует её). Регресс coarse-mutex → finer-grained схемы
+// (или sync.Map с check-then-act eviction-багом) ловится тут паникой map
+// concurrent-write под -race — раньше он проходил бы, т.к. существующие тесты
+// звали BlobInRepo строго последовательно.
+func TestMembershipCache_ConcurrentGetSet_RaceSafe(t *testing.T) {
+	const (
+		goroutines = 32
+		iterations = 400
+		maxSize    = 64 // маленький потолок → set() гоняет eviction под гонкой
+	)
+	c := newMembershipCache(time.Minute, maxSize)
+	const hot = "reg-A/app|sha256:hot" // все горутины бьют в один ключ (contested)
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				// hot key — всегда true; никакой конкурентный set не переворачивает его.
+				c.set(hot, true)
+				if in, ok := c.get(hot); ok && !in {
+					t.Errorf("hot key verdict flipped to false under contention")
+				}
+				// distinct keys — раздувают map до потолка, гоняя eviction-ветку set().
+				key := blobCacheKey("reg-A", "app", fmt.Sprintf("sha256:%d-%d", g, i))
+				c.set(key, i%2 == 0)
+				c.get(key)
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	// Потолок соблюдён даже под конкурентными set с eviction (все горутины
+	// завершены — прямой доступ к entries безопасен).
+	if got := len(c.entries); got > maxSize {
+		t.Fatalf("cache exceeded maxSize under contention: %d > %d", got, maxSize)
+	}
+}
+
+// TestBlobInRepo_ConcurrentSameKey_RaceSafe — реальный горячий путь: N параллельных
+// BlobInRepo для одного (repo,digest) (как одновременные docker-pull одного слоя)
+// не паникуют и дают когерентный вердикт под -race. Кэш get/set гоняется через
+// backend.go, а не напрямую.
+func TestBlobInRepo_ConcurrentSameKey_RaceSafe(t *testing.T) {
+	z := &countingManifestZot{tags: []string{"v1"}, hitDigest: "sha256:hit", hitTag: "v1"}
+	cli := New(z.server(t).URL)
+
+	const goroutines = 24
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			in, err := cli.BlobInRepo(context.Background(), "reg-A", "app", "sha256:hit")
+			if err != nil {
+				t.Errorf("BlobInRepo: %v", err)
+				return
+			}
+			if !in {
+				t.Errorf("want in-repo verdict true for hit digest, got false")
+			}
+		}()
+	}
+	wg.Wait()
 }

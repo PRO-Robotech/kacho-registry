@@ -83,7 +83,7 @@ func runServe(cfg config.Config) error {
 		if err != nil {
 			return fmt.Errorf("dial kacho-iam internal: %w", err)
 		}
-		defer authzConn.Close()
+		defer func() { _ = authzConn.Close() }()
 	}
 
 	// ── ребро registry→iam PUBLIC (:9090, mTLS): ProjectService.Get (existence-
@@ -103,7 +103,7 @@ func runServe(cfg config.Config) error {
 		if err != nil {
 			return fmt.Errorf("dial kacho-iam project: %w", err)
 		}
-		defer projectConn.Close()
+		defer func() { _ = projectConn.Close() }()
 	}
 	logger.Info("registry→iam edges wired",
 		"authz_addr", cfg.AuthZIAMGRPCAddr, "authz_mtls", cfg.IAMAuthzMTLS.Enable,
