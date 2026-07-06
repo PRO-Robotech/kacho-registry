@@ -220,7 +220,8 @@ func (r *RegistryRepo) Update(ctx context.Context, spec registry.UpdateSpec, mir
 		}
 		sets = append(sets, fmt.Sprintf("labels = $%d::jsonb", idx))
 		args = append(args, labels)
-		idx++
+		// labels — последнее применяемое поле; idx дальше не читается (финальный
+		// UPDATE строится из sets/args). Инкремент здесь был бы ineffectual.
 	}
 
 	tx, err := r.pool.Begin(ctx)

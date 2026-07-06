@@ -46,6 +46,18 @@ type jwksServer struct {
 
 func b64u(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
+// ecXY возвращает big-endian координаты X/Y публичного P-256 ключа (по 32 байта),
+// не обращаясь к deprecated ecdsa.PublicKey.X/Y (SA1019, deprecated since Go 1.26).
+// Uncompressed SEC1-точка из crypto/ecdh: 0x04 || X(32) || Y(32).
+func ecXY(key *ecdsa.PrivateKey) (x, y []byte) {
+	pub, err := key.PublicKey.ECDH()
+	if err != nil {
+		panic(fmt.Sprintf("ec public key → ecdh (P-256 expected): %v", err))
+	}
+	raw := pub.Bytes()
+	return raw[1:33], raw[33:65]
+}
+
 // padTo дополняет big-endian координату слева нулями до фиксированной длины (EC JWK
 // x/y и raw ES256 r||s — ровно по 32 байта для P-256).
 func padTo(b []byte, size int) []byte {
@@ -99,19 +111,20 @@ func (js *jwksServer) defaultDoc() map[string]any {
 			"alg": "RS256",
 			"use": "sig",
 			"kid": kid,
-			"n":   b64u(key.PublicKey.N.Bytes()),
-			"e":   b64u(big.NewInt(int64(key.PublicKey.E)).Bytes()),
+			"n":   b64u(key.N.Bytes()),
+			"e":   b64u(big.NewInt(int64(key.E)).Bytes()),
 		})
 	}
 	for kid, key := range js.ecKeys {
+		x, y := ecXY(key)
 		keys = append(keys, map[string]any{
 			"kty": "EC",
 			"crv": "P-256",
 			"alg": "ES256",
 			"use": "sig",
 			"kid": kid,
-			"x":   b64u(padTo(key.PublicKey.X.Bytes(), 32)),
-			"y":   b64u(padTo(key.PublicKey.Y.Bytes(), 32)),
+			"x":   b64u(x),
+			"y":   b64u(y),
 		})
 	}
 	return map[string]any{"keys": keys}
@@ -515,8 +528,8 @@ func TestJWKS_toRSA_Accepts2048(t *testing.T) {
 
 	got, err := rsaJWK(&key.PublicKey).toRSA()
 	require.NoError(t, err)
-	require.Equal(t, 0, key.PublicKey.N.Cmp(got.N))
-	require.Equal(t, key.PublicKey.E, got.E)
+	require.Equal(t, 0, key.N.Cmp(got.N))
+	require.Equal(t, key.E, got.E)
 }
 
 // SEC (end-to-end) — JWKS с коротким (1024-бит) RSA-ключом: refresh пропускает такой
