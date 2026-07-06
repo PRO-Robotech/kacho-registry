@@ -45,6 +45,25 @@ type descriptor struct {
 // Маппится caller-методом в идемпотентный success либо пустую проекцию.
 var errNotFound = fmt.Errorf("zot: not found")
 
+// maxManifestBytes — верхняя граница тела манифеста, читаемого getManifest под
+// io.LimitReader. Манифест OCI/Docker — компактный список дескрипторов (config +
+// layers), не blob-контент; реальные манифесты — килобайты, спека/реестры клампят их
+// единицами МБ. LimitReader — defense-in-depth (CWE-770): скомпрометированный/битый
+// zot не должен OOM'ить декодер безразмерным телом. Тело сверх лимита → усечённый
+// JSON → decode error → failClosed ErrUnavailable.
+const maxManifestBytes = 16 << 20 // 16 MiB
+
+// decodeManifest разбирает тело манифеста (config + layers) под io.LimitReader(limit).
+// Ошибка декода (в т.ч. усечение сверх лимита) → failClosed ErrUnavailable (сырой
+// zot-текст наружу не течёт).
+func decodeManifest(body io.Reader, limit int64) (manifestBody, error) {
+	var mb manifestBody
+	if err := json.NewDecoder(io.LimitReader(body, limit)).Decode(&mb); err != nil {
+		return manifestBody{}, failClosed("GET manifest decode", "err", err)
+	}
+	return mb, nil
+}
+
 // repoPath url-кодирует сегменты полного repo-пути (multi-segment), сохраняя '/'.
 func repoPath(fullRepo string) string {
 	segs := strings.Split(fullRepo, "/")
@@ -106,10 +125,10 @@ func (c *Client) getManifest(ctx context.Context, fullRepo, ref string) (manifes
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return manifestBody{}, failClosed("GET manifest non-2xx", "status", resp.StatusCode)
 	}
-	var mb manifestBody
-	if err := json.NewDecoder(resp.Body).Decode(&mb); err != nil {
+	mb, err := decodeManifest(resp.Body, maxManifestBytes)
+	if err != nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return manifestBody{}, failClosed("GET manifest decode", "err", err)
+		return manifestBody{}, err
 	}
 	return mb, nil
 }

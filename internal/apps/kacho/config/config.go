@@ -91,6 +91,14 @@ type Config struct {
 	// в WWW-Authenticate. Токен обязан нести aud ⊇ ServiceAud (federation-out на
 	// другие RP registry-доступа не даёт).
 	ServiceAud string `envconfig:"KACHO_REGISTRY_SERVICE_AUD" default:"registry.kacho.local"`
+	// DataplaneTLSTerminatedExternally — оператор подтверждает, что data-plane
+	// OCI-листенер (открытый HTTP, DataplaneAddr) стоит за внешней TLS-терминацией
+	// (ingress/mesh). В production/production-strict обязателен true — иначе
+	// buildDataplaneHandler (requireDataplaneTLSAck) отклоняет старт: bearer
+	// identity-JWT (реплеябельные в пределах TTL) не должны транзитить открытым текстом
+	// (CWE-319). Параллель requireSecureJWKSURL/requireIssuerPinned. В dev игнорируется.
+	DataplaneTLSTerminatedExternally bool `envconfig:"KACHO_REGISTRY_DATAPLANE_TLS_TERMINATED_EXTERNALLY" default:"false"`
+
 	// HydraIssuer — expected issuer identity-JWT (external Hydra issuer, напр.
 	// https://hydra.api.kacho.cloud). Пусто → iss не проверяется (dev-only). В
 	// production/production-strict issuer-pinning ОБЯЗАТЕЛЕН — buildDataplaneHandler

@@ -95,6 +95,27 @@ func TestOperationHandler_Get_OwnerScoped(t *testing.T) {
 	}
 }
 
+// TestOperationHandler_Cancel_AlreadyDone_FailedPrecondition — владелец отменяет
+// УЖЕ завершённую операцию: repo возвращает ErrAlreadyDone → FailedPrecondition
+// "operation %s already completed" (не NotFound, не Internal). Пинит реальную,
+// достижимую ветку маппинга (handler.go:73); без теста рефактор мог бы молча
+// смапить её в NotFound/Internal, и клиент получил бы неверный gRPC-код.
+func TestOperationHandler_Cancel_AlreadyDone_FailedPrecondition(t *testing.T) {
+	repo := &fakeOwnedOpsRepo{
+		op:    &operations.Operation{ID: "op0000000000000000cc", Done: true},
+		owner: operations.Owner{PrincipalType: "user", PrincipalID: "alice"},
+	}
+	h := NewOperationHandler(repo)
+
+	_, err := h.Cancel(ctxWith("alice"), &operationpb.CancelOperationRequest{OperationId: "op0000000000000000cc"})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("already-done Cancel: want FailedPrecondition, got %v", err)
+	}
+	if msg := status.Convert(err).Message(); msg != "operation op0000000000000000cc already completed" {
+		t.Fatalf("already-done Cancel: unexpected message %q", msg)
+	}
+}
+
 // TestOperationHandler_Cancel_OwnerScoped — чужой principal не может отменить
 // чужую операцию (NotFound); владелец отменяет успешно.
 func TestOperationHandler_Cancel_OwnerScoped(t *testing.T) {

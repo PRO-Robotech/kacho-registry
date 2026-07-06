@@ -260,12 +260,114 @@ issuer-pinning off.
   mandatory or the process refuses to boot. `AuthMode` toggles only the *data-plane* JWKS
   transport/issuer-pinning strictness and a DB-SSL warning — it never relaxes gRPC authN/authZ.
 - **Fail-closed in production.** Under `AUTH_MODE=production[-strict]` the data-plane rejects
-  a non-https JWKS URL or an empty issuer at startup (`requireSecureJWKSURL` /
-  `requireIssuerPinned`, regression-tested in `serve_test.go`), so a real deployment cannot
-  silently run the weak trust anchor.
+  a non-https JWKS URL, an empty issuer, or an unacknowledged plaintext listener at startup
+  (`requireSecureJWKSURL` / `requireIssuerPinned` / `requireDataplaneTLSAck`, regression-tested
+  in `serve_test.go`), so a real deployment cannot silently run the weak trust anchor or expose
+  bearer tokens on cleartext.
 
 **What would revisit this.** A platform decision to flip the corelib/service convention to a
 secure-by-Go-default (`AuthMode` default `production`, with an explicit `dev` opt-in for local
 stands) — applied uniformly across all `kacho-*` services so registry does not diverge from
 its siblings. Until then the deploy profile is the single enforcement point and this default
 matches every peer service.
+
+## 9. Register-on-first-push is a best-effort emit; a lost first-push intent is not reconciled
+
+**Rule.** data-integrity.md: a state mutation and its outbox emit are atomic / no partial
+writes; a lost intent must be recoverable.
+
+**Divergence (cross-service, by rule's own exception).** On the first successful manifest-PUT
+of a *new* repo, `internal/dataplane/handler.go` (`servePush`) has already written content to
+zot and streamed the 2xx to the client; it *then* emits the repo register-intent
+(`RepoRegistrar.RegisterRepository` → `registry_outbox`) as a **post-response side-effect**. If
+that single DB emit fails it is logged and the client keeps its 2xx (contract pinned by
+`handler_test.go` REG-14c). Because the register branch is gated on `!exists`
+(`handler.go:207`), every later push sees `exists=true` and skips registration, so a first-push
+intent lost to a transient registry-DB error is never re-emitted, and there is **no
+registry-side reconciler/sweeper**.
+
+**Why accepted.**
+- **The two writes straddle a service boundary** (zot's own store vs the registry Postgres
+  outbox) — they cannot be one transaction (database-per-service, ban #8), the same exemption
+  that governs divergence #3. Once the intent *is* in `registry_outbox`, delivery to iam is
+  durable at-least-once (`corelib outbox/drainer`, `FOR UPDATE SKIP LOCKED`); the only
+  unrecovered window is the emit *into* the outbox itself failing.
+- **Deliberate availability tradeoff, already tested.** REG-14c fixes the contract as
+  *log-and-continue*: a rare DB blip on the post-forward side-effect must not fail an
+  already-succeeded push. Flipping to emit-before-forward + fail-closed would invert that tested
+  contract (push → 5xx on emit error) and reorder the authz materialisation ahead of content —
+  a behavioural change to the push path, out of scope for a contracts-frozen hardening pass.
+- **Bounded, non-leaking failure mode.** The degraded state is an existence-hiding `NOT_FOUND`
+  on an un-materialised repo (owner cannot pull until re-registered) — never a cross-tenant leak
+  or loss of committed control-plane metadata.
+
+**What would revisit this.** A registry-side reconciler (periodic sweep, or an idempotent
+re-emit keyed on «zot has the repo but no register-intent was durably recorded») that
+re-materialises the parent/owner tuples; the emit is already idempotent (advisory lock + iam
+dedup), so re-emit is safe. Tracked as a follow-up behavioural change rather than folded into
+this pass.
+
+## 10. `GetRegistryStats` walks the whole namespace live (bounded-concurrency, not paginated)
+
+**Rule.** CWE-770 / OWASP A05: a single request must not fan out unbounded downstream work.
+
+**Divergence.** `internal/clients/zot/distribution.go` (`Stats`, reached via
+`InternalRegistryService.GetRegistryStats`, :9091) enumerates every repo in the namespace, then
+every tag, then fetches every manifest to sum blob sizes. Work is O(total tags in the namespace)
+with no page-size bound or early cutoff.
+
+**Why accepted.**
+- **Admin-only, authz-gated Internal surface.** `GetRegistryStats` is on the cluster-internal
+  :9091 listener only, and per-RPC `Check` gates it at the viewer tier (`v_get` on
+  `registry_registry`, `permission_map.go`) — internal is *not* exempt (security.md). It is not
+  reachable by tenants or from the public endpoint.
+- **Instantaneous downstream load is already bounded.** Manifest fetches run under an
+  `errgroup` capped at `blobScopeConcurrency` (8) — at most 8 concurrent zot round-trips at any
+  moment (comment at `distribution.go:148`), so a large namespace makes Stats *slow*, not a
+  connection-budget spike on shared zot. Each manifest body is additionally read under
+  `io.LimitReader(maxManifestBytes)` (`httpclient.go`, this pass) so no single body can OOM the
+  decoder.
+- **Exact aggregation inherently requires the walk.** The returned `RegistryStats` (repo/tag
+  count, unique-blob count, total bytes) is defined as an exact figure; a per-call cap would make
+  it silently approximate — a contract change, not a contract-safe hardening.
+
+**What would revisit this.** Serve Stats from a periodically-materialised aggregate (or make it
+paginated/streamed) rather than a live full-namespace walk; that removes the O(tags) live fan-out
+without changing the exact-count contract. A materialisation component is a follow-up, not a
+frozen-contract hardening change.
+
+## 11. `PermissionMap` ScopeFiltered entries retain `Relation`/`Extract` as permission-catalog documentation
+
+**Rule.** CWE-561: no dead code — a field the runtime never reads should not be carried.
+
+**Divergence.** The four `ScopeFiltered` entries in `internal/check/permission_map.go`
+(`List` / `ListRepositories` / `ListTags` / `DeleteTag`) carry `Relation` + `Extract` +
+`Permission` like every interceptor-gated entry, yet for a `ScopeFiltered` entry the corelib
+interceptor returns `DecisionInternal` **before** it ever calls `entry.Extract`
+(`kacho-corelib/authz/interceptor.go:225-231`) — so `repositoryObject()` (the extractor used
+*only* by `ListTags`/`DeleteTag`) is never invoked at runtime, and the `Relation`/`Extract`
+fields on these entries are never read. Real per-repo enforcement for these RPCs lives in
+`internal/handler/listauthz.go`.
+
+**Why accepted.**
+- **Intentional, tested catalog documentation, not an accident.** The code comment states the
+  retention explicitly («Relation/Extract сохранены как catalog-doc»), and
+  `permission_map_test.go` (`TestPermissionMap_List_CatalogRetained`) *asserts* `List` keeps
+  `Relation=v_list`. Every entry carrying a uniform `{Permission, Relation, object-extractor}`
+  descriptor makes the map a single readable catalog of «which verb/object each RPC conceptually
+  governs», with `ScopeFiltered:true` the one flag that redirects enforcement to the handler.
+- **Extractor uniformity is load-bearing for the live entries.** `registryObject()` /
+  `projectObject()` *are* executed for the interceptor-gated RPCs (`Get`/`Create`/`Update`/
+  `Delete`/`ListOperations`/GC/Stats); dropping `Extract` from only the ScopeFiltered entries
+  would leave an inconsistent map (some entries with an extractor, some without) for no
+  behavioural, wire, or security change.
+- **No enforcement risk.** Removing the fields changes neither the interceptor path (which
+  ignores them for ScopeFiltered) nor the handler gate (`listauthz.go`), so the residual is
+  documentation-shaped; the misleading-reader concern is already mitigated by the extensive
+  inline comments pointing at `handler/listauthz.go` as the enforcement site.
+
+**What would revisit this.** A decision to make the map carry *only* the fields the runtime reads
+(drop `Relation`/`Extract` on all ScopeFiltered entries and delete `repositoryObject()`), paired
+with updating `TestPermissionMap_List_CatalogRetained` and adding a one-line comment per entry
+pointing at `handler/listauthz.go`. A pure catalog-shape change, deferred so the tested uniform
+descriptor is not reversed mid-hardening.
