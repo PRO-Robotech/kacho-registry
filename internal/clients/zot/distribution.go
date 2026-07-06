@@ -143,7 +143,7 @@ func (c *Client) Stats(ctx context.Context, registryID string) (*domain.Registry
 	if err != nil {
 		return nil, err
 	}
-	stats := &domain.RegistryStats{RegistryID: registryID, RepositoryCount: int32(len(fullNames))}
+	stats := &domain.RegistryStats{RegistryID: registryID, RepositoryCount: int32(len(fullNames))} // #nosec G115 -- repo count of one registry, bounded well below int32 max
 
 	// Собираем (full-repo, tag) пары; манифесты читаем bounded-concurrency fan-out'ом
 	// (cap blobScopeConcurrency) — namespace с тысячами тегов иначе последовательно
@@ -155,7 +155,7 @@ func (c *Client) Stats(ctx context.Context, registryID string) (*domain.Registry
 		if terr != nil {
 			return nil, terr
 		}
-		stats.TagCount += int32(len(tags))
+		stats.TagCount += int32(len(tags)) // #nosec G115 -- per-repo tag count, bounded well below int32 max
 		for _, tag := range tags {
 			pairs = append(pairs, repoTagPair{full: full, tag: tag})
 		}
