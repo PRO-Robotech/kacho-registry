@@ -318,6 +318,14 @@ func runServe(cfg config.Config) error {
 // InternalIAMService.Check + zot stream-proxy. breakglass → bypass AuthN+AuthZ
 // (аварийный режим, как gRPC-листенеры).
 func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoReg dataplane.RepoRegistrar, backend dataplane.Backend, regLookup dataplane.RegistryLookup, logger *slog.Logger) (http.Handler, error) {
+	// Plaintext data-plane обязан стоять за внешней TLS-терминацией (bearer
+	// identity-JWT не должны транзитить открытым текстом). В проде — явный ack
+	// оператора; проверяется независимо от breakglass (риск открытого сокета
+	// ортогонален обходу authz).
+	if err := requireDataplaneTLSAck(cfg.AuthMode, cfg.DataplaneTLSTerminatedExternally); err != nil {
+		return nil, err
+	}
+
 	forwarder, err := dataplane.NewZotForwarder(cfg.ZotAddr, logger)
 	if err != nil {
 		return nil, err
@@ -364,6 +372,27 @@ func requireSecureJWKSURL(authMode, jwksURL string) error {
 		if !strings.EqualFold(u.Scheme, "https") {
 			return fmt.Errorf("AuthMode=%s requires https:// KACHO_REGISTRY_HYDRA_JWKS_URL "+
 				"(JWKS trust anchor must not be fetched over plaintext; got scheme %q)", authMode, u.Scheme)
+		}
+	}
+	return nil
+}
+
+// requireDataplaneTLSAck — data-plane OCI-листенер (DataplaneAddr) обслуживает открытый
+// HTTP; штатно TLS терминируется внешним ingress/mesh перед подом. По этому сокету
+// транзитят bearer identity-JWT (Hydra-issued, реплеябельные в пределах TTL). В
+// production/production-strict молчаливый plaintext-старт запрещён: если ingress
+// ошибочно настроен на plaintext-passthrough, docker-login токены утекают в открытом
+// виде (harvest+replay, CWE-319). Оператор обязан ЯВНО подтвердить внешнюю TLS-
+// терминацию (KACHO_REGISTRY_DATAPLANE_TLS_TERMINATED_EXTERNALLY=true) — параллель
+// requireSecureJWKSURL/requireIssuerPinned. В dev — no-op (как http:// JWKS и DB
+// sslmode=disable). Вызывается только когда data-plane поднимается (DataplaneAddr!="").
+func requireDataplaneTLSAck(authMode string, tlsTerminatedExternally bool) error {
+	switch authMode {
+	case "production", "production-strict":
+		if !tlsTerminatedExternally {
+			return fmt.Errorf("AuthMode=%s requires KACHO_REGISTRY_DATAPLANE_TLS_TERMINATED_EXTERNALLY=true "+
+				"(the data-plane serves plaintext HTTP and must sit behind external TLS termination; "+
+				"bearer identity-JWTs would otherwise transit cleartext)", authMode)
 		}
 	}
 	return nil

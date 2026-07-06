@@ -167,6 +167,38 @@ func TestDataplane_REG14_PushNewRepo_CarriesRegistryProject(t *testing.T) {
 	require.Equal(t, 1, lk.calls, "project resolved exactly once on register-on-first-push")
 }
 
+// REG-14d — register-on-first-push, но RegistryProjectID-lookup упал (iam/registry
+// транзиентно недоступен на post-response пути). Контракт resolveRegistryProject
+// (handler.go:230): best-effort — интент ВСЁ РАВНО эмитится (хотя бы структурный
+// parent-tuple, не регрессируя ниже прежнего поведения), но с ПУСТЫМ ParentProjectID
+// (iam-reconciler тогда не материализует per-object v_*), а сбой наблюдаемо логируется.
+// Без теста эта деградирующая ветка меняла бы поведение (skip vs emit) незаметно.
+func TestDataplane_REG14d_PushNewRepo_ProjectLookupError_EmitsEmptyProject_Logged(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	fw := &fakeForwarder{status: 201}
+	be := &fakeBackend{exists: map[string]bool{}}
+	rr := &fakeRepoReg{}
+	lk := &fakeRegistryLookup{err: errors.New("iam lookup down")}
+
+	var logbuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	h := New(&fakeVerifier{subject: "sva-ci"}, az, be, fw, rr, lk,
+		"https://api.kacho.local/iam/token", "registry.kacho.local", logger)
+
+	up := doReq(h, http.MethodPost, "/v2/reg-A/app/blobs/uploads/", true)
+	require.Equal(t, 201, up.Code)
+	mf := doReq(h, http.MethodPut, "/v2/reg-A/app/manifests/v1", true)
+	require.Equal(t, 201, mf.Code, "push 2xx forwarded несмотря на сбой project-lookup")
+
+	intents := rr.registered()
+	require.Len(t, intents, 1, "register-intent эмитится даже при сбое project-lookup (best-effort)")
+	require.Empty(t, intents[0].ParentProjectID,
+		"project-lookup failure → пустой ParentProjectID (не выдумываем project)")
+	require.Equal(t, 1, lk.calls, "project-lookup попытан ровно один раз")
+	require.Contains(t, logbuf.String(), "register-on-first-push project lookup failed",
+		"сбой project-lookup наблюдаемо залогирован (не проглочен)")
+}
+
 // REG-18 — push без прав → первый upload-запрос Check(registry_registry:reg-A, v_create)
 // deny → 404 (existence-hiding); блоб не принят, register-intent не эмитится.
 func TestDataplane_REG18_PushNoRights_404(t *testing.T) {

@@ -88,6 +88,30 @@ func TestRegistry_REG25_DeleteTag_TagsRemain_NoUnregister(t *testing.T) {
 	require.Empty(t, reg.unregisterIntent, "repo still has tags → no unregister")
 }
 
+// REG-25 (imp-4) — DeleteTag worker: zot.DeleteTag прошёл, но чтение остатка тегов
+// (ListTags) упало (zot недоступен) → unregisterRepoIfEmpty пробрасывает ошибку,
+// Operation завершается С error, и unregister-intent НЕ эмитится (нельзя снимать
+// authz-объект при НЕИЗВЕСТНОМ числе тегов — иначе dangling authz на живом repo).
+// Пинит ветку deletetag.go:79 (ранее listTagsErr был объявлен в mock, но не покрыт).
+func TestRegistry_REG25_DeleteTag_ListTagsError_NoUnregister(t *testing.T) {
+	zot := &mockZot{listTagsErr: regerrors.ErrUnavailable} // DeleteTag ok, ListTags fail-closed
+	ops := newMemOps()
+	reg := &mockRepoReg{}
+	uc := newUCWithReg(&mockRepo{}, zot, &mockIAM{}, ops, reg)
+
+	op, err := uc.DeleteTag(aliceCtx(), validRegID, "app", "v1")
+	require.NoError(t, err)
+	done := awaitOpDone(t, ops, op.ID)
+	require.NotNil(t, done.Error, "ListTags read failure must surface in Operation.error")
+	require.Equal(t, int32(codes.Unavailable), done.Error.GetCode(),
+		"mapped gRPC code preserved (mapRepoErr, not swallowed/mismapped)")
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	require.Empty(t, reg.unregisterIntent,
+		"unknown tag count must not strip the repo authz-object (no unregister on ListTags error)")
+}
+
 // REG-25 — DeleteTag: malformed registry id / пустые repo|tag → синхронный
 // INVALID_ARGUMENT (Operation НЕ создаётся, zot не трогается).
 func TestRegistry_REG25_DeleteTag_SyncValidation(t *testing.T) {

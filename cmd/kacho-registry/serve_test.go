@@ -135,6 +135,39 @@ func TestRequireSecureJWKSURL(t *testing.T) {
 	}
 }
 
+// TestRequireDataplaneTLSAck — data-plane OCI-листенер обслуживает открытый HTTP
+// (bearer identity-JWT транзитят по сокету). В production/production-strict молчаливый
+// plaintext-старт запрещён: оператор обязан ЯВНО подтвердить внешнюю TLS-терминацию
+// (KACHO_REGISTRY_DATAPLANE_TLS_TERMINATED_EXTERNALLY=true), иначе старт отклоняется.
+// В dev — no-op (как http:// JWKS и DB sslmode=disable). Параллель requireSecureJWKSURL/
+// requireIssuerPinned.
+func TestRequireDataplaneTLSAck(t *testing.T) {
+	cases := []struct {
+		name          string
+		authMode      string
+		tlsTerminated bool
+		wantErr       bool
+	}{
+		{"dev-noack-ok", "dev", false, false},
+		{"dev-ack-ok", "dev", true, false},
+		{"prod-noack-rejected", "production", false, true},
+		{"prod-ack-ok", "production", true, false},
+		{"prod-strict-noack-rejected", "production-strict", false, true},
+		{"prod-strict-ack-ok", "production-strict", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := requireDataplaneTLSAck(tc.authMode, tc.tlsTerminated)
+			if tc.wantErr && err == nil {
+				t.Fatalf("want error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("want nil, got %v", err)
+			}
+		})
+	}
+}
+
 // TestRequireIssuerPinned — в production/production-strict issuer (iss) identity-JWT
 // обязан быть закреплён (KACHO_REGISTRY_HYDRA_ISSUER непустой); пустой iss в проде
 // принимал бы токен от любого RP с тем же JWKS+aud (federation-out). В dev пустой iss
