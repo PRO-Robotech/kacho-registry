@@ -209,21 +209,34 @@ func (h *RegistryHandler) DeleteTag(ctx context.Context, req *registryv1.DeleteT
 }
 
 // ListOperations возвращает историю async-операций реестра (sync). Per-resource
-// фильтр по resource_id=registry_id; authz — per-RPC interceptor-Check v_list на
-// registry_registry:<id> (scope из registry_id), handler тонкий. operationToProto
-// маппит каждую строку в proto-форму (oneof error|response при done).
+// фильтр по resource_id=registry_id (use-case). Authz — ДВА уровня: (1) namespace
+// call-gate v_list на registry_registry:<id> — per-RPC interceptor-Check (НЕ
+// ScopeFiltered, scope из registry_id); (2) per-repo row-filter В ХЕНДЛЕРЕ
+// (filterOperations): операция, scoped к конкретному sub-repo (DeleteTag —
+// metadata.repository + Description "Delete tag … of <reg>/<repo>"), видна ТОЛЬКО при
+// per-repo v_list на registry_repository:<reg>/<repo> (иначе тихо выпадает —
+// existence-hiding). Без (2) namespace-viewer вывел бы существование/тег чужого repo
+// из истории операций — existence-oracle, обходящий per-repo isolation (ListTags).
+// registry_id уже провалидирован use-case'ом (empty/malformed → InvalidArgument до
+// фильтра). next-token сервера сохраняется (клиент продолжает пагинацию, даже если
+// страница схлопнута фильтром). operationToProto маппит строку в proto (oneof при done).
 func (h *RegistryHandler) ListOperations(ctx context.Context, req *registryv1.ListRegistryOperationsRequest) (*registryv1.ListRegistryOperationsResponse, error) {
+	registryID := req.GetRegistryId()
 	ops, next, err := h.uc.ListOperations(ctx, registry.ListOperationsQuery{
-		RegistryID: req.GetRegistryId(),
+		RegistryID: registryID,
 		PageSize:   int64(req.GetPageSize()),
 		PageToken:  req.GetPageToken(),
 	})
 	if err != nil {
 		return nil, mapErr(err)
 	}
+	filtered, err := h.authz.filterOperations(ctx, registryID, ops)
+	if err != nil {
+		return nil, err
+	}
 	resp := &registryv1.ListRegistryOperationsResponse{NextPageToken: next}
-	for i := range ops {
-		resp.Operations = append(resp.Operations, operationToProto(&ops[i]))
+	for i := range filtered {
+		resp.Operations = append(resp.Operations, operationToProto(&filtered[i]))
 	}
 	return resp, nil
 }

@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/PRO-Robotech/kacho-corelib/authz"
 	"github.com/PRO-Robotech/kacho-corelib/operations"
@@ -167,6 +168,85 @@ func (a repoAuthz) filterRepos(ctx context.Context, registryID string, repos []*
 		}
 	}
 	return out, nil
+}
+
+// filterOperations — per-repo row-filter истории операций реестра (ListOperations).
+// Interceptor гейтит RPC ТОЛЬКО namespace v_list на registry_registry:<reg>; но
+// операция, scoped к конкретному sub-repo (DeleteTag → metadata.repository +
+// Description "Delete tag … of <reg>/<repo>"), раскрыла бы namespace-viewer'у, НЕ
+// имеющему v_list на этот repo, само его существование (имя/тег) — existence-oracle,
+// обходящий per-repo isolation, которую держат ListTags/checkRepo. Поэтому repo-scoped
+// операция видна ТОЛЬКО при per-repo v_list на registry_repository:<reg>/<repo> (тот
+// же Check, что checkRepo/ListTags); иначе тихо выпадает (existence-hiding: без ошибки).
+// Registry-level операции (no repository в metadata) остаются видны — namespace v_list
+// (interceptor) достаточно.
+//
+// registryID берётся из ЗАПРОСА (не из metadata) — операции уже отфильтрованы
+// use-case'ом по resource_id=registryID, а доверять registry_id из metadata для
+// построения authz-объекта незачем. breakglass → все; az-error → UNAVAILABLE
+// (fail-closed, не отдаём частичный список — паритет с filterRepos/filterRegistries).
+// Fan-out bounded-concurrency (repoAuthzConcurrency), детерминированный порядок.
+func (a repoAuthz) filterOperations(ctx context.Context, registryID string, ops []operations.Operation) ([]operations.Operation, error) {
+	if a.az == nil {
+		return ops, nil
+	}
+	subject := subjectFromContext(ctx)
+	keep := make([]bool, len(ops))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(repoAuthzConcurrency)
+	for i := range ops {
+		repository, scoped := repositoryOfOperation(&ops[i])
+		if !scoped {
+			keep[i] = true // registry-level op — namespace v_list (interceptor) достаточно
+			continue
+		}
+		i := i
+		g.Go(func() error {
+			ok, err := a.az.Check(gctx, subject, relationVList, repositoryObjectRef(registryID, repository))
+			if err != nil {
+				return err
+			}
+			keep[i] = ok
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, errAuthzUnavailable()
+	}
+	out := make([]operations.Operation, 0, len(ops))
+	for i := range ops {
+		if keep[i] {
+			out = append(out, ops[i])
+		}
+	}
+	return out, nil
+}
+
+// repositoryOfOperation — sub-repository, к которому scoped операция (из её metadata),
+// и true если op — repo-scoped. Registry-level op (metadata без непустого поля
+// "repository", напр. Create/Update/Delete/GC) → ("", false). Metadata Any
+// интроспектится generic'ом (protoreflect-поле "repository") — любой новый
+// repo-scoped op-тип покрывается автоматически, без перечисления конкретных
+// *Metadata-типов. Неразбираемая metadata (не должно случаться: registry-op-типы
+// зарегистрированы в глобальном proto-registry) → registry-level (нет repository для
+// leak'а).
+func repositoryOfOperation(op *operations.Operation) (string, bool) {
+	if op == nil || op.Metadata == nil {
+		return "", false
+	}
+	msg, err := op.Metadata.UnmarshalNew()
+	if err != nil {
+		return "", false
+	}
+	fd := msg.ProtoReflect().Descriptor().Fields().ByName("repository")
+	if fd == nil || fd.Kind() != protoreflect.StringKind {
+		return "", false
+	}
+	repository := msg.ProtoReflect().Get(fd).String()
+	if repository == "" {
+		return "", false
+	}
+	return repository, true
 }
 
 // errHideExistence — deny на объект, который caller не вправе видеть: NOT_FOUND

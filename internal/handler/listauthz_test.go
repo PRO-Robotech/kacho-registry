@@ -10,6 +10,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"testing"
 
@@ -278,6 +279,119 @@ func TestHandler_REG25_DeleteTag_AuthzGate(t *testing.T) {
 	})
 }
 
+// ---- ListOperations existence-oracle (audit r8) ---------------------------
+// ListRegistryOperations gated interceptor'ом ТОЛЬКО namespace v_list на
+// registry_registry:<id>. Операция, scoped к конкретному sub-repo (DeleteTag →
+// metadata.repository + Description "Delete tag … of <reg>/<repo>"), без доп.
+// per-repo row-filter раскрыла бы namespace-viewer'у имя/тег чужого repo — existence-
+// oracle, обходящий per-repo isolation (ListTags/checkRepo → NOT_FOUND). Handler
+// доп. фильтрует такие op по per-repo v_list (filterOperations), тем же паттерном,
+// что filterRepos.
+
+// deleteTagOpH — repo-scoped операция (DeleteTagMetadata несёт repository/tag).
+func deleteTagOpH(t *testing.T, id, registryID, repo, tag string) operations.Operation {
+	t.Helper()
+	md, err := anypb.New(&registryv1.DeleteTagMetadata{RegistryId: registryID, Repository: repo, Tag: tag})
+	require.NoError(t, err)
+	return operations.Operation{
+		ID:          id,
+		Description: fmt.Sprintf("Delete tag %s of %s/%s", tag, registryID, repo),
+		Metadata:    md,
+	}
+}
+
+// registryLevelOpH — registry-level операция (CreateRegistryMetadata; no repository).
+func registryLevelOpH(t *testing.T, id, registryID, desc string) operations.Operation {
+	t.Helper()
+	md, err := anypb.New(&registryv1.CreateRegistryMetadata{RegistryId: registryID})
+	require.NoError(t, err)
+	return operations.Operation{ID: id, Description: desc, Metadata: md}
+}
+
+func newTestHandlerOps(ops operations.Repo, az Authorizer) *RegistryHandler {
+	uc := registry.New(stubRepo{}, stubRepo{}, &fakeZotH{}, stubIAM{}, stubRepo{}, ops, "registry.kacho.local")
+	return NewRegistryHandler(uc, az)
+}
+
+// REG-r8 — существование-oracle закрыт: namespace-viewer БЕЗ per-repo v_list на
+// "app-b" НЕ видит DeleteTag-операцию этого repo в истории (ни Description, ни
+// metadata с repo/tag). RED до fix (op протекала verbatim), GREEN после.
+func TestHandler_ListOperations_DropsRepoScopedOp_WithoutPerRepoVList(t *testing.T) {
+	ops := newMemOpsH()
+	ops.put(registryLevelOpH(t, "rop-create", validReg, "Create registry"))
+	ops.put(deleteTagOpH(t, "rop-deltag", validReg, "app-b", "v1"))
+	// namespace v_list имеется (interceptor-gate; здесь не проверяется), per-repo
+	// v_list на app-b НЕ выдан → DeleteTag-op выпадает.
+	az := &recordingAuthorizer{allow: map[string]bool{registryObjectRef(validReg): true}}
+	h := newTestHandlerOps(ops, az)
+
+	resp, err := h.ListOperations(carolCtx(), &registryv1.ListRegistryOperationsRequest{RegistryId: validReg})
+	require.NoError(t, err)
+	require.Len(t, resp.GetOperations(), 1, "repo-scoped op без per-repo v_list должна выпасть")
+	require.Equal(t, "rop-create", resp.GetOperations()[0].GetId())
+	for _, op := range resp.GetOperations() {
+		require.NotContains(t, op.GetDescription(), "app-b", "repo name must not leak via Description")
+	}
+	require.Contains(t, az.calls, relationVList+" "+repositoryObjectRef(validReg, "app-b"),
+		"per-repo v_list Check на app-b обязан быть выполнен")
+}
+
+// REG-r8 — positive: subject С per-repo v_list на "app-b" видит DeleteTag-op.
+func TestHandler_ListOperations_KeepsRepoScopedOp_WithPerRepoVList(t *testing.T) {
+	ops := newMemOpsH()
+	ops.put(registryLevelOpH(t, "rop-create", validReg, "Create registry"))
+	ops.put(deleteTagOpH(t, "rop-deltag", validReg, "app-b", "v1"))
+	az := &recordingAuthorizer{allow: map[string]bool{
+		registryObjectRef(validReg):            true,
+		repositoryObjectRef(validReg, "app-b"): true,
+	}}
+	h := newTestHandlerOps(ops, az)
+
+	resp, err := h.ListOperations(carolCtx(), &registryv1.ListRegistryOperationsRequest{RegistryId: validReg})
+	require.NoError(t, err)
+	require.Len(t, resp.GetOperations(), 2, "с per-repo v_list видны обе op")
+}
+
+// REG-r8 — registry-level op (no repository в metadata) видна под namespace v_list
+// всегда, БЕЗ per-repo Check (даже когда все per-repo denied).
+func TestHandler_ListOperations_RegistryLevelOpAlwaysVisible(t *testing.T) {
+	ops := newMemOpsH()
+	ops.put(registryLevelOpH(t, "rop-create", validReg, "Create registry"))
+	az := &recordingAuthorizer{allow: map[string]bool{}} // всё per-repo deny
+	h := newTestHandlerOps(ops, az)
+
+	resp, err := h.ListOperations(carolCtx(), &registryv1.ListRegistryOperationsRequest{RegistryId: validReg})
+	require.NoError(t, err)
+	require.Len(t, resp.GetOperations(), 1)
+	require.Equal(t, "rop-create", resp.GetOperations()[0].GetId())
+	require.Zero(t, az.callCount(), "registry-level op не требует per-repo Check")
+}
+
+// REG-r8 — fail-closed: iam.Check недоступен → UNAVAILABLE (не отдаём частичный
+// список и не «пропускаем» repo-scoped op). Паритет с filterRepos/filterRegistries.
+func TestHandler_ListOperations_FailClosed_IAMError(t *testing.T) {
+	ops := newMemOpsH()
+	ops.put(deleteTagOpH(t, "rop-deltag", validReg, "app-b", "v1"))
+	az := &recordingAuthorizer{err: regerrors.ErrUnavailable}
+	h := newTestHandlerOps(ops, az)
+
+	_, err := h.ListOperations(carolCtx(), &registryv1.ListRegistryOperationsRequest{RegistryId: validReg})
+	require.Equal(t, codes.Unavailable, codeOf(t, err))
+}
+
+// REG-r8 — breakglass (nil Authorizer): фильтр bypass'ится (как interceptor) — обе
+// op видны.
+func TestHandler_ListOperations_Breakglass_NilAuthorizer_AllVisible(t *testing.T) {
+	ops := newMemOpsH()
+	ops.put(registryLevelOpH(t, "rop-create", validReg, "Create registry"))
+	ops.put(deleteTagOpH(t, "rop-deltag", validReg, "app-b", "v1"))
+	h := newTestHandlerOps(ops, nil)
+
+	resp, err := h.ListOperations(carolCtx(), &registryv1.ListRegistryOperationsRequest{RegistryId: validReg})
+	require.NoError(t, err)
+	require.Len(t, resp.GetOperations(), 2)
+}
+
 // ---- fakes для handler-method тестов --------------------------------------
 
 func newTestHandler(zot registry.ZotClient, az Authorizer) *RegistryHandler {
@@ -365,8 +479,19 @@ func (m *memOpsH) Get(_ context.Context, id string) (*operations.Operation, erro
 	cp := *op
 	return &cp, nil
 }
+// List возвращает сохранённые операции детерминированно (ASC по ID). resource_id-
+// фильтр operations.ListFilter — DB-концерн (денормализованная колонка), в этих
+// authz-юнитах не моделируется: тесты кладут op одного реестра и проверяют per-repo
+// authz-фильтр handler'а, а не repo-фильтр.
 func (m *memOpsH) List(context.Context, operations.ListFilter) ([]operations.Operation, string, error) {
-	return nil, "", nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]operations.Operation, 0, len(m.ops))
+	for _, op := range m.ops {
+		out = append(out, *op)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, "", nil
 }
 func (m *memOpsH) MarkDone(_ context.Context, id string, response *anypb.Any) error {
 	m.mu.Lock()
