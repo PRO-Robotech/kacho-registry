@@ -92,9 +92,11 @@ type RegistryWriter interface {
 	// mirror register-intent строится callback'ом ИЗ обновлённой строки (нужны
 	// её project_id + новые labels) и эмитится в ТОЙ ЖЕ tx (без Get/TOCTOU).
 	Update(ctx context.Context, spec UpdateSpec, mirror func(*domain.Registry) domain.RegisterIntent) (*domain.Registry, error)
-	// MarkDeleting — атомарный CAS ACTIVE→DELETING (UPDATE ... WHERE status='ACTIVE'
-	// RETURNING); 0 rows → ErrNotFound (уже DELETING/удалён — идемпотентно).
-	// DELETING терминальный (forward-only): revert в ACTIVE невозможен.
+	// MarkDeleting — атомарный forward-only CAS в DELETING (UPDATE ... WHERE
+	// status IN ('ACTIVE','DELETING') RETURNING): ACTIVE→DELETING либо идемпотентно
+	// DELETING→DELETING (уже DELETING → строка возвращается как success, чтобы
+	// retry/крэш-рекавери довели удаление до конца). 0 rows только когда строки
+	// нет (уже удалена) → ErrNotFound. DELETING терминальный: revert в ACTIVE невозможен.
 	MarkDeleting(ctx context.Context, id string) (*domain.Registry, error)
 	// Delete удаляет строку реестра + unregister-intent в registry_outbox одной tx.
 	Delete(ctx context.Context, id string, intent domain.RegisterIntent) error
