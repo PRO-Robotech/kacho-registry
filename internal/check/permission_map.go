@@ -136,8 +136,17 @@ func PermissionMap() authz.RPCMap {
 			Permission: "registry.registries.delete",
 		},
 		// ListOperations — per-resource история операций реестра. Interceptor-gated
-		// single-object Check v_list на registry_registry:<id> (как Get), НЕ
-		// ScopeFiltered: коллекция принадлежит одному реестру, row-filter не нужен.
+		// single-object Check v_list на registry_registry:<id> (namespace call-gate,
+		// как Get) — этот per-RPC Check остаётся (защищает registry-level операции и
+		// гейтит весь RPC). НО операции, scoped к конкретному sub-repo (DeleteTag →
+		// metadata.repository + Description "Delete tag … of <reg>/<repo>"),
+		// ДОПОЛНИТЕЛЬНО per-repo row-фильтруются В ХЕНДЛЕРЕ (filterOperations) по
+		// v_list на registry_repository:<reg>/<repo> — иначе namespace-viewer БЕЗ
+		// доступа к чужому repo вывел бы его существование/тег из истории операций
+		// (existence-oracle, обходящий per-repo isolation ListTags/checkRepo).
+		// Registry-level операции (no repository в metadata) видны под namespace
+		// v_list. Единичный interceptor-Check row-filter каталога не покрывает —
+		// поэтому фильтр в handler (как List/ListRepositories/ListTags).
 		"/kacho.cloud.registry.v1.RegistryService/ListOperations": {
 			Relation:   relVList,
 			Extract:    registryObject(),
