@@ -128,13 +128,23 @@ type fakeRepoReg struct {
 	mu      sync.Mutex
 	intents []domain.RegisterIntent
 	err     error
+	ctxErr  error // ctx.Err() наблюдённый в момент вызова (detach-регресс REG-14e)
 }
 
 func (r *fakeRepoReg) RegisterRepository(ctx context.Context, intent domain.RegisterIntent) error {
 	r.mu.Lock()
 	r.intents = append(r.intents, intent)
+	r.ctxErr = ctx.Err()
 	r.mu.Unlock()
 	return r.err
+}
+
+// observedCtxErr — состояние ctx.Err() в момент durable-emit. nil ⇒ контекст не был
+// отменён (detached от отмены запроса), != nil ⇒ отмена запроса дотянулась до emit.
+func (r *fakeRepoReg) observedCtxErr() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ctxErr
 }
 
 func (r *fakeRepoReg) registered() []domain.RegisterIntent {

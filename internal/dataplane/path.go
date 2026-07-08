@@ -39,10 +39,13 @@ type parsed struct {
 // encoded-slash в сегменте. Отклоняется 400 ДО обращения к zot.
 var errTraversal = errors.New("path traversal rejected")
 
-// parsePath разбирает escaped OCI-path (r.URL.EscapedPath()). Инвариант REG-19:
-// сначала url-decode КАЖДОГО сегмента, затем сегментация — traversal и
-// encoded-slash отсекаются до маршрутизации, чтобы `%2e%2e`/`..` не вырвались из
-// namespace-префикса. Неизвестный registry-prefix / отсутствие repo → routeInvalid.
+// parsePath разбирает escaped OCI-path (r.URL.EscapedPath()). Инвариант REG-19
+// (split-then-decode): СНАЧАЛА сегментация ещё-escaped пути по '/' (strings.Split),
+// ПОТОМ url-decode каждого сегмента по отдельности — и декодированный сегмент
+// отвергается, если он "."/".." либо содержит разделитель пути ('/'/'\\'). Порядок
+// именно такой: декодируй мы ДО сегментации, `%2f`/`%2e%2e` развернулись бы в
+// разделители и `..` вырвались бы из namespace-префикса (path-traversal). Неизвестный
+// registry-prefix / отсутствие repo → routeInvalid.
 func parsePath(escapedPath string) (parsed, error) {
 	if escapedPath == "/v2" || escapedPath == "/v2/" {
 		return parsed{route: routePing}, nil

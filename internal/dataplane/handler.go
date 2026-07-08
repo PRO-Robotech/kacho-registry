@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -167,6 +168,12 @@ func (h *Handler) servePullOnly(w http.ResponseWriter, r *http.Request, p parsed
 	h.forwarder.Forward(w, r)
 }
 
+// registerPushTimeout — дедлайн detached-контекста register-on-first-push. Работа
+// исполняется на пути ответа ПОСЛЕ Forward, поэтому отвязана от отмены r.Context()
+// (закрытие соединения клиентом до коммита registry_outbox иначе теряет owner/
+// parent-tuple без ретрая). Собственный дедлайн ограничивает post-response-хвост.
+const registerPushTimeout = 10 * time.Second
+
 // servePush — push-путь (blob-upload / manifest-PUT). verb-map: repo существует →
 // v_update@registry_repository; repo новый → v_create@registry_registry (право
 // создавать repo в namespace). cross-repo mount — отдельный exfil-guard (два Check).
@@ -205,10 +212,19 @@ func (h *Handler) servePush(w http.ResponseWriter, r *http.Request, p parsed, su
 	// несёт ParentProjectID реестра — иначе resource_mirror строка репо пустая и
 	// iam-reconciler не материализует per-object v_* (репо непуллим даже владельцем).
 	if !exists && p.route == routeManifest && r.Method == http.MethodPut && status >= 200 && status < 300 {
-		projectID := h.resolveRegistryProject(ctx, p.registryID)
+		// Эта работа идёт ПОСЛЕ Forward — ответ клиенту уже отдан. r.Context()
+		// отменяется в момент, когда клиент закрывает соединение, а single-shot
+		// docker/CI push рвёт connection сразу за 201 → cancellable ctx погиб бы
+		// ДО коммита registry_outbox-транзакции, безвозвратно потеряв owner/parent
+		// FGA-tuple (drainer реплеит только закоммиченные строки → репо непуллим
+		// даже владельцем, без ретрая). Отвязываем от отмены запроса (как LRO-
+		// воркеры) и даём собственный дедлайн на durable-emit + project-lookup.
+		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), registerPushTimeout)
+		defer cancel()
+		projectID := h.resolveRegistryProject(bgCtx, p.registryID)
 		intent := domain.RegisterIntentForRepoPush(p.registryID, p.repo, projectID, subject)
 		if h.repoReg != nil {
-			if rerr := h.repoReg.RegisterRepository(ctx, intent); rerr != nil {
+			if rerr := h.repoReg.RegisterRepository(bgCtx, intent); rerr != nil {
 				// Push успешен; register-intent durable-emit провалился (редкий DB-сбой).
 				// Не рвём клиенту уже отданный ответ — логируем.
 				h.logger.Error("register-on-first-push emit failed",
