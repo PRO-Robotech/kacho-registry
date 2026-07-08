@@ -97,9 +97,14 @@ func (u *UseCase) doDelete(ctx context.Context, registryID string) (*anypb.Any, 
 		return nil, failFailedPrecondition("registry is not empty")
 	}
 
-	// zot-namespace lazy: провизионится на push, снимать нечего пока data-plane нет.
-	// Best-effort — недоступность zot не блокирует forward-only удаление namespace-
-	// метаданных (при реальном zot RemoveNamespace станет авторитетным).
+	// zot-namespace снятие: data-plane wired (cmd/kacho-registry/serve.go
+	// buildDataplaneHandler) — repo провизионятся лениво на push, и именно поэтому
+	// TOCTOU re-check выше существует (push доливает контент в окне удаления). В zot
+	// нет отдельного namespace-объекта (repo адресуются полным путём), а Delete
+	// допускается только для ПУСТОГО namespace (precondition REG-08 + re-check выше),
+	// поэтому RemoveNamespace физически снимать нечего — он лишь идемпотентно
+	// подтверждает пустоту. Best-effort: недоступность zot не блокирует forward-only
+	// удаление namespace-метаданных.
 	if rerr := u.zot.RemoveNamespace(ctx, registryID); rerr != nil {
 		slog.Default().Warn("registry delete: zot namespace removal best-effort failed",
 			"registry_id", registryID, "err", rerr)

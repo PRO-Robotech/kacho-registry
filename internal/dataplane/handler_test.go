@@ -5,6 +5,7 @@ package dataplane
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -15,6 +16,63 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+// cancelingForwarder эмулирует single-shot docker/CI push, рвущий соединение сразу
+// за ответом: пишет статус и ОТМЕНЯЕТ request-контекст (клиент закрыл connection на
+// 201). Регресс-инструмент REG-14e: register-on-first-push обязан пережить эту отмену.
+type cancelingForwarder struct {
+	status int
+	cancel context.CancelFunc
+	calls  int
+}
+
+func (f *cancelingForwarder) Forward(w http.ResponseWriter, r *http.Request) int {
+	f.calls++
+	st := f.status
+	if st == 0 {
+		st = http.StatusOK
+	}
+	w.WriteHeader(st)
+	if f.cancel != nil {
+		f.cancel() // клиент закрыл соединение сразу за ответом → r.Context() отменён
+	}
+	return st
+}
+
+// REG-14e — register-on-first-push исполняется на пути ответа ПОСЛЕ Forward. Если
+// клиент (single-shot docker/CI push) закрывает соединение сразу за 201, r.Context()
+// отменяется. Durable outbox-write owner/parent FGA-tuple и project-lookup ОБЯЗАНЫ
+// пережить эту отмену (detached ctx), иначе tuple теряется без ретрая (drainer
+// реплеит только закоммиченные строки) → репо непуллим даже владельцем. Регресс-гейт:
+// intent эмитится, project резолвится, а наблюдённый в момент emit ctx НЕ отменён.
+func TestDataplane_REG14e_PushNewRepo_ClientDisconnectAfterForward_StillRegisters(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	be := &fakeBackend{exists: map[string]bool{}}
+	rr := &fakeRepoReg{}
+	lk := &fakeRegistryLookup{projectByRegistry: map[string]string{"reg-A": "prj-owner"}}
+	cf := &cancelingForwarder{status: 201}
+	h := newTestHandlerLK(&fakeVerifier{subject: "sva-ci"}, az, be, cf, rr, lk)
+
+	// upload-init (обычный запрос) — repo ещё не существует.
+	up := doReq(h, http.MethodPost, "/v2/reg-A/app/blobs/uploads/", true)
+	require.Equal(t, 201, up.Code)
+
+	// manifest-PUT с отменяемым контекстом; forwarder отменяет его сразу за 201.
+	ctx, cancel := context.WithCancel(context.Background())
+	cf.cancel = cancel
+	req := httptest.NewRequest(http.MethodPut, "/v2/reg-A/app/manifests/v1", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer dummy.jwt.token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, 201, rec.Code)
+
+	intents := rr.registered()
+	require.Len(t, intents, 1, "register-intent эмитится несмотря на разрыв соединения клиентом")
+	require.Equal(t, "prj-owner", intents[0].ParentProjectID,
+		"project резолвится на detached-контексте (не теряется при отмене запроса)")
+	require.NoError(t, rr.observedCtxErr(),
+		"durable-emit исполняется на detached-контексте — отмена запроса не дотягивается до outbox-write")
+}
 
 // doReq прогоняет запрос через Handler и возвращает записанный ответ.
 func doReq(h *Handler, method, target string, bearer bool) *httptest.ResponseRecorder {
