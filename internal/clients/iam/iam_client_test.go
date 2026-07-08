@@ -146,3 +146,39 @@ func TestProjectExists_NilConn_Unavailable(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, regerrors.ErrUnavailable), "expected ErrUnavailable, got %v", err)
 }
+
+// blockingProjectService — ProjectServiceServer чей Get блокируется до отмены
+// переданного (server-side) ctx — симулирует зависший-но-подключённый iam.
+type blockingProjectService struct {
+	iamv1.UnimplementedProjectServiceServer
+}
+
+func (blockingProjectService) Get(ctx context.Context, _ *iamv1.GetProjectRequest) (*iamv1.Project, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// leak/MEDIUM (round-6 audit, iam_client.go:61) — ProjectExists раньше форвардил
+// сырой inbound ctx в ProjectService.Get без per-call deadline: retry.OnUnavailable
+// только bounds backoff между попытками, но НЕ ограничивает время одного зависшего
+// Get — зависший-но-подключённый iam пинил Create-горутину навсегда. Фикс —
+// context.WithTimeout(ctx, iamCallTimeout) ВНУТРИ ProjectExists (не полагаться на
+// inbound ctx deadline), зеркалит check.checkTimeout (internal/check/check_client.go).
+func TestProjectExists_BlockingPeer_BoundsPerCallDeadline(t *testing.T) {
+	conn := startFakeIAM(t, blockingProjectService{}, nil)
+	c := New(conn)
+
+	start := time.Now()
+	// Родительский ctx НЕ имеет собственного дедлайна — единственная граница обязана
+	// прийти изнутри ProjectExists (иначе тест не отличает "клиент сам поставил
+	// timeout" от "родитель уже был bounded").
+	err := c.ProjectExists(context.Background(), "reg-prj-1")
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, regerrors.ErrUnavailable), "expected ErrUnavailable (fail-closed on deadline), got %v", err)
+	assert.Less(t, elapsed, iamCallTimeout+3*time.Second,
+		"ProjectExists обязан вернуться около iamCallTimeout, не висеть на inbound ctx без дедлайна")
+	assert.GreaterOrEqual(t, elapsed, iamCallTimeout-100*time.Millisecond,
+		"ProjectExists не должен возвращаться раньше configured iamCallTimeout")
+}

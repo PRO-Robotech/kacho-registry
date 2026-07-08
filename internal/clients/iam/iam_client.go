@@ -13,6 +13,7 @@ package iam
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -24,6 +25,15 @@ import (
 
 	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
 )
+
+// iamCallTimeout — per-call deadline на ProjectExists (зеркалит
+// check.checkTimeout, internal/check/check_client.go, 2s). ProjectService.Get —
+// resource-read (не authz-Check) → более щедрый бюджет (5s). retry.OnUnavailable
+// сам по себе НЕ ограничивает время одного зависшего Get — bounds только backoff
+// МЕЖДУ попытками; без собственного дедлайна зависший-но-подключённый iam пинил
+// бы Create-горутину навсегда (architecture.md "Per-call deadline на КАЖДОМ
+// внешнем вызове"). Никогда не полагаемся на inbound ctx deadline вызывающего.
+const iamCallTimeout = 5 * time.Second
 
 // Client — adapter к kacho-iam ProjectService поверх grpc-conn к PUBLIC-листенеру (:9090).
 type Client struct {
@@ -57,6 +67,8 @@ func (c *Client) ProjectExists(ctx context.Context, projectID string) error {
 	if projectID == "" {
 		return regerrors.ErrInvalidArg
 	}
+	ctx, cancel := context.WithTimeout(ctx, iamCallTimeout)
+	defer cancel()
 	cli := iamv1.NewProjectServiceClient(c.conn)
 	err := retry.OnUnavailable(ctx, func(ctx context.Context) error {
 		_, gerr := cli.Get(auth.PropagateOutgoing(ctx), &iamv1.GetProjectRequest{ProjectId: projectID})
