@@ -1,0 +1,120 @@
+---
+id: tag
+sidebar_position: 4
+title: Tag
+---
+
+import { ApiOperation } from '@site/src/components/commonBlocks/ApiOperation'
+import CodeBlock from '@theme/CodeBlock'
+import dedent from 'ts-dedent'
+
+# Tag
+
+**Tag** — тегированный образ (манифест) в репозитории, например `v1.2.0` или `latest`. Это конкретная
+версия образа, которую тянет `docker pull`. Tag закрывает задачу «увидеть версии образа, их digest,
+размер, платформу и когда их последний раз скачивали» — без ручного обхода OCI-манифестов.
+
+Tag — **read-only проекция из хранилища** (source of truth — zot); он не хранится в БД
+kacho-registry. Тег появляется при `docker push <repo>:<tag>` и физически удаляется единственным
+control-plane-путём — `DeleteTag` (data-plane `DELETE` манифеста отвергается — образы удаляются только
+через control-plane, чтобы удаление проходило authz-проверку и корректно снимало repo-tuple при
+опустошении репозитория).
+
+## Поля
+
+<table>
+  <thead><tr><th>Поле</th><th>Тип</th><th>Описание</th></tr></thead>
+  <tbody>
+    <tr><td><code>registryId</code></td><td>string</td><td>Реестр-владелец (namespace)</td></tr>
+    <tr><td><code>repository</code></td><td>string</td><td>Имя репозитория</td></tr>
+    <tr><td><code>tag</code></td><td>string</td><td>Тег (напр. <code>v1.2.0</code>, <code>latest</code>)</td></tr>
+    <tr><td><code>digest</code></td><td>string</td><td>Digest манифеста (<code>sha256:…</code>)</td></tr>
+    <tr><td><code>sizeBytes</code></td><td>int64</td><td>Размер манифеста + слоёв (байт)</td></tr>
+    <tr><td><code>mediaType</code></td><td>string</td><td>MediaType манифеста (OCI image / artifact / index)</td></tr>
+    <tr><td><code>createdAt</code></td><td>timestamp</td><td>Момент создания образа (из image-config, поле <code>created</code>). Пусто, если config его не несёт или артефакт не контейнерный (helm)</td></tr>
+    <tr><td><code>architecture</code></td><td>string</td><td>Платформа <code>&lt;os&gt;/&lt;arch&gt;</code> (напр. <code>linux/amd64</code>); multi-arch index → <code>multi-arch</code>; helm/неизвестно → пусто</td></tr>
+    <tr><td><code>lastPulledAt</code></td><td>timestamp</td><td>Output-only: момент последнего pull тега (нулевой — не скачивался)</td></tr>
+    <tr><td><code>pushedBy</code></td><td>string</td><td>Output-only: субъект последнего push (zot pushed-by), если известен</td></tr>
+    <tr><td><code>downloadCount</code></td><td>int64</td><td>Output-only: число скачиваний тега (zot download-count)</td></tr>
+  </tbody>
+</table>
+
+## Методы
+
+Теги читаются проекцией; единственная мутация control-plane — `DeleteTag` (async).
+
+### ListTags — список тегов репозитория
+
+<ApiOperation method="GET" endpoint="/registry/v1/registries/{registryId}/repositories/{repository}/tags">
+
+Возвращает теги репозитория (проекция из zot) с cursor-пагинацией. RPC **scope-filtered**: per-repo
+Check `v_list` на `registry_repository` выполняется в хендлере; нет доступа → `NOT_FOUND`
+(existence-hiding).
+
+<CodeBlock language="bash">
+  {dedent`
+    curl 'http://localhost:18080/registry/v1/registries/reg7h9x2k4m8p0q1r5/repositories/backend/api/tags?pageSize=50' \\
+      -H 'Authorization: Bearer <JWT>'
+  `}
+</CodeBlock>
+
+<CodeBlock language="json">
+  {dedent`
+    {
+      "tags": [
+        {
+          "registryId": "reg7h9x2k4m8p0q1r5",
+          "repository": "backend/api",
+          "tag": "v1.2.0",
+          "digest": "sha256:9b2c…e41",
+          "sizeBytes": "13107200",
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "createdAt": "2026-07-10T10:04:00Z",
+          "architecture": "linux/amd64",
+          "lastPulledAt": "2026-07-10T11:20:00Z",
+          "pushedBy": "sva7k2…",
+          "downloadCount": "12"
+        }
+      ],
+      "nextPageToken": ""
+    }
+  `}
+</CodeBlock>
+
+</ApiOperation>
+
+### DeleteTag — удалить тег
+
+<ApiOperation method="DELETE" endpoint="/registry/v1/registries/{registryId}/repositories/{repository}/tags/{tag}" async>
+
+Удаляет тег из репозитория — единственный destructive-путь для образов (data-plane `DELETE` манифеста
+отвергается `405`). Per-repo Check `v_delete` на `registry_repository` выполняется синхронно в
+хендлере **до** создания операции. Удаление последнего тега опустошает репозиторий и снимает его
+repo-tuple. Ответ — `Operation` (см. [Операции](/api/operations)).
+
+<CodeBlock language="bash">
+  {dedent`
+    curl -X DELETE 'http://localhost:18080/registry/v1/registries/reg7h9x2k4m8p0q1r5/repositories/backend/api/tags/v1.2.0' \\
+      -H 'Authorization: Bearer <JWT>'
+  `}
+</CodeBlock>
+
+</ApiOperation>
+
+## Ошибки и граничные случаи
+
+<table>
+  <thead><tr><th>Ситуация</th><th>Код / поведение</th></tr></thead>
+  <tbody>
+    <tr><td>Malformed <code>registryId</code></td><td><code>INVALID_ARGUMENT</code> (<code>"invalid registry id '&lt;X&gt;'"</code>)</td></tr>
+    <tr><td>Нет <code>v_list</code> / <code>v_delete</code> на репозиторий</td><td><code>NOT_FOUND</code> (existence-hiding, не 403)</td></tr>
+    <tr><td>Удаление несуществующего тега</td><td><code>NOT_FOUND</code></td></tr>
+    <tr><td>Попытка удалить образ через data-plane <code>DELETE</code></td><td><code>405</code> (удаление только через <code>DeleteTag</code>)</td></tr>
+    <tr><td>zot недоступен</td><td><code>UNAVAILABLE</code> (fail-closed)</td></tr>
+  </tbody>
+</table>
+
+:::tip Освобождение имени реестра
+Реестр удаляется только пустым. Удалите все теги во всех репозиториях реестра через `DeleteTag`; когда
+namespace пуст, [Registry.Delete](/api/registry) проходит (иначе — `"registry is not empty"`).
+:::

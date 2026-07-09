@@ -1,0 +1,218 @@
+/* ==========================================================================
+   Landing hero (intro.mdx) — premium-dark, Linear/Vercel register.
+   A single radial primary glow, a gradient wordmark headline, a calm
+   subhead, quick entry buttons, and a feature card-grid below.
+   ========================================================================== */
+
+.hero {
+  position: relative;
+  margin: -1rem 0 2.5rem;
+  padding: 2.75rem 0 0.5rem;
+  isolation: isolate;
+}
+
+/* Soft radial primary glow anchored top-center, behind the headline. */
+.hero::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  top: -6rem;
+  left: 50%;
+  width: min(46rem, 90%);
+  height: 26rem;
+  transform: translateX(-50%);
+  background: radial-gradient(
+    ellipse at center,
+    rgba(61, 141, 245, 0.18) 0%,
+    rgba(110, 86, 207, 0.1) 38%,
+    transparent 70%
+  );
+  filter: blur(8px);
+  pointer-events: none;
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 1rem;
+  padding: 0.28rem 0.7rem 0.28rem 0.55rem;
+  border: 1px solid var(--ka-tint-info-border);
+  border-radius: 999px;
+  background: var(--ka-tint-info);
+  color: var(--ka-tint-info-fg);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.eyebrowDot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: var(--ka-brand-gradient);
+}
+
+.title {
+  margin: 0 0 0.85rem;
+  font-size: clamp(2.1rem, 5vw, 3.1rem);
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  color: var(--ifm-heading-color);
+}
+/* Gradient brand word in the headline — scoped signature, like the navbar. */
+.titleAccent {
+  background: var(--ka-brand-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.subtitle {
+  max-width: 44rem;
+  margin: 0 0 1.6rem;
+  font-size: 1.06rem;
+  line-height: 1.55;
+  color: var(--ka-text-secondary);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin-bottom: 0.5rem;
+}
+.btnPrimary,
+.btnGhost {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 1.05rem;
+  border-radius: var(--ka-radius);
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: transform var(--ifm-transition-fast) ease,
+    box-shadow var(--ifm-transition-fast) ease,
+    border-color var(--ifm-transition-fast) ease, background var(--ifm-transition-fast) ease;
+}
+.btnPrimary {
+  color: #fff;
+  background: var(--ka-brand-gradient);
+  border: 1px solid transparent;
+  box-shadow: 0 6px 18px -8px rgba(61, 141, 245, 0.6);
+}
+.btnPrimary:hover {
+  color: #fff;
+  text-decoration: none;
+  transform: translateY(-1px);
+  box-shadow: 0 10px 26px -10px rgba(61, 141, 245, 0.7);
+}
+.btnGhost {
+  color: var(--ka-text);
+  background: var(--ifm-card-background-color);
+  border: 1px solid var(--ka-border);
+}
+.btnGhost:hover {
+  color: var(--ka-text);
+  text-decoration: none;
+  border-color: var(--ka-tint-info-border);
+  background: var(--ka-hover-fill);
+}
+
+/* ==========================================================================
+   Feature card-grid
+   ========================================================================== */
+.featureGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15.5rem, 1fr));
+  gap: 0.9rem;
+  margin: 1.5rem 0 0.5rem;
+}
+
+.featureCard {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 1.05rem 1.1rem 1.1rem;
+  border: 1px solid var(--ka-border);
+  border-radius: var(--ka-radius-lg);
+  background: var(--ifm-card-background-color);
+  overflow: hidden;
+  transition: border-color var(--ifm-transition-slow) ease,
+    box-shadow var(--ifm-transition-slow) ease, transform var(--ifm-transition-slow) ease;
+}
+/* Top hairline that lights up on hover — quiet card "ink". */
+.featureCard::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: var(--ka-brand-gradient);
+  opacity: 0;
+  transition: opacity var(--ifm-transition-slow) ease;
+}
+.featureCard:hover {
+  border-color: var(--ka-tint-info-border);
+  box-shadow: var(--ifm-global-shadow-md);
+  transform: translateY(-3px);
+}
+.featureCard:hover::before {
+  opacity: 1;
+}
+
+.featureIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.1rem;
+  height: 2.1rem;
+  margin-bottom: 0.3rem;
+  border-radius: var(--ka-radius);
+  background: var(--ka-tint-info);
+  border: 1px solid var(--ka-tint-info-border);
+  color: var(--ka-tint-info-fg);
+  font-size: 1.05rem;
+  line-height: 1;
+}
+.featureTitle {
+  font-size: 0.96rem;
+  font-weight: 650;
+  color: var(--ifm-heading-color);
+}
+.featureBody {
+  font-size: 0.86rem;
+  line-height: 1.5;
+  color: var(--ka-text-secondary);
+}
+.featureBody code {
+  font-size: 0.8em;
+}
+
+@media (max-width: 600px) {
+  .hero {
+    padding-top: 1.75rem;
+  }
+  .actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .btnPrimary,
+  .btnGhost {
+    justify-content: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .featureCard,
+  .btnPrimary,
+  .btnGhost {
+    transition: none;
+  }
+  .featureCard:hover,
+  .btnPrimary:hover,
+  .btnGhost:hover {
+    transform: none;
+  }
+}

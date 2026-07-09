@@ -1,0 +1,229 @@
+---
+id: getting-started
+sidebar_position: 2
+title: Быстрый старт
+---
+
+import CodeBlock from '@theme/CodeBlock'
+import dedent from 'ts-dedent'
+
+# Быстрый старт
+
+Эта страница проводит от нуля до первого образа в реестре: собрать сервис и мигратор, накатить
+схему, запустить сервис, создать **Registry** через REST control-plane, а затем залогиниться и
+запушить/стянуть образ через стандартный `docker`. Примеры используют нейтральные значения
+(`prj-demo`, `registry.kacho.local`, `reg…`-id из ответа).
+
+:::info Что нужно
+Go-тулчейн (для сборки из исходников), доступный PostgreSQL, запущенный **zot**-бэкенд, `curl` и
+`docker`. Control-plane REST-примеры идут через `api-gateway` (порт `18080` для локального стенда —
+подставьте свой). Data-plane — через host `registry.kacho.local` (ingress/port-forward).
+:::
+
+## 1. Собрать сервис и мигратор
+
+В репозитории две сборочные цели: API-сервер и отдельный бинарь миграций (`cmd/migrator`).
+
+<CodeBlock language="bash">
+  {dedent`
+    # API-сервер → bin/kacho-registry
+    make build
+
+    # мигратор → bin/kacho-migrator
+    make build-migrator
+  `}
+</CodeBlock>
+
+## 2. Накатить миграции
+
+Схема `kacho_registry` создаётся миграциями `0001_init` и `0002` (goose): таблицы `registries`,
+`registry_outbox` (transactional-outbox owner-tuple) и `operations` (LRO). Образы и теги в БД **не**
+хранятся — это проекция из zot. Мигратор — отдельный бинарь.
+
+<CodeBlock language="bash">
+  {dedent`
+    # применить все миграции (up)
+    KACHO_REGISTRY_DB_PASSWORD=secret bin/kacho-migrator up
+
+    # посмотреть статус
+    KACHO_REGISTRY_DB_PASSWORD=secret bin/kacho-migrator status
+  `}
+</CodeBlock>
+
+:::note Подключение к БД
+Параметры задаются переменными `KACHO_REGISTRY_DB_*` (хост, порт, пользователь, имя БД, sslmode).
+Схема `kacho_registry` прописывается в DSN через libpq `search_path`. Полный список ключей —
+на странице [Конфигурация](/install/configuration).
+:::
+
+## 3. Запустить сервис
+
+Сервис поднимает **три поверхности**: публичный control-plane gRPC (`:9090`), cluster-internal
+admin gRPC (`:9091`) и data-plane OCI-листенер (`:8080`, за host `registry.kacho.local`).
+
+<CodeBlock language="bash">
+  {dedent`
+    KACHO_REGISTRY_DB_PASSWORD=secret \\
+    KACHO_REGISTRY_ZOT_ADDR=http://zot.kacho.svc:5000 \\
+    bin/kacho-registry serve
+  `}
+</CodeBlock>
+
+В dev-режиме (по умолчанию `KACHO_REGISTRY_AUTH_MODE=dev`) сервис может стартовать без mTLS.
+В production обязательны mTLS на обоих gRPC-listener'ах, сконфигурированный адрес kacho-iam для
+per-RPC Check, а для data-plane — https-JWKS, pinned issuer и подтверждённая внешняя TLS-терминация;
+иначе сервис откажется стартовать. Детали — [Конфигурация](/install/configuration).
+
+## 4. Создать реестр (control-plane REST)
+
+Создание реестра — асинхронная мутация: ответ возвращает `Operation`, клиент поллит её до
+`done=true`. В `metadata`/`response` придёт `registryId` и сам ресурс с output-полями (`endpoint`,
+`status`).
+
+<CodeBlock language="bash">
+  {dedent`
+    curl -X POST 'http://localhost:18080/registry/v1/registries' \\
+      -H 'Authorization: Bearer <JWT>' \\
+      -H 'Content-Type: application/json' \\
+      -d '{
+            "projectId": "prj-demo",
+            "name": "team-images",
+            "description": "образы команды",
+            "labels": { "env": "dev" }
+          }'
+  `}
+</CodeBlock>
+
+<CodeBlock language="json">
+  {dedent`
+    {
+      "id": "rop7h9x2k4m8p0q1r5",
+      "description": "create registry team-images",
+      "done": false,
+      "metadata": { "registryId": "reg7h9x2k4m8p0q1r5" }
+    }
+  `}
+</CodeBlock>
+
+Поллинг операции до готовности (`OperationService.Get`):
+
+<CodeBlock language="bash">
+  {dedent`
+    curl 'http://localhost:18080/registry/v1/operations/rop7h9x2k4m8p0q1r5' \\
+      -H 'Authorization: Bearer <JWT>'
+  `}
+</CodeBlock>
+
+<CodeBlock language="json">
+  {dedent`
+    {
+      "id": "rop7h9x2k4m8p0q1r5",
+      "done": true,
+      "response": {
+        "id": "reg7h9x2k4m8p0q1r5",
+        "projectId": "prj-demo",
+        "name": "team-images",
+        "endpoint": "registry.kacho.local/reg7h9x2k4m8p0q1r5",
+        "repositoryCount": 0,
+        "status": "REGISTRY_STATUS_ACTIVE",
+        "createdAt": "2026-07-10T10:00:00Z"
+      }
+    }
+  `}
+</CodeBlock>
+
+Запомните `id` реестра (`reg…`) — он входит в имя образа.
+
+## 5. Залогиниться в реестр
+
+Data-plane аутентифицирует клиента по identity-JWT (Bearer). `docker login` при первом
+push/pull сам сходит за токеном по `WWW-Authenticate`-realm: предъявляет **ключ сервис-аккаунта**
+(SA-key) token-шиму kacho-iam (`/iam/token`), шим брокерит токен у Ory Hydra, docker получает JWT
+и предъявляет его data-plane. Логин выполняется учётными данными SA-key.
+
+<CodeBlock language="bash">
+  {dedent`
+    docker login registry.kacho.local \\
+      --username <sa-key-id> \\
+      --password <sa-key-secret>
+  `}
+</CodeBlock>
+
+:::note Учётные данные — ключ сервис-аккаунта
+Для CI/CD доступ в реестр выдаётся сервис-аккаунту (SA) через SA-key. Ключ выпускается в IAM
+(одноразовый секрет при создании), а нужный доступ к реестру — grant роли на реестр/проект.
+Подробнее о токен-обмене — [Data-plane](/architecture/data-plane).
+:::
+
+## 6. Запушить и стянуть образ
+
+Теперь работает обычный `docker`. Имя образа — `registry.kacho.local/<registry-id>/<repo>:<tag>`.
+
+<CodeBlock language="bash">
+  {dedent`
+    # тегируем локальный образ под namespace реестра
+    docker tag my-app:1.0 registry.kacho.local/reg7h9x2k4m8p0q1r5/backend/api:1.0
+
+    # push (требует v_create на новом repo или v_update на существующем)
+    docker push registry.kacho.local/reg7h9x2k4m8p0q1r5/backend/api:1.0
+
+    # pull (требует v_get на repo)
+    docker pull registry.kacho.local/reg7h9x2k4m8p0q1r5/backend/api:1.0
+  `}
+</CodeBlock>
+
+Helm-чарты пушатся тем же путём (`helm push chart.tgz oci://registry.kacho.local/reg…`).
+
+## 7. Посмотреть содержимое (control-plane)
+
+Первый push нового репозитория **материализует** его authz-объект и делает его видимым в
+control-plane. Список репозиториев реестра:
+
+<CodeBlock language="bash">
+  {dedent`
+    curl 'http://localhost:18080/registry/v1/registries/reg7h9x2k4m8p0q1r5/repositories' \\
+      -H 'Authorization: Bearer <JWT>'
+  `}
+</CodeBlock>
+
+<CodeBlock language="json">
+  {dedent`
+    {
+      "repositories": [
+        {
+          "registryId": "reg7h9x2k4m8p0q1r5",
+          "name": "backend/api",
+          "tagCount": 1,
+          "sizeBytes": "10485760",
+          "artifactType": "ARTIFACT_TYPE_CONTAINER_IMAGE",
+          "artifactTypes": ["ARTIFACT_TYPE_CONTAINER_IMAGE"],
+          "updatedAt": "2026-07-10T10:05:00Z"
+        }
+      ],
+      "nextPageToken": ""
+    }
+  `}
+</CodeBlock>
+
+Список тегов репозитория:
+
+<CodeBlock language="bash">
+  {dedent`
+    curl 'http://localhost:18080/registry/v1/registries/reg7h9x2k4m8p0q1r5/repositories/backend/api/tags' \\
+      -H 'Authorization: Bearer <JWT>'
+  `}
+</CodeBlock>
+
+:::tip Задержка авторизации (grant-latency)
+Между записью owner/repo-tuple и его видимостью в authz-фильтрованном списке проходит ~0.6–2 с
+(FGA-пропагация). Только что созданный реестр или только что запушенный репозиторий может не
+появиться в `List` мгновенно — повторите запрос через секунду.
+:::
+
+## Дальше
+
+- Конвенции, порты, формат ошибок и пагинация — [Обзор API](/api/overview).
+- Поля и методы ресурсов — [Registry](/api/registry), [Repository](/api/repository), [Tag](/api/tag).
+- Как устроен push/pull и токен-обмен — [Data-plane](/architecture/data-plane).
+- Модель прав (кто может push/pull) — [Авторизация](/architecture/authz).
+- Конфигурация и развёртывание — [Конфигурация](/install/configuration), [Развёртывание](/install/deploy).

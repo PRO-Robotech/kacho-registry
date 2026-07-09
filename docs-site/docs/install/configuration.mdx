@@ -1,0 +1,159 @@
+---
+id: configuration
+sidebar_position: 2
+title: Конфигурация
+---
+
+import CodeBlock from '@theme/CodeBlock'
+import dedent from 'ts-dedent'
+
+# Конфигурация
+
+Kachō Registry конфигурируется через переменные окружения с префиксом **`KACHO_REGISTRY_`** (загрузка
+через corelib `config.LoadPrefixed("KACHO_REGISTRY")`). Значения из окружения переопределяют дефолты.
+Эта страница перечисляет ключевые ключи и даёт пример.
+
+## База данных
+
+<table>
+  <thead><tr><th>Переменная</th><th>По умолчанию</th><th>Описание</th></tr></thead>
+  <tbody>
+    <tr><td><code>KACHO_REGISTRY_DB_HOST</code></td><td><code>localhost</code></td><td>Хост PostgreSQL</td></tr>
+    <tr><td><code>KACHO_REGISTRY_DB_PORT</code></td><td><code>5432</code></td><td>Порт PostgreSQL</td></tr>
+    <tr><td><code>KACHO_REGISTRY_DB_USER</code></td><td><code>registry</code></td><td>Пользователь БД</td></tr>
+    <tr><td><code>KACHO_REGISTRY_DB_PASSWORD</code></td><td><em>(обязателен)</em></td><td>Пароль БД — без него сервис не стартует</td></tr>
+    <tr><td><code>KACHO_REGISTRY_DB_NAME</code></td><td><code>kacho_registry</code></td><td>Имя базы данных</td></tr>
+    <tr><td><code>KACHO_REGISTRY_DB_SSLMODE</code></td><td><code>disable</code></td><td>sslmode для DSN. В production обязателен <code>require</code> / <code>verify-ca</code> / <code>verify-full</code></td></tr>
+    <tr><td><code>KACHO_REGISTRY_DB_MAX_CONNS</code></td><td><code>0</code></td><td>Лимит pgx-пула (0 → дефолт pgx)</td></tr>
+    <tr><td><code>KACHO_REGISTRY_DB_STATEMENT_TIMEOUT</code></td><td><code>30s</code></td><td>server-side <code>statement_timeout</code> для pool-соединений (backstop против runaway-запроса; <code>0</code>/пусто — выключен). На migrator-DSN не ставится</td></tr>
+  </tbody>
+</table>
+
+:::note search_path
+Схема `kacho_registry` прописывается в DSN через libpq `options=-c search_path=kacho_registry,public` —
+и для pgx-пула, и для миграций. Пароль/пользователь percent-энкодятся, поэтому спецсимволы в секрете
+не «раскусывают» DSN.
+:::
+
+## Listener'ы
+
+<table>
+  <thead><tr><th>Переменная</th><th>По умолчанию</th><th>Описание</th></tr></thead>
+  <tbody>
+    <tr><td><code>KACHO_REGISTRY_GRPC_PORT</code></td><td><code>9090</code></td><td>Публичный control-plane listener (<code>RegistryService</code>)</td></tr>
+    <tr><td><code>KACHO_REGISTRY_INTERNAL_PORT</code></td><td><code>9091</code></td><td>Cluster-internal listener (<code>InternalRegistryService</code>). Не выставляется на внешний endpoint</td></tr>
+    <tr><td><code>KACHO_REGISTRY_DATAPLANE_ADDR</code></td><td><code>:8080</code></td><td>Адрес data-plane HTTP-листенера (OCI). Пусто → data-plane не поднимается</td></tr>
+  </tbody>
+</table>
+
+## Хранилище и endpoint
+
+<table>
+  <thead><tr><th>Переменная</th><th>По умолчанию</th><th>Описание</th></tr></thead>
+  <tbody>
+    <tr><td><code>KACHO_REGISTRY_ZOT_ADDR</code></td><td><em>(пусто)</em></td><td>Internal HTTP-endpoint zot-бэкенда (проекция repo/tag + proxy). zot никогда не публичен</td></tr>
+    <tr><td><code>KACHO_REGISTRY_ENDPOINT_BASE</code></td><td><code>registry.kacho.local</code></td><td>Tenant-facing base OCI-endpoint. <code>Registry.endpoint = &lt;base&gt;/&lt;id&gt;</code> (инфра-адрес zot не раскрывается)</td></tr>
+  </tbody>
+</table>
+
+## Авторизация и валидация проекта
+
+<table>
+  <thead><tr><th>Переменная</th><th>По умолчанию</th><th>Описание</th></tr></thead>
+  <tbody>
+    <tr><td><code>KACHO_REGISTRY_AUTHZ_IAM_GRPC_ADDR</code></td><td><em>(пусто)</em></td><td>Internal endpoint kacho-iam (:9091) для per-RPC <code>Check</code> + fga-proxy <code>RegisterResource</code>. Пусто + не breakglass → интерсептор не подключается</td></tr>
+    <tr><td><code>KACHO_REGISTRY_IAM_PROJECT_GRPC_ADDR</code></td><td><code>kacho-iam.kacho.svc.cluster.local:9090</code></td><td>PUBLIC endpoint kacho-iam (:9090) для <code>ProjectService.Get</code> (валидация project на Create) — отдельный conn от authz-ребра</td></tr>
+    <tr><td><code>KACHO_REGISTRY_AUTH_MODE</code></td><td><code>dev</code></td><td>Режим строгости: <code>dev</code> · <code>production</code> · <code>production-strict</code></td></tr>
+    <tr><td><code>KACHO_REGISTRY_AUTHZ_BREAKGLASS</code></td><td><code>false</code></td><td>Аварийный обход: пропуск всех RPC без Check + WARN. Единственный способ работать без authz/mTLS</td></tr>
+  </tbody>
+</table>
+
+### Secure by default
+
+По умолчанию (`breakglass=false`) операции control-plane **без авторизации и mTLS запрещены**: per-RPC
+authz `Check` (через kacho-iam) и mTLS на **обоих** gRPC-listener'ах обязательны — иначе сервис
+**откажется стартовать**. Это инвариант «AuthN + AuthZ везде» (internal `:9091` не освобождён).
+
+:::warning Единственный обход — breakglass
+`KACHO_REGISTRY_AUTHZ_BREAKGLASS=true` запускает сервис, **пропуская per-RPC Check и не требуя mTLS**.
+Аварийный режим: применять только локально / при инциденте, никогда на рабочем стенде.
+:::
+
+## Data-plane (OCI auth-proxy)
+
+Data-plane аутентифицирует `docker`/`helm` по identity-JWT (Ory Hydra). В production обязательны
+секьюрный JWKS, pinned issuer и подтверждённая внешняя TLS-терминация.
+
+<table>
+  <thead><tr><th>Переменная</th><th>По умолчанию</th><th>Описание</th></tr></thead>
+  <tbody>
+    <tr><td><code>KACHO_REGISTRY_HYDRA_JWKS_URL</code></td><td><em>(in-cluster http URL)</em></td><td>Hydra-public JWKS для верификации identity-JWT. В production обязан быть https</td></tr>
+    <tr><td><code>KACHO_REGISTRY_HYDRA_ISSUER</code></td><td><em>(пусто)</em></td><td>Ожидаемый <code>iss</code> токена. Пусто → iss не проверяется (dev). В production issuer-pinning обязателен</td></tr>
+    <tr><td><code>KACHO_REGISTRY_SERVICE_AUD</code></td><td><code>registry.kacho.local</code></td><td>Ожидаемый <code>aud</code> identity-JWT. Токен обязан нести <code>aud ⊇ ServiceAud</code> (иначе federation-out не даёт доступа)</td></tr>
+    <tr><td><code>KACHO_REGISTRY_TOKEN_REALM</code></td><td><code>https://api.kacho.local/iam/token</code></td><td>realm для <code>WWW-Authenticate</code> — docker идёт туда за Bearer-токеном (token-шим kacho-iam)</td></tr>
+    <tr><td><code>KACHO_REGISTRY_DATAPLANE_TLS_TERMINATED_EXTERNALLY</code></td><td><code>false</code></td><td>Подтверждение, что data-plane стоит за внешней TLS-терминацией. В production/production-strict обязан быть <code>true</code></td></tr>
+  </tbody>
+</table>
+
+## mTLS (per-edge)
+
+Транспортные client/server-creds задаются **на каждое ребро отдельно** (без общего TLS-синглтона).
+Каждая структура читает независимый набор ENV `KACHO_REGISTRY_<EDGE>_<NAME>`:
+
+<table>
+  <thead><tr><th>Ребро</th><th>ENV-сегмент</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td>registry → iam internal (Check + fga-proxy, client)</td><td><code>KACHO_REGISTRY_IAM_AUTHZ_MTLS_&lt;NAME&gt;</code></td><td>Client-creds на iam :9091 (ServerName <code>kacho-iam-internal.&#42;</code>)</td></tr>
+    <tr><td>registry → iam public (ProjectService.Get, client)</td><td><code>KACHO_REGISTRY_IAM_PROJECT_MTLS_&lt;NAME&gt;</code></td><td>Client-creds на iam :9090 (ServerName <code>kacho-iam.&#42;</code>)</td></tr>
+    <tr><td>public listener (server)</td><td><code>KACHO_REGISTRY_PUBLIC_SERVER_MTLS_&lt;NAME&gt;</code></td><td>Server-creds для публичного control-plane (:9090)</td></tr>
+    <tr><td>internal listener (server)</td><td><code>KACHO_REGISTRY_INTERNAL_SERVER_MTLS_&lt;NAME&gt;</code></td><td>Server-creds для cluster-internal listener (:9091)</td></tr>
+  </tbody>
+</table>
+
+У каждой TLS-структуры есть флаг `..._ENABLE` (по умолчанию `false` — insecure back-compat для dev).
+В production оба server-флага и client-флаги ребёр к iam должны быть `true`. ServerName public и
+internal ребёр к iam различаются, поэтому это **два** отдельных client-conn (единый некорректен под
+`RequireAndVerifyClientCert`).
+
+## Пример YAML
+
+<CodeBlock language="yaml" title="kacho-registry.yaml">
+  {dedent`
+    KACHO_REGISTRY_DB_HOST: postgres.kacho.svc
+    KACHO_REGISTRY_DB_PORT: "5432"
+    KACHO_REGISTRY_DB_USER: registry
+    KACHO_REGISTRY_DB_PASSWORD: <из секрета>
+    KACHO_REGISTRY_DB_NAME: kacho_registry
+    KACHO_REGISTRY_DB_SSLMODE: verify-full
+
+    KACHO_REGISTRY_GRPC_PORT: "9090"
+    KACHO_REGISTRY_INTERNAL_PORT: "9091"
+    KACHO_REGISTRY_DATAPLANE_ADDR: ":8080"
+
+    KACHO_REGISTRY_ZOT_ADDR: http://zot.kacho.svc:5000
+    KACHO_REGISTRY_ENDPOINT_BASE: registry.kacho.local
+
+    KACHO_REGISTRY_AUTH_MODE: production-strict
+    KACHO_REGISTRY_AUTHZ_IAM_GRPC_ADDR: kacho-iam-internal.kacho.svc:9091
+    KACHO_REGISTRY_IAM_PROJECT_GRPC_ADDR: kacho-iam.kacho.svc:9090
+    KACHO_REGISTRY_AUTHZ_BREAKGLASS: "false"
+
+    # data-plane (Hydra identity-JWT)
+    KACHO_REGISTRY_HYDRA_JWKS_URL: https://hydra.api.kacho.cloud/.well-known/jwks.json
+    KACHO_REGISTRY_HYDRA_ISSUER: https://hydra.api.kacho.cloud
+    KACHO_REGISTRY_SERVICE_AUD: registry.kacho.local
+    KACHO_REGISTRY_DATAPLANE_TLS_TERMINATED_EXTERNALLY: "true"
+
+    # per-edge mTLS (включить в production)
+    KACHO_REGISTRY_PUBLIC_SERVER_MTLS_ENABLE: "true"
+    KACHO_REGISTRY_INTERNAL_SERVER_MTLS_ENABLE: "true"
+    KACHO_REGISTRY_IAM_AUTHZ_MTLS_ENABLE: "true"
+    KACHO_REGISTRY_IAM_PROJECT_MTLS_ENABLE: "true"
+  `}
+</CodeBlock>
+
+:::tip Локальный dev
+Для локального запуска достаточно `KACHO_REGISTRY_DB_PASSWORD` и `KACHO_REGISTRY_ZOT_ADDR` (остальное
+берёт дефолты). Режим `dev` поднимет сервис без mTLS. Сборка и миграции — в
+[Быстром старте](/getting-started).
+:::
