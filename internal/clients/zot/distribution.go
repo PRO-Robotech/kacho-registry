@@ -145,23 +145,38 @@ func (c *Client) Stats(ctx context.Context, registryID string) (*domain.Registry
 	}
 	stats := &domain.RegistryStats{RegistryID: registryID, RepositoryCount: int32(len(fullNames))} // #nosec G115 -- repo count of one registry, bounded well below int32 max
 
-	// Собираем (full-repo, tag) пары; манифесты читаем bounded-concurrency fan-out'ом
-	// (cap blobScopeConcurrency) — namespace с тысячами тегов иначе последовательно
-	// прочёл бы тысячи манифестов на один Stats-вызов. blobs/tagCount под mutex'ом.
+	// Собираем (full-repo, tag) пары; И per-repo tags, И манифесты читаем bounded-
+	// concurrency fan-out'ом (cap blobScopeConcurrency) — namespace с тысячами repo/тегов
+	// иначе последовательно прочёл бы тысячи round-trip'ов на один Stats-вызов, упираясь
+	// в inbound-дедлайн Internal-RPC. blobs/tagCount/pairs под mutex'ом. Любой tags-сбой →
+	// ErrUnavailable (fail-closed: не отдаём частичную статистику).
 	type repoTagPair struct{ full, tag string }
-	var pairs []repoTagPair
+	var (
+		mu    sync.Mutex
+		pairs []repoTagPair
+	)
+	tg, tgctx := errgroup.WithContext(ctx)
+	tg.SetLimit(blobScopeConcurrency)
 	for _, full := range fullNames {
-		tags, terr := c.repoTags(ctx, full)
-		if terr != nil {
-			return nil, terr
-		}
-		stats.TagCount += int32(len(tags)) // #nosec G115 -- per-repo tag count, bounded well below int32 max
-		for _, tag := range tags {
-			pairs = append(pairs, repoTagPair{full: full, tag: tag})
-		}
+		full := full
+		tg.Go(func() error {
+			tags, terr := c.repoTags(tgctx, full)
+			if terr != nil {
+				return terr
+			}
+			mu.Lock()
+			stats.TagCount += int32(len(tags)) // #nosec G115 -- per-repo tag count, bounded well below int32 max
+			for _, tag := range tags {
+				pairs = append(pairs, repoTagPair{full: full, tag: tag})
+			}
+			mu.Unlock()
+			return nil
+		})
+	}
+	if err := tg.Wait(); err != nil {
+		return nil, err
 	}
 
-	var mu sync.Mutex
 	blobs := map[string]int64{}
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(blobScopeConcurrency)
