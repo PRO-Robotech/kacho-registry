@@ -1,0 +1,1091 @@
+/* ==========================================================================
+   Kachō Registry docs — Ant Design language over the kacho-ui product palette.
+
+   Not a palette-swap: this restyles Docusaurus/Infima DOM into a coherent AntD
+   flavour (Layout header, Menu, Alert, Table, Anchor, Card, Tag) on the
+   premium-dark kacho-ui surface. Dark is the default mode; light is kept
+   consistent so the theme switch stays usable.
+
+   Palette source of truth — kacho-ui AntD ConfigProvider tokens:
+     DARK   page #0d0e12 · container #15161d · elevated #1b1d25
+            border #272a33 · borderSecondary #1d1f27
+            text #e7e9ef · textSecondary #9aa0ac · textTertiary #6a7080
+            hoverFill rgba(255,255,255,.045)
+            primary/info #3D8DF5 · violet #6E56CF
+            success #2bb877 · warning #e0a338 · error #e5484d
+            brand-gradient 135deg #3D8DF5 → #6E56CF
+            focus-ring 0 0 0 3px rgba(61,141,245,.25)
+     LIGHT  page #f6f7f9 · container #fff · border #e3e6ea · text #14171c
+   ========================================================================== */
+
+/* ==========================================================================
+   1. Design tokens (AntD-equivalent, shared across modes)
+   ========================================================================== */
+:root {
+  --ifm-font-family-base: 'Inter', ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --ifm-font-family-monospace: 'JetBrains Mono', ui-monospace, 'SFMono-Regular',
+    'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  /* AntD radii: base 8 / LG 12 / SM 6. */
+  --ka-radius-sm: 6px;
+  --ka-radius: 8px;
+  --ka-radius-lg: 12px;
+  --ifm-global-radius: var(--ka-radius);
+  --ifm-card-border-radius: var(--ka-radius-lg);
+  --ifm-code-border-radius: var(--ka-radius-sm);
+  --ifm-button-border-radius: var(--ka-radius);
+  --ifm-alert-border-radius: var(--ka-radius);
+
+  /* AntD base font size 13–14px, dense line-height. */
+  --ifm-font-size-base: 15px;
+  --ifm-code-font-size: 88%;
+  --ifm-line-height-base: 1.6;
+  --ifm-leading-desktop: 1.35;
+  --ifm-h1-font-size: 1.9rem;
+  --ifm-h2-font-size: 1.4rem;
+  --ifm-h3-font-size: 1.1rem;
+  --ifm-heading-font-weight: 650;
+
+  /* Brand. */
+  --ka-primary: #3d8df5;
+  --ka-violet: #6e56cf;
+  --ka-brand-gradient: linear-gradient(135deg, #3d8df5 0%, #6e56cf 100%);
+  --ka-focus-ring: 0 0 0 3px rgba(61, 141, 245, 0.25);
+
+  /* Semantics (kacho-ui BRAND). */
+  --ka-success: #2bb877;
+  --ka-warning: #e0a338;
+  --ka-error: #e5484d;
+  --ka-info: #3d8df5;
+
+  --ifm-color-primary: #3d8df5;
+  --ifm-color-primary-dark: #1f7af2;
+  --ifm-color-primary-darker: #0f70ef;
+  --ifm-color-primary-darkest: #0c5cc4;
+  --ifm-color-primary-light: #5ba0f7;
+  --ifm-color-primary-lighter: #74aff8;
+  --ifm-color-primary-lightest: #9cc6fb;
+  --ifm-color-primary-contrast-foreground: #ffffff;
+
+  --ifm-color-success: #2bb877;
+  --ifm-color-warning: #e0a338;
+  --ifm-color-danger: #e5484d;
+  --ifm-color-info: #3d8df5;
+
+  --ifm-navbar-height: 3.25rem; /* ~52px AntD Layout header */
+  --ifm-navbar-item-padding-vertical: 0.25rem;
+  --ifm-menu-link-padding-vertical: 0.4rem;
+  --ifm-menu-link-padding-horizontal: 0.7rem;
+  --ifm-toc-padding-vertical: 0.3rem;
+  --ifm-transition-fast: 160ms;
+  --ifm-transition-slow: 240ms;
+
+  --docusaurus-highlighted-code-line-bg: rgba(61, 141, 245, 0.12);
+}
+
+/* ==========================================================================
+   2. DARK (default) — premium-dark kacho-ui surface
+   ========================================================================== */
+[data-theme='dark'] {
+  /* Surfaces. */
+  --ka-page: #0d0e12;
+  --ka-container: #15161d;
+  --ka-elevated: #1b1d25;
+  --ka-border: #272a33;
+  --ka-border-secondary: #1d1f27;
+  --ka-hover-fill: rgba(255, 255, 255, 0.045);
+  --ka-text: #e7e9ef;
+  --ka-text-secondary: #9aa0ac;
+  --ka-text-tertiary: #6a7080;
+
+  --ifm-background-color: #0d0e12;
+  --ifm-background-surface-color: #15161d;
+  --ifm-navbar-background-color: rgba(13, 14, 18, 0.82);
+  --ifm-footer-background-color: #0a0b0e;
+  --ifm-card-background-color: #15161d;
+  --ifm-dropdown-background-color: #1b1d25;
+  --ifm-hover-overlay: rgba(255, 255, 255, 0.045);
+
+  --ifm-font-color-base: #e7e9ef;
+  --ifm-font-color-secondary: #9aa0ac;
+  --ifm-heading-color: #f1f3f8;
+  --ifm-secondary-color: #9aa0ac;
+
+  --ifm-toc-border-color: #272a33;
+  --ifm-color-emphasis-0: #0d0e12;
+  --ifm-color-emphasis-100: #15161d;
+  --ifm-color-emphasis-200: #1d1f27;
+  --ifm-color-emphasis-300: #272a33;
+  --ifm-color-emphasis-400: #353945;
+  --ifm-color-emphasis-500: #474c5a;
+  --ifm-color-emphasis-600: #6a7080;
+  --ifm-color-emphasis-700: #9aa0ac;
+  --ifm-color-emphasis-800: #c2c6cf;
+  --ifm-color-emphasis-900: #e7e9ef;
+  --ifm-color-emphasis-1000: #ffffff;
+
+  --ifm-color-primary: #5ba0f7;
+  --ifm-color-primary-dark: #3d8df5;
+  --ifm-color-primary-darker: #2f84f4;
+  --ifm-color-primary-darkest: #1f7af2;
+  --ifm-color-primary-light: #74aff8;
+  --ifm-color-primary-lighter: #8dbef9;
+  --ifm-color-primary-lightest: #b6d4fc;
+  --ifm-link-color: #6fb0fb;
+  --ifm-link-hover-color: #8dbef9;
+
+  --ifm-code-background: #0d0e12;
+  --ifm-pre-background: #0a0b0e;
+  --ifm-color-content: #e7e9ef;
+  --ifm-color-content-secondary: #9aa0ac;
+
+  --ifm-menu-color: #9aa0ac;
+  --ifm-menu-color-active: #6fb0fb;
+  --ifm-menu-color-background-active: rgba(61, 141, 245, 0.1);
+  --ifm-menu-color-background-hover: rgba(255, 255, 255, 0.045);
+
+  --ifm-table-background: transparent;
+  --ifm-table-head-background: #1b1d25;
+  --ifm-table-stripe-background: transparent;
+  --ifm-table-border-color: #272a33;
+
+  --ifm-navbar-shadow: none;
+  --ifm-global-shadow-lw: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --ifm-global-shadow-md: 0 8px 24px -8px rgba(0, 0, 0, 0.6);
+  --ifm-global-shadow-tl: 0 18px 50px -12px rgba(0, 0, 0, 0.7);
+
+  --docusaurus-highlighted-code-line-bg: rgba(61, 141, 245, 0.16);
+
+  /* Semantic dark/light steps used by DbSchemaDiagram color-mix tones. */
+  --ifm-color-success-dark: #25a169;
+  --ifm-color-success-light: #4fd6a0;
+  --ifm-color-warning-dark: #c98e2c;
+  --ifm-color-warning-light: #e9bd6b;
+  --ifm-color-warning-darkest: #976414;
+  --ifm-color-info-dark: #2f84f4;
+  --ifm-color-info-light: #6fb0fb;
+  --ifm-color-info-darkest: #1f6fd6;
+
+  /* Tinted semantic surfaces for AntD-Alert admonitions / Tag chips. */
+  --ka-tint-info: rgba(61, 141, 245, 0.1);
+  --ka-tint-info-border: rgba(61, 141, 245, 0.28);
+  --ka-tint-info-fg: #8dbef9;
+  --ka-tint-success: rgba(43, 184, 119, 0.1);
+  --ka-tint-success-border: rgba(43, 184, 119, 0.3);
+  --ka-tint-success-fg: #4fd6a0;
+  --ka-tint-warning: rgba(224, 163, 56, 0.1);
+  --ka-tint-warning-border: rgba(224, 163, 56, 0.32);
+  --ka-tint-warning-fg: #e9bd6b;
+  --ka-tint-error: rgba(229, 72, 77, 0.1);
+  --ka-tint-error-border: rgba(229, 72, 77, 0.3);
+  --ka-tint-error-fg: #f0787c;
+  --ka-tint-violet: rgba(110, 86, 207, 0.16);
+  --ka-tint-violet-border: rgba(110, 86, 207, 0.36);
+  --ka-tint-violet-fg: #a594ef;
+  --ka-tint-neutral: rgba(255, 255, 255, 0.035);
+  --ka-tint-neutral-border: #272a33;
+  --ka-tint-neutral-fg: #c2c6cf;
+}
+
+/* ==========================================================================
+   3. LIGHT — kept consistent with kacho-ui light palette
+   ========================================================================== */
+[data-theme='light'] {
+  --ka-page: #f6f7f9;
+  --ka-container: #ffffff;
+  --ka-elevated: #ffffff;
+  --ka-border: #e3e6ea;
+  --ka-border-secondary: #eef0f3;
+  --ka-hover-fill: rgba(13, 14, 18, 0.035);
+  --ka-text: #14171c;
+  --ka-text-secondary: #5a616e;
+  --ka-text-tertiary: #8a909d;
+
+  --ifm-background-color: #f6f7f9;
+  --ifm-background-surface-color: #ffffff;
+  --ifm-navbar-background-color: rgba(255, 255, 255, 0.85);
+  --ifm-footer-background-color: #eef0f3;
+  --ifm-card-background-color: #ffffff;
+  --ifm-dropdown-background-color: #ffffff;
+  --ifm-hover-overlay: rgba(13, 14, 18, 0.035);
+
+  --ifm-font-color-base: #14171c;
+  --ifm-heading-color: #0c0e12;
+  --ifm-toc-border-color: #e3e6ea;
+  --ifm-table-border-color: #e3e6ea;
+  --ifm-table-head-background: #f1f3f6;
+  --ifm-table-stripe-background: transparent;
+
+  --ifm-color-emphasis-100: #f1f3f6;
+  --ifm-color-emphasis-200: #e8ebef;
+  --ifm-color-emphasis-300: #d6dae0;
+  --ifm-color-emphasis-600: #8a909d;
+  --ifm-color-emphasis-700: #5a616e;
+  --ifm-color-emphasis-800: #2c313a;
+
+  --ifm-code-background: #f1f3f6;
+  --ifm-pre-background: #f7f8fa;
+
+  --ifm-menu-color: #5a616e;
+  --ifm-menu-color-active: #1f6fd6;
+  --ifm-menu-color-background-active: rgba(61, 141, 245, 0.08);
+  --ifm-menu-color-background-hover: rgba(13, 14, 18, 0.035);
+  --ifm-link-color: #1f6fd6;
+  --ifm-link-hover-color: #0f5cc4;
+
+  --ifm-navbar-shadow: none;
+  --ifm-global-shadow-lw: 0 1px 2px rgba(20, 23, 28, 0.06);
+  --ifm-global-shadow-md: 0 8px 24px -10px rgba(20, 23, 28, 0.16);
+  --ifm-global-shadow-tl: 0 18px 50px -14px rgba(20, 23, 28, 0.2);
+
+  --ifm-color-success-dark: #1f9d63;
+  --ifm-color-success-light: #34c987;
+  --ifm-color-warning-dark: #c1851f;
+  --ifm-color-warning-light: #ecbe6b;
+  --ifm-color-warning-darkest: #8a5d10;
+  --ifm-color-info-dark: #1f6fd6;
+  --ifm-color-info-light: #5ba0f7;
+  --ifm-color-info-darkest: #14559e;
+
+  --ka-tint-info: rgba(61, 141, 245, 0.08);
+  --ka-tint-info-border: rgba(61, 141, 245, 0.26);
+  --ka-tint-info-fg: #1f6fd6;
+  --ka-tint-success: rgba(43, 184, 119, 0.09);
+  --ka-tint-success-border: rgba(43, 184, 119, 0.3);
+  --ka-tint-success-fg: #1f9d63;
+  --ka-tint-warning: rgba(224, 163, 56, 0.12);
+  --ka-tint-warning-border: rgba(224, 163, 56, 0.36);
+  --ka-tint-warning-fg: #8a5d10;
+  --ka-tint-error: rgba(229, 72, 77, 0.09);
+  --ka-tint-error-border: rgba(229, 72, 77, 0.3);
+  --ka-tint-error-fg: #cf2f34;
+  --ka-tint-violet: rgba(110, 86, 207, 0.1);
+  --ka-tint-violet-border: rgba(110, 86, 207, 0.32);
+  --ka-tint-violet-fg: #5a44b8;
+  --ka-tint-neutral: rgba(13, 14, 18, 0.03);
+  --ka-tint-neutral-border: #e3e6ea;
+  --ka-tint-neutral-fg: #2c313a;
+}
+
+/* ==========================================================================
+   4. Base typography & rhythm
+   ========================================================================== */
+html {
+  font-feature-settings: 'cv11', 'ss01';
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  letter-spacing: -0.012em;
+}
+
+.markdown > h2 {
+  margin-top: 2.4rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--ka-border-secondary);
+}
+
+article a:not(.card):hover {
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+/* ==========================================================================
+   5. Navbar = AntD Layout header
+   thin border-bottom, no heavy shadow, subtle blur, gradient brand accent
+   ========================================================================== */
+.navbar {
+  height: var(--ifm-navbar-height);
+  padding: 0 1rem;
+  border-bottom: 1px solid var(--ka-border);
+  box-shadow: none;
+  backdrop-filter: saturate(140%) blur(12px);
+  -webkit-backdrop-filter: saturate(140%) blur(12px);
+}
+
+.navbar__inner {
+  flex-wrap: nowrap;
+}
+
+.navbar__brand {
+  margin-right: 1.5rem;
+}
+
+/* Brand wordmark: a small gradient mark (the dot) + gradient-clipped wordmark.
+   Gradient text on a logo wordmark is the requested signature brand detail;
+   it is scoped to the navbar brand only, nowhere else in body content. */
+.navbar__title {
+  position: relative;
+  padding-left: 0.95rem;
+  font-weight: 700;
+  font-size: 0.98rem;
+  letter-spacing: -0.01em;
+  background: var(--ka-brand-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.navbar__title::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 0.5rem;
+  height: 0.5rem;
+  transform: translateY(-50%);
+  border-radius: 3px;
+  background: var(--ka-brand-gradient);
+  box-shadow: 0 0 0 3px rgba(61, 141, 245, 0.16);
+}
+
+.navbar__item,
+.navbar__link {
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--ka-text-secondary);
+}
+.navbar__link:hover,
+.navbar__link--active {
+  color: var(--ifm-heading-color);
+}
+.navbar__link--active::after {
+  content: '';
+  display: block;
+  height: 2px;
+  margin-top: 2px;
+  border-radius: 2px;
+  background: var(--ka-brand-gradient);
+}
+
+/* GitHub link → AntD icon-button feel. */
+.navbar__items--right > .navbar__item.navbar__link {
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--ka-radius-sm);
+  transition: background var(--ifm-transition-fast) ease, color var(--ifm-transition-fast) ease;
+}
+.navbar__items--right > .navbar__item.navbar__link:hover {
+  background: var(--ka-hover-fill);
+}
+
+/* Color-mode toggle → AntD text-button. */
+.navbar .clean-btn {
+  border-radius: var(--ka-radius-sm);
+  transition: background var(--ifm-transition-fast) ease;
+}
+.navbar .clean-btn:hover {
+  background: var(--ka-hover-fill);
+}
+
+/* ==========================================================================
+   6. Sidebar = AntD Menu (dark)
+   dense items, rounded pill on active, gradient active-rail (::before),
+   uppercase muted category headings — the signature gradient-rail detail
+   ========================================================================== */
+.theme-doc-sidebar-container {
+  border-right: 1px solid var(--ka-border);
+  background: var(--ifm-background-color);
+}
+
+.menu {
+  padding: 0.75rem 0.6rem !important;
+  font-size: 0.86rem;
+}
+
+.menu__list .menu__list {
+  padding-left: 0.35rem;
+  margin-left: 0.45rem;
+  border-left: 1px solid var(--ka-border-secondary);
+}
+
+.menu__list-item:not(:first-child) {
+  margin-top: 1px;
+}
+
+.menu__link {
+  position: relative;
+  border-radius: var(--ka-radius-sm);
+  padding: 0.36rem 0.65rem;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--ka-text-secondary);
+  transition: background var(--ifm-transition-fast) ease, color var(--ifm-transition-fast) ease;
+}
+.menu__link:hover {
+  background: var(--ka-hover-fill);
+  color: var(--ifm-heading-color);
+}
+
+/* Active leaf — primary text + hoverFill pill + gradient rail on the left. */
+.menu__link--active:not(.menu__link--sublist) {
+  font-weight: 600;
+  color: var(--ifm-menu-color-active);
+  background: var(--ifm-menu-color-background-active);
+}
+.menu__link--active:not(.menu__link--sublist)::before {
+  content: '';
+  position: absolute;
+  left: -0.05rem;
+  top: 50%;
+  height: 1.05rem;
+  width: 3px;
+  transform: translateY(-50%);
+  border-radius: 3px;
+  background: var(--ka-brand-gradient);
+}
+
+/* Category heading rows (collapsible) — keep them readable, not pill-filled. */
+.menu__link--sublist {
+  color: var(--ka-text);
+  font-weight: 600;
+}
+
+/* Top-level category labels rendered as plain headings. */
+.menu__list > .menu__list-item > .menu__link--sublist,
+.theme-doc-sidebar-item-category-level-1 > .menu__list-item-collapsible > .menu__link {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--ka-text-tertiary);
+}
+
+.menu__list-item-collapsible:hover {
+  background: var(--ka-hover-fill);
+  border-radius: var(--ka-radius-sm);
+}
+.menu__list-item-collapsible .menu__link:hover {
+  background: transparent;
+}
+
+.menu__caret:hover {
+  background: transparent;
+}
+
+/* Sidebar scrollbar — thin, themed. */
+.theme-doc-sidebar-menu {
+  scrollbar-width: thin;
+}
+
+/* ==========================================================================
+   7. Admonitions = AntD Alert
+   no fat left stripe — soft tinted surface + thin tonal border + icon/title
+   ========================================================================== */
+.theme-admonition,
+.alert {
+  border: 1px solid var(--ka-tint-neutral-border);
+  border-left-width: 1px;
+  border-radius: var(--ka-radius);
+  box-shadow: none;
+  padding: 0.85rem 1rem;
+  background: var(--ka-tint-neutral);
+  color: var(--ifm-font-color-base);
+}
+.theme-admonition [class*='admonitionHeading'] {
+  text-transform: none;
+  font-weight: 650;
+  font-size: 0.84rem;
+  letter-spacing: 0.01em;
+  margin-bottom: 0.35rem;
+}
+.theme-admonition [class*='admonitionIcon'] svg {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+/* info / tip(success) / note(neutral) / warning / danger tones. */
+.theme-admonition-info,
+.alert--info {
+  background: var(--ka-tint-info);
+  border-color: var(--ka-tint-info-border);
+  --ifm-alert-foreground-color: var(--ka-tint-info-fg);
+}
+.theme-admonition-info [class*='admonitionHeading'],
+.theme-admonition-info [class*='admonitionIcon'] svg {
+  color: var(--ka-tint-info-fg);
+}
+
+.theme-admonition-tip,
+.theme-admonition-success,
+.alert--success {
+  background: var(--ka-tint-success);
+  border-color: var(--ka-tint-success-border);
+}
+.theme-admonition-tip [class*='admonitionHeading'],
+.theme-admonition-tip [class*='admonitionIcon'] svg,
+.theme-admonition-success [class*='admonitionHeading'],
+.theme-admonition-success [class*='admonitionIcon'] svg {
+  color: var(--ka-tint-success-fg);
+}
+
+.theme-admonition-note,
+.theme-admonition-secondary,
+.alert--secondary {
+  background: var(--ka-tint-neutral);
+  border-color: var(--ka-tint-neutral-border);
+}
+.theme-admonition-note [class*='admonitionHeading'],
+.theme-admonition-note [class*='admonitionIcon'] svg {
+  color: var(--ka-text-secondary);
+}
+
+.theme-admonition-warning,
+.theme-admonition-caution,
+.alert--warning {
+  background: var(--ka-tint-warning);
+  border-color: var(--ka-tint-warning-border);
+}
+.theme-admonition-warning [class*='admonitionHeading'],
+.theme-admonition-warning [class*='admonitionIcon'] svg,
+.theme-admonition-caution [class*='admonitionHeading'],
+.theme-admonition-caution [class*='admonitionIcon'] svg {
+  color: var(--ka-tint-warning-fg);
+}
+
+.theme-admonition-danger,
+.alert--danger {
+  background: var(--ka-tint-error);
+  border-color: var(--ka-tint-error-border);
+}
+.theme-admonition-danger [class*='admonitionHeading'],
+.theme-admonition-danger [class*='admonitionIcon'] svg {
+  color: var(--ka-tint-error-fg);
+}
+
+.theme-admonition a {
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+/* ==========================================================================
+   8. Tables = AntD Table
+   container header, dense cells, tonal cell borders, row-hover, rounded frame
+   ========================================================================== */
+.markdown table,
+.kv-block table {
+  display: table;
+  width: 100%;
+  margin: 1.1rem 0 1.5rem;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--ka-border);
+  border-radius: var(--ka-radius);
+  overflow: hidden;
+  font-size: 0.84rem;
+}
+.markdown table thead,
+.kv-block table thead {
+  background: var(--ifm-table-head-background);
+}
+.markdown table thead th,
+.kv-block table thead th {
+  border: none;
+  border-bottom: 1px solid var(--ka-border);
+  padding: 0.5rem 0.8rem;
+  font-weight: 600;
+  font-size: 0.74rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ka-text-secondary);
+  text-align: left;
+}
+.markdown table tbody td,
+.kv-block table tbody td {
+  border: none;
+  border-bottom: 1px solid var(--ka-border-secondary);
+  padding: 0.5rem 0.8rem;
+  vertical-align: top;
+  background: transparent;
+}
+.markdown table tbody tr:last-child td,
+.kv-block table tbody tr:last-child td {
+  border-bottom: none;
+}
+.markdown table tbody tr,
+.kv-block table tbody tr {
+  background: transparent;
+  transition: background var(--ifm-transition-fast) ease;
+}
+.markdown table tbody tr:nth-child(2n) {
+  background: transparent;
+}
+.markdown table tbody tr:hover,
+.kv-block table tbody tr:hover {
+  background: var(--ka-hover-fill);
+}
+/* monospace values in tables read as JetBrains Mono chips. */
+.markdown table code,
+.kv-block table code {
+  font-family: var(--ifm-font-family-monospace);
+}
+
+/* ==========================================================================
+   9. Code = AntD style
+   page-dark surface, border, radius, language Tag, light copy button.
+   Inline code = chip (border + tinted bg + JetBrains Mono).
+   ========================================================================== */
+.theme-code-block,
+div[class*='codeBlockContainer'] {
+  border-radius: var(--ka-radius);
+  box-shadow: var(--ifm-global-shadow-lw);
+}
+pre[class*='codeBlock'],
+.theme-code-block pre {
+  border: 1px solid var(--ka-border);
+  border-radius: var(--ka-radius);
+  font-size: 0.82rem;
+}
+[class*='codeBlockTitle'] {
+  border: 1px solid var(--ka-border);
+  border-bottom: none;
+  border-radius: var(--ka-radius) var(--ka-radius) 0 0;
+  background: var(--ka-elevated);
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.76rem;
+  color: var(--ka-text-secondary);
+}
+
+/* Language label as an AntD Tag in the top-right corner. */
+[class*='codeBlockContainer'] {
+  position: relative;
+}
+[class*='codeBlockContainer'][class*='language-']::after {
+  position: absolute;
+  top: 0.55rem;
+  right: 3.1rem;
+  z-index: 2;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--ka-tint-info-border);
+  border-radius: var(--ka-radius-sm);
+  background: var(--ka-tint-info);
+  color: var(--ka-tint-info-fg);
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  pointer-events: none;
+  opacity: 0.92;
+}
+[class*='codeBlockContainer'][class*='language-bash']::after { content: 'bash'; }
+[class*='codeBlockContainer'][class*='language-json']::after { content: 'json'; }
+[class*='codeBlockContainer'][class*='language-protobuf']::after { content: 'proto'; }
+[class*='codeBlockContainer'][class*='language-proto']::after { content: 'proto'; }
+[class*='codeBlockContainer'][class*='language-yaml']::after { content: 'yaml'; }
+[class*='codeBlockContainer'][class*='language-sql']::after { content: 'sql'; }
+[class*='codeBlockContainer'][class*='language-docker']::after { content: 'docker'; }
+[class*='codeBlockContainer'][class*='language-go']::after { content: 'go'; }
+[class*='codeBlockContainer'][class*='language-text']::after { content: none; }
+/* Tag hidden when a title bar is present (title already names the block). */
+[class*='codeBlockContainer']:has([class*='codeBlockTitle'])::after {
+  content: none;
+}
+
+/* Copy button → AntD text-button hover. */
+.theme-code-block button[class*='copyButton'] {
+  border-radius: var(--ka-radius-sm);
+  background: var(--ka-elevated);
+  border: 1px solid var(--ka-border);
+  transition: background var(--ifm-transition-fast) ease, border-color var(--ifm-transition-fast) ease;
+}
+.theme-code-block button[class*='copyButton']:hover {
+  background: var(--ka-hover-fill);
+  border-color: var(--ka-tint-info-border);
+}
+
+/* Highlighted lines — primary tint. */
+.theme-code-block-highlighted-line {
+  background-color: var(--docusaurus-highlighted-code-line-bg);
+  border-left: 2px solid var(--ka-primary);
+}
+
+/* Inline code chip. */
+:not(pre) > code {
+  border: 1px solid var(--ka-border);
+  border-radius: var(--ka-radius-sm);
+  background: var(--ifm-code-background);
+  padding: 0.1rem 0.36rem;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.82em;
+}
+[data-theme='dark'] a code,
+[data-theme='light'] a code {
+  color: var(--ifm-link-color);
+  border-color: var(--ka-tint-info-border);
+  background: var(--ka-tint-info);
+}
+
+/* ==========================================================================
+   10. TOC (right rail) = AntD Anchor
+   vertical line, active = primary + bolder + active bar, smooth transition
+   ========================================================================== */
+.table-of-contents {
+  font-size: 0.8rem;
+  border-left: 1px solid var(--ka-border);
+  padding-left: 0;
+}
+.table-of-contents__left-border {
+  border: none;
+}
+.table-of-contents__link {
+  position: relative;
+  display: block;
+  padding: 0.18rem 0 0.18rem 0.85rem;
+  color: var(--ka-text-tertiary);
+  transition: color var(--ifm-transition-fast) ease;
+}
+.table-of-contents__link:hover {
+  color: var(--ka-text-secondary);
+}
+.table-of-contents__link--active {
+  color: var(--ifm-link-color);
+  font-weight: 600;
+}
+.table-of-contents__link--active::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 0.3rem;
+  bottom: 0.3rem;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--ka-brand-gradient);
+}
+
+/* "On this page" heading + sidebar TOC headings. */
+.col--3 .table-of-contents::before {
+  content: none;
+}
+
+/* ==========================================================================
+   11. DocCards / category index = AntD Card (hover-elevation)
+   ========================================================================== */
+article .card,
+.card {
+  border: 1px solid var(--ka-border);
+  border-radius: var(--ka-radius-lg);
+  background: var(--ifm-card-background-color);
+  box-shadow: none;
+  transition: border-color var(--ifm-transition-slow) ease,
+    box-shadow var(--ifm-transition-slow) ease,
+    transform var(--ifm-transition-slow) ease;
+}
+article .card:hover,
+.card:hover {
+  border-color: var(--ka-tint-info-border);
+  box-shadow: var(--ifm-global-shadow-md);
+  transform: translateY(-2px);
+}
+.card a,
+a.card {
+  text-decoration: none;
+}
+[class*='cardTitle'] {
+  font-weight: 650;
+  color: var(--ifm-heading-color);
+}
+[class*='cardDescription'] {
+  color: var(--ka-text-secondary);
+}
+
+/* ==========================================================================
+   12. Pagination (prev/next) = AntD bordered cards
+   ========================================================================== */
+.pagination-nav__link {
+  border: 1px solid var(--ka-border);
+  border-radius: var(--ka-radius);
+  background: var(--ifm-card-background-color);
+  transition: border-color var(--ifm-transition-slow) ease,
+    box-shadow var(--ifm-transition-slow) ease, transform var(--ifm-transition-slow) ease;
+}
+.pagination-nav__link:hover {
+  border-color: var(--ka-tint-info-border);
+  box-shadow: var(--ifm-global-shadow-md);
+  transform: translateY(-1px);
+}
+.pagination-nav__sublabel {
+  color: var(--ka-text-tertiary);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.pagination-nav__label {
+  font-weight: 600;
+  color: var(--ifm-heading-color);
+}
+
+/* ==========================================================================
+   13. Breadcrumbs = AntD Breadcrumb
+   ========================================================================== */
+.breadcrumbs__item {
+  font-size: 0.78rem;
+}
+.breadcrumbs__link {
+  border-radius: var(--ka-radius-sm);
+  padding: 0.18rem 0.5rem;
+  color: var(--ka-text-secondary);
+  background: transparent;
+  transition: background var(--ifm-transition-fast) ease, color var(--ifm-transition-fast) ease;
+}
+.breadcrumbs__link:hover {
+  background: var(--ka-hover-fill);
+  color: var(--ifm-heading-color);
+}
+.breadcrumbs__item--active .breadcrumbs__link {
+  background: var(--ka-tint-info);
+  color: var(--ka-tint-info-fg);
+}
+.breadcrumbs__item:not(:last-child)::after {
+  opacity: 0.5;
+}
+
+/* ==========================================================================
+   14. Buttons / links = AntD
+   ========================================================================== */
+.button--primary {
+  --ifm-button-background-color: var(--ka-primary);
+  --ifm-button-border-color: var(--ka-primary);
+  font-weight: 600;
+  box-shadow: none;
+}
+.button--primary:hover {
+  --ifm-button-background-color: var(--ifm-color-primary-dark);
+  --ifm-button-border-color: var(--ifm-color-primary-dark);
+}
+.button:focus-visible,
+.menu__link:focus-visible,
+.navbar__link:focus-visible,
+.table-of-contents__link:focus-visible {
+  outline: none;
+  box-shadow: var(--ka-focus-ring);
+  border-radius: var(--ka-radius-sm);
+}
+
+/* ==========================================================================
+   15. Tabs = AntD Tabs (underline ink-bar)
+   ========================================================================== */
+.tabs {
+  border-bottom: 1px solid var(--ka-border);
+  gap: 0.25rem;
+}
+.tabs__item {
+  border: none;
+  border-radius: var(--ka-radius-sm) var(--ka-radius-sm) 0 0;
+  padding: 0.4rem 0.85rem;
+  margin-bottom: -1px;
+  font-size: 0.84rem;
+  font-weight: 500;
+  color: var(--ka-text-secondary);
+  border-bottom: 2px solid transparent;
+}
+.tabs__item:hover {
+  background: var(--ka-hover-fill);
+  color: var(--ifm-heading-color);
+}
+.tabs__item--active {
+  color: var(--ifm-link-color);
+  font-weight: 600;
+  border-bottom-color: var(--ka-primary);
+  background: transparent;
+}
+
+/* ==========================================================================
+   16. Scrollbar (thin, themed)
+   ========================================================================== */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ka-border) transparent;
+}
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ka-border);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ka-text-tertiary);
+  background-clip: padding-box;
+}
+
+/* ==========================================================================
+   17. Footer
+   ========================================================================== */
+.footer {
+  border-top: 1px solid var(--ka-border);
+}
+.footer__title {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ka-text-tertiary);
+}
+.footer__link-item {
+  color: var(--ka-text-secondary);
+}
+.footer__link-item:hover {
+  color: var(--ifm-link-color);
+}
+
+/* ==========================================================================
+   18. ApiOperation (.api-op) = AntD Card with a header bar
+   method badges = AntD Tag (GET=success / POST=primary / PATCH=warning /
+   DELETE=error / gRPC=violet); .api-op__async = violet processing Tag
+   ========================================================================== */
+.api-op {
+  border: 1px solid var(--ka-border);
+  border-radius: var(--ka-radius-lg);
+  padding: 0 1.1rem 0.65rem;
+  margin: 1.25rem 0 1.75rem;
+  background: var(--ifm-card-background-color);
+  box-shadow: var(--ifm-global-shadow-lw);
+}
+.api-op__head {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0 -1.1rem 0.65rem;
+  padding: 0.6rem 1.1rem;
+  border-bottom: 1px solid var(--ka-border);
+  border-radius: var(--ka-radius-lg) var(--ka-radius-lg) 0 0;
+  background: var(--ka-elevated);
+}
+.api-op__method {
+  flex: 0 0 auto;
+  font-family: var(--ifm-font-family-monospace);
+  font-weight: 700;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--ka-radius-sm);
+  border: 1px solid transparent;
+  text-transform: uppercase;
+}
+/* AntD Tag look: tinted bg + tonal border + tonal text (not solid fill). */
+.api-op__method--get {
+  background: var(--ka-tint-success);
+  border-color: var(--ka-tint-success-border);
+  color: var(--ka-tint-success-fg);
+}
+.api-op__method--post {
+  background: var(--ka-tint-info);
+  border-color: var(--ka-tint-info-border);
+  color: var(--ka-tint-info-fg);
+}
+.api-op__method--patch {
+  background: var(--ka-tint-warning);
+  border-color: var(--ka-tint-warning-border);
+  color: var(--ka-tint-warning-fg);
+}
+.api-op__method--delete {
+  background: var(--ka-tint-error);
+  border-color: var(--ka-tint-error-border);
+  color: var(--ka-tint-error-fg);
+}
+.api-op__method--grpc {
+  background: var(--ka-tint-violet);
+  border-color: var(--ka-tint-violet-border);
+  color: var(--ka-tint-violet-fg);
+}
+.api-op__endpoint {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.86rem;
+  color: var(--ka-text);
+  word-break: break-all;
+}
+.api-op__async {
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  font-family: var(--ifm-font-family-base);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  padding: 0.12rem 0.55rem 0.12rem 0.45rem;
+  border-radius: 999px;
+  background: var(--ka-tint-violet);
+  border: 1px solid var(--ka-tint-violet-border);
+  color: var(--ka-tint-violet-fg);
+}
+/* AntD processing-Tag pulsing dot. */
+.api-op__async::before {
+  content: '';
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: var(--ka-violet);
+  box-shadow: 0 0 0 0 rgba(110, 86, 207, 0.5);
+  animation: kaPulse 1.8s ease-out infinite;
+}
+@keyframes kaPulse {
+  0% { box-shadow: 0 0 0 0 rgba(110, 86, 207, 0.45); }
+  70% { box-shadow: 0 0 0 4px rgba(110, 86, 207, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(110, 86, 207, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .api-op__async::before { animation: none; }
+}
+
+/* ==========================================================================
+   19. Restrictions / Codes (.kv-block) = AntD Card with header
+   ========================================================================== */
+.kv-block {
+  border: 1px solid var(--ka-border);
+  border-radius: var(--ka-radius-lg);
+  margin: 1.25rem 0;
+  overflow: hidden;
+  background: var(--ifm-card-background-color);
+}
+.kv-block__title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.9rem;
+  background: var(--ka-elevated);
+  border-bottom: 1px solid var(--ka-border);
+  font-weight: 600;
+  font-size: 0.82rem;
+  color: var(--ifm-heading-color);
+}
+.kv-block__title::before {
+  content: '';
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 2px;
+  background: var(--ka-brand-gradient);
+}
+/* table inside kv-block sits flush — header bar already frames it. */
+.kv-block table {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+}
+.kv-block table thead {
+  background: transparent;
+}
+
+/* ==========================================================================
+   20. Mermaid diagrams — bordered card frame on the page surface
+   ========================================================================== */
+.docusaurus-mermaid-container,
+.mermaid {
+  border: 1px solid var(--ka-border);
+  border-radius: var(--ka-radius-lg);
+  background: var(--ifm-card-background-color);
+  padding: 1rem;
+  margin: 1.25rem 0;
+}
+

@@ -1,0 +1,17 @@
+name: registry-docs
+replicas: 1
+image: kacho-registry-docs:dev
+imagePullPolicy: IfNotPresent
+port: 8080
+
+ingress:
+  enabled: true
+  host: registry-docs.kacho.local
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi

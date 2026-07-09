@@ -1,0 +1,83 @@
+---
+id: internal
+sidebar_position: 6
+title: Internal (admin)
+---
+
+import { ApiOperation } from '@site/src/components/commonBlocks/ApiOperation'
+import CodeBlock from '@theme/CodeBlock'
+import dedent from 'ts-dedent'
+
+# InternalRegistryService (admin)
+
+**InternalRegistryService** — cluster-internal admin-поверхность реестра для эксплуатации: сборка
+мусора в хранилище (GC недостижимых блобов) и внутренняя статистика namespace. Она решает задачи
+операторов платформы, а не тенантов, и раскрывает инфра-детали (число уникальных блобов, суммарный
+размер стора), которые **не место** на публичной поверхности.
+
+Поэтому сервис живёт **только** на cluster-internal listener (`:9091`) и **не публикуется** на external
+endpoint (конвенция Kachō: `Internal.*` не на внешнем API). Его REST-проекция в `api-gateway`
+доступна лишь на cluster-internal mux (admin-tooling / port-forward). AuthN + AuthZ на internal
+**не** ослаблены: mTLS обязателен, каждый RPC проходит per-RPC Check (внутренний периметр не
+доверенный — defense-in-depth).
+
+## Методы
+
+### TriggerGarbageCollection — сборка мусора в хранилище
+
+<ApiOperation method="gRPC" endpoint="InternalRegistryService/TriggerGarbageCollection" async>
+
+Асинхронно запускает GC namespace реестра в zot — удаление недостижимых блобов и манифестов
+(освобождение места после удаления тегов). Требует admin-tier (`admin` на `registry_registry`).
+Ответ — `Operation`, `response` — `GarbageCollectionResult`.
+
+<CodeBlock language="json">
+  {dedent`
+    // GarbageCollectionResult (в response готовой операции)
+    {
+      "registryId": "reg7h9x2k4m8p0q1r5",
+      "blobsRemoved": "42",
+      "bytesReclaimed": "1073741824"
+    }
+  `}
+</CodeBlock>
+
+</ApiOperation>
+
+### GetRegistryStats — статистика namespace
+
+<ApiOperation method="gRPC" endpoint="InternalRegistryService/GetRegistryStats">
+
+Синхронно возвращает инфра-проекцию namespace: число репозиториев и тегов, суммарный размер, число
+уникальных блобов, момент последнего GC. Это **инфра-чувствительные данные** — только `:9091`. READ
+гейтится cluster read-tier `system_viewer` (не object-scoped `v_get`): `system_viewer` не содержит
+wildcard `user:*`, поэтому тенанты доступа к инфра-статистике не получают.
+
+<CodeBlock language="json">
+  {dedent`
+    // RegistryStats
+    {
+      "registryId": "reg7h9x2k4m8p0q1r5",
+      "repositoryCount": 3,
+      "tagCount": 12,
+      "totalSizeBytes": "5368709120",
+      "blobCount": "58",
+      "lastGcAt": "2026-07-09T02:00:00Z"
+    }
+  `}
+</CodeBlock>
+
+</ApiOperation>
+
+:::warning Internal-поверхность
+`TriggerGarbageCollection` / `GetRegistryStats` обслуживаются `InternalRegistryService` на
+cluster-internal listener (`:9091`) и **не публикуются** на external endpoint. Числовые инфра-метрики
+(число блобов, размер стора) — часть данных, которые нельзя раскрывать на публичной поверхности.
+:::
+
+:::note Производительность GetRegistryStats
+Точный подсчёт требует обхода namespace (репозитории → теги → манифесты для суммы размеров блобов).
+Обход выполняется под ограниченной параллельностью (не более 8 одновременных запросов к zot), поэтому
+на большом namespace статистика **медленная**, но не создаёт всплеск нагрузки на общий бэкенд.
+Метод — admin-only и authz-gated (недоступен тенантам).
+:::

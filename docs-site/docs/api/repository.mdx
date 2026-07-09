@@ -1,0 +1,134 @@
+---
+id: repository
+sidebar_position: 3
+title: Repository
+---
+
+import { ApiOperation } from '@site/src/components/commonBlocks/ApiOperation'
+import CodeBlock from '@theme/CodeBlock'
+import dedent from 'ts-dedent'
+
+# Repository
+
+**Repository** — OCI-репозиторий (образ) внутри namespace-реестра, например `backend/api`. Это то,
+что пользователь видит как «один образ» с набором тегов. Репозиторий закрывает задачу «показать, что
+лежит в реестре и сколько это весит», не заставляя обходить data-plane вручную.
+
+Repository — **read-only проекция из хранилища** (source of truth — zot); он **не хранится** в БД
+kacho-registry и не создаётся отдельным control-plane-вызовом. Репозиторий появляется, когда в него
+делают первый `docker push` (это же материализует его authz-объект `registry_repository`), и исчезает,
+когда удалён его последний тег. Per-repo авторизация — на объекте `registry_repository` (parent —
+`registry_registry`).
+
+## Поля
+
+<table>
+  <thead><tr><th>Поле</th><th>Тип</th><th>Описание</th></tr></thead>
+  <tbody>
+    <tr><td><code>registryId</code></td><td>string</td><td>Реестр-владелец (namespace)</td></tr>
+    <tr><td><code>name</code></td><td>string</td><td>Имя репозитория внутри namespace (может быть multi-segment, напр. <code>backend/api</code>)</td></tr>
+    <tr><td><code>tagCount</code></td><td>int32</td><td>Число тегов</td></tr>
+    <tr><td><code>sizeBytes</code></td><td>int64</td><td>Суммарный размер уникальных блобов репозитория</td></tr>
+    <tr><td><code>updatedAt</code></td><td>timestamp</td><td>Момент последнего push (last-pushed)</td></tr>
+    <tr><td><code>artifactType</code></td><td>enum</td><td>Output-only: доминирующий тип артефакта (первый из <code>artifactTypes</code>) — для обратной совместимости фильтра</td></tr>
+    <tr><td><code>artifactTypes</code></td><td>repeated enum</td><td>Output-only: <strong>набор</strong> типов артефактов среди тегов (mixed-repo несёт несколько значений)</td></tr>
+    <tr><td><code>lastPulledAt</code></td><td>timestamp</td><td>Output-only: момент последнего pull любого тега (нулевой — ни разу не скачивался)</td></tr>
+    <tr><td><code>downloadCount</code></td><td>int64</td><td>Output-only: суммарное число скачиваний тегов (zot download-count)</td></tr>
+  </tbody>
+</table>
+
+### Тип артефакта (artifactType / artifactTypes)
+
+Реестр различает **контейнерный образ** и **Helm-чарт** (и прочие OCI-артефакты), чтобы UI мог дать
+фильтр «образы vs чарты». Тип классифицируется по `config.mediaType` репрезентативного манифеста
+(top-level manifest media-type у образа и чарта одинаков — различие только в конфиге).
+
+<table>
+  <thead><tr><th>Значение</th><th>Когда</th></tr></thead>
+  <tbody>
+    <tr><td><code>ARTIFACT_TYPE_CONTAINER_IMAGE</code></td><td>docker/OCI контейнерный образ (включая multi-arch index)</td></tr>
+    <tr><td><code>ARTIFACT_TYPE_HELM_CHART</code></td><td>Helm-чарт (<code>config vnd.cncf.helm.config</code>)</td></tr>
+    <tr><td><code>ARTIFACT_TYPE_OTHER</code></td><td>Иной OCI-артефакт (SBOM / signature / WASM / …)</td></tr>
+    <tr><td><code>ARTIFACT_TYPE_UNSPECIFIED</code></td><td>Не классифицирован (нет тегов / манифест непрочитан)</td></tr>
+  </tbody>
+</table>
+
+:::note Best-effort по одному репрезентанту
+Тип классифицируется по манифесту **одного** репрезентативного тега (`latest` если есть, иначе
+последний в отсортированном списке) — репозиторий тип-стабилен, одного достаточно. Mixed-repo
+(например `latest`=helm при живых container-тегах) отражается в наборе `artifactTypes`. Ошибка чтения
+манифеста репрезентанта → `UNSPECIFIED` (best-effort, список не падает). Полный отказ zot →
+`UNAVAILABLE` до классификации (fail-closed).
+:::
+
+## Методы
+
+Репозитории только читаются (проекция). Создание/наполнение — через data-plane `docker push`.
+
+### ListRepositories — список репозиториев реестра
+
+<ApiOperation method="GET" endpoint="/registry/v1/registries/{registryId}/repositories">
+
+Возвращает репозитории namespace (проекция из zot) с cursor-пагинацией. RPC **scope-filtered**:
+хендлер сначала проверяет доступ к namespace (call-gate), затем row-фильтрует по `registry_repository`
+`v_list` (existence-hiding — недоступные репозитории просто не попадают в выдачу). Доступ к namespace
+отсутствует → `NOT_FOUND` (не `403`).
+
+<CodeBlock language="bash">
+  {dedent`
+    curl 'http://localhost:18080/registry/v1/registries/reg7h9x2k4m8p0q1r5/repositories?pageSize=50' \\
+      -H 'Authorization: Bearer <JWT>'
+  `}
+</CodeBlock>
+
+<CodeBlock language="json">
+  {dedent`
+    {
+      "repositories": [
+        {
+          "registryId": "reg7h9x2k4m8p0q1r5",
+          "name": "backend/api",
+          "tagCount": 4,
+          "sizeBytes": "52428800",
+          "updatedAt": "2026-07-10T10:05:00Z",
+          "artifactType": "ARTIFACT_TYPE_CONTAINER_IMAGE",
+          "artifactTypes": ["ARTIFACT_TYPE_CONTAINER_IMAGE"],
+          "lastPulledAt": "2026-07-10T11:20:00Z",
+          "downloadCount": "37"
+        },
+        {
+          "registryId": "reg7h9x2k4m8p0q1r5",
+          "name": "charts/web",
+          "tagCount": 2,
+          "sizeBytes": "1048576",
+          "updatedAt": "2026-07-09T18:00:00Z",
+          "artifactType": "ARTIFACT_TYPE_HELM_CHART",
+          "artifactTypes": ["ARTIFACT_TYPE_HELM_CHART"],
+          "downloadCount": "5"
+        }
+      ],
+      "nextPageToken": ""
+    }
+  `}
+</CodeBlock>
+
+</ApiOperation>
+
+## Ошибки и граничные случаи
+
+<table>
+  <thead><tr><th>Ситуация</th><th>Код / поведение</th></tr></thead>
+  <tbody>
+    <tr><td>Malformed <code>registryId</code></td><td><code>INVALID_ARGUMENT</code> (<code>"invalid registry id '&lt;X&gt;'"</code>)</td></tr>
+    <tr><td>Нет доступа к namespace</td><td><code>NOT_FOUND</code> (existence-hiding, не 403)</td></tr>
+    <tr><td>Репозиторий, к которому нет <code>v_list</code></td><td>Просто не попадает в выдачу (row-filter)</td></tr>
+    <tr><td>zot недоступен</td><td><code>UNAVAILABLE</code> (fail-closed — список не отдаёт частичную проекцию)</td></tr>
+    <tr><td>Реестр пуст / нет репозиториев</td><td><code>200</code> + пустой список</td></tr>
+  </tbody>
+</table>
+
+:::tip Фильтр «образы vs чарты» — на клиенте
+Server-side фильтра по `artifactType` нет (namespace ограничен). Клиент загружает все страницы
+`ListRepositories` (следуя `nextPageToken`) и фильтрует по `artifactType`/`artifactTypes` на своей
+стороне. Теги репозитория — на странице [Tag](/api/tag).
+:::

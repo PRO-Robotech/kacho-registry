@@ -1,0 +1,240 @@
+---
+id: registry
+sidebar_position: 2
+title: Registry
+---
+
+import { ApiOperation } from '@site/src/components/commonBlocks/ApiOperation'
+import CodeBlock from '@theme/CodeBlock'
+import dedent from 'ts-dedent'
+
+# Registry
+
+**Registry** — namespace-реестр образов внутри проекта: единица владения, авторизации и адресации.
+Это ответ на задачу «где хранить образы команды с доступом по ролям платформы». Пользователь создаёт
+реестр в своём проекте, получает `endpoint` (`registry.kacho.local/<id>`) и работает с ним через
+`docker`/`helm`, а права push/pull задаются ролями IAM на этот реестр.
+
+Registry — **тонкий namespace над общим хранилищем** (zot): сервис хранит только метаданные
+namespace (имя, метки, статус), а сами образы живут в хранилище. `projectId` — cross-domain ссылка
+на `iam.Project` (TEXT, без FK), валидируется через `ProjectService.Get` на Create. Идентификатор
+(`reg…`) генерирует сервер и он неизменяем.
+
+## Поля
+
+<table>
+  <thead><tr><th>Поле</th><th>Тип</th><th>Изменяемость</th><th>Описание</th></tr></thead>
+  <tbody>
+    <tr><td><code>id</code></td><td>string</td><td>immutable (server-assigned PK)</td><td>Идентификатор реестра, префикс <code>reg</code>. Входит в endpoint и путь образа</td></tr>
+    <tr><td><code>projectId</code></td><td>string</td><td>immutable</td><td>Проект-владелец (iam). Задаётся при Create, менять нельзя</td></tr>
+    <tr><td><code>name</code></td><td>string</td><td>mutable</td><td>DNS-safe имя (lowercase alnum, <code>-</code>, <code>.</code>), UNIQUE среди живых реестров проекта</td></tr>
+    <tr><td><code>description</code></td><td>string</td><td>mutable</td><td>Свободное описание</td></tr>
+    <tr><td><code>labels</code></td><td>map&lt;string,string&gt;</td><td>mutable</td><td>Метки; участвуют в label-scoped авторизации</td></tr>
+    <tr><td><code>endpoint</code></td><td>string</td><td>output-only</td><td>Базовый OCI-endpoint namespace, напр. <code>registry.kacho.local/&lt;id&gt;</code></td></tr>
+    <tr><td><code>repositoryCount</code></td><td>int32</td><td>output-only</td><td>Число репозиториев (проекция из zot, не источник истины)</td></tr>
+    <tr><td><code>status</code></td><td>enum</td><td>output-only</td><td>Состояние жизненного цикла (см. ниже)</td></tr>
+    <tr><td><code>createdAt</code></td><td>timestamp</td><td>output-only</td><td>Момент создания (RFC 3339, усечён до секунд)</td></tr>
+  </tbody>
+</table>
+
+### Статусы
+
+<table>
+  <thead><tr><th>Статус</th><th>Значение</th></tr></thead>
+  <tbody>
+    <tr><td><code>REGISTRY_STATUS_ACTIVE</code></td><td>Реестр работает: доступны push/pull и все операции</td></tr>
+    <tr><td><code>REGISTRY_STATUS_DELETING</code></td><td>Реестр удаляется — <strong>терминальное</strong> состояние (forward-only, revert в ACTIVE запрещён)</td></tr>
+  </tbody>
+</table>
+
+:::note Имя реестра — mutable, id — нет
+Имя (`name`) можно менять через `Update`; оно уникально среди **живых** (не-`DELETING`) реестров
+проекта. Смена имени **не** затрагивает `endpoint`, id и путь в хранилище — они привязаны к id.
+Освобождённое `DELETING`-переходом имя сразу доступно для нового Create.
+:::
+
+## Методы
+
+Чтение (`Get` / `List`) — sync; мутации (`Create` / `Update` / `Delete`) — async через `Operation`.
+Все методы — на публичном control-plane (`:9090` → REST через `api-gateway`), каждый проходит per-RPC
+authz-Check.
+
+### Get — получить реестр
+
+<ApiOperation method="GET" endpoint="/registry/v1/registries/{registryId}">
+
+Возвращает реестр по идентификатору. Требует `v_get` на `registry_registry`. Malformed id →
+`INVALID_ARGUMENT` (`"invalid registry id '<X>'"`); well-formed, но нет → `NOT_FOUND`.
+
+<CodeBlock language="bash">
+  {dedent`
+    curl 'http://localhost:18080/registry/v1/registries/reg7h9x2k4m8p0q1r5' \\
+      -H 'Authorization: Bearer <JWT>'
+  `}
+</CodeBlock>
+
+<CodeBlock language="json">
+  {dedent`
+    {
+      "id": "reg7h9x2k4m8p0q1r5",
+      "projectId": "prj-demo",
+      "name": "team-images",
+      "description": "образы команды",
+      "labels": { "env": "dev" },
+      "endpoint": "registry.kacho.local/reg7h9x2k4m8p0q1r5",
+      "repositoryCount": 3,
+      "status": "REGISTRY_STATUS_ACTIVE",
+      "createdAt": "2026-07-10T10:00:00Z"
+    }
+  `}
+</CodeBlock>
+
+</ApiOperation>
+
+### List — список реестров проекта
+
+<ApiOperation method="GET" endpoint="/registry/v1/registries">
+
+Возвращает реестры проекта с cursor-пагинацией (`pageSize`, `pageToken` → `nextPageToken`). Список
+**scope-filtered**: показывает только реестры, к которым у вызывающего есть доступ (`viewer` ∪
+`v_list`). Не-member проекта получает `200` + пустой список (не `403`).
+
+<CodeBlock language="bash">
+  {dedent`
+    curl 'http://localhost:18080/registry/v1/registries?projectId=prj-demo&pageSize=50' \\
+      -H 'Authorization: Bearer <JWT>'
+  `}
+</CodeBlock>
+
+<CodeBlock language="json">
+  {dedent`
+    {
+      "registries": [
+        { "id": "reg7h9x2k4m8p0q1r5", "projectId": "prj-demo", "name": "team-images",
+          "endpoint": "registry.kacho.local/reg7h9x2k4m8p0q1r5",
+          "repositoryCount": 3, "status": "REGISTRY_STATUS_ACTIVE",
+          "createdAt": "2026-07-10T10:00:00Z" }
+      ],
+      "nextPageToken": ""
+    }
+  `}
+</CodeBlock>
+
+</ApiOperation>
+
+### Create — создать реестр
+
+<ApiOperation method="POST" endpoint="/registry/v1/registries" async>
+
+Создаёт реестр в проекте. Это **create-child**: authz-Check выполняется на parent-проекте
+(`editor`-tier на `iam_project`, объекта реестра ещё нет). `projectId` валидируется через
+`ProjectService.Get`; не найден → `INVALID_ARGUMENT` (`"project <id> not found"`). Owner-tuple
+эмитится в outbox (материализуется в FGA). Ответ — `Operation`; `response` содержит созданный
+Registry.
+
+<CodeBlock language="bash">
+  {dedent`
+    curl -X POST 'http://localhost:18080/registry/v1/registries' \\
+      -H 'Authorization: Bearer <JWT>' \\
+      -H 'Content-Type: application/json' \\
+      -d '{
+            "projectId": "prj-demo",
+            "name": "team-images",
+            "description": "образы команды",
+            "labels": { "env": "dev" }
+          }'
+  `}
+</CodeBlock>
+
+<CodeBlock language="json">
+  {dedent`
+    {
+      "id": "rop7h9x2k4m8p0q1r5",
+      "done": false,
+      "metadata": { "registryId": "reg7h9x2k4m8p0q1r5" }
+    }
+  `}
+</CodeBlock>
+
+</ApiOperation>
+
+### Update — изменить реестр
+
+<ApiOperation method="PATCH" endpoint="/registry/v1/registries/{registryId}" async>
+
+Меняет изменяемые поля: `name`, `description`, `labels`. `projectId` — immutable: его наличие в
+`updateMask` → `INVALID_ARGUMENT` (`"projectId is immutable after Registry.Create"`). Пустой mask →
+full-object PATCH (все mutable-поля). Неизвестное поле в mask → `INVALID_ARGUMENT`. Требует `v_update`.
+Конфликт имени → `ALREADY_EXISTS`. Ответ — `Operation`.
+
+<CodeBlock language="bash">
+  {dedent`
+    curl -X PATCH 'http://localhost:18080/registry/v1/registries/reg7h9x2k4m8p0q1r5' \\
+      -H 'Authorization: Bearer <JWT>' \\
+      -H 'Content-Type: application/json' \\
+      -d '{
+            "name": "team-images-2",
+            "labels": { "env": "staging" },
+            "updateMask": "name,labels"
+          }'
+  `}
+</CodeBlock>
+
+</ApiOperation>
+
+### Delete — удалить реестр
+
+<ApiOperation method="DELETE" endpoint="/registry/v1/registries/{registryId}" async>
+
+Удаляет реестр. Delete **forward-only**: реестр переводится в терминальный `DELETING`, снимается
+zot-namespace и owner/repo-tuple (UnregisterResource). Если в namespace остались образы, удаление
+блокируется — `FAILED_PRECONDITION` (`"registry is not empty"`): сначала удалите теги/репозитории
+(см. [Tag → DeleteTag](/api/tag)). Требует `v_delete`. Ответ — `Operation`.
+
+<CodeBlock language="bash">
+  {dedent`
+    curl -X DELETE 'http://localhost:18080/registry/v1/registries/reg7h9x2k4m8p0q1r5' \\
+      -H 'Authorization: Bearer <JWT>'
+  `}
+</CodeBlock>
+
+</ApiOperation>
+
+### ListOperations — история операций реестра
+
+<ApiOperation method="GET" endpoint="/registry/v1/registries/{registryId}/operations">
+
+Возвращает историю async-операций реестра (per-resource, фильтр по `registryId`) с cursor-пагинацией.
+Требует `v_list` на `registry_registry` (как `Get`). Формат элемента — `Operation` (см.
+[Операции](/api/operations)).
+
+<CodeBlock language="bash">
+  {dedent`
+    curl 'http://localhost:18080/registry/v1/registries/reg7h9x2k4m8p0q1r5/operations?pageSize=20' \\
+      -H 'Authorization: Bearer <JWT>'
+  `}
+</CodeBlock>
+
+</ApiOperation>
+
+## Ошибки и граничные случаи
+
+<table>
+  <thead><tr><th>Ситуация</th><th>Код</th><th>Поведение</th></tr></thead>
+  <tbody>
+    <tr><td>Malformed id (не префикс <code>reg</code>)</td><td><code>INVALID_ARGUMENT</code></td><td><code>"invalid registry id '&lt;X&gt;'"</code> — первым стейтментом RPC</td></tr>
+    <tr><td>Get/Update/Delete несуществующего реестра</td><td><code>NOT_FOUND</code></td><td><code>"registry &lt;id&gt; not found"</code></td></tr>
+    <tr><td>Create с занятым именем (среди живых)</td><td><code>ALREADY_EXISTS</code></td><td><code>"registry &lt;name&gt; already exists"</code> — partial UNIQUE(project, name) против ACTIVE-дубля</td></tr>
+    <tr><td>Create с несуществующим projectId</td><td><code>INVALID_ARGUMENT</code></td><td><code>"project &lt;id&gt; not found"</code> (валидация через ProjectService.Get)</td></tr>
+    <tr><td>Create с невалидным именем</td><td><code>INVALID_ARGUMENT</code></td><td><code>"Illegal argument: name must be DNS-safe …"</code></td></tr>
+    <tr><td>Update с <code>projectId</code> в mask</td><td><code>INVALID_ARGUMENT</code></td><td><code>"projectId is immutable after Registry.Create"</code></td></tr>
+    <tr><td>Update с unknown полем в mask</td><td><code>INVALID_ARGUMENT</code></td><td>Поле вне whitelist (name/description/labels)</td></tr>
+    <tr><td><strong>Delete непустого реестра</strong></td><td><code>FAILED_PRECONDITION</code></td><td><code>"registry is not empty"</code> — сначала удалить образы</td></tr>
+    <tr><td>kacho-iam / zot недоступны на Create</td><td><code>UNAVAILABLE</code></td><td>fail-closed для мутаций</td></tr>
+  </tbody>
+</table>
+
+:::tip Порядок удаления
+Реестр удаляется только пустым (forward-only, `"registry is not empty"`). Сначала удалите все теги
+([DeleteTag](/api/tag)) — когда в namespace не остаётся образов, `Delete` реестра проходит.
+:::

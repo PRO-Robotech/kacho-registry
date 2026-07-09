@@ -1,0 +1,124 @@
+---
+id: authz
+sidebar_position: 3
+title: Авторизация
+---
+
+import CodeBlock from '@theme/CodeBlock'
+import dedent from 'ts-dedent'
+
+# Авторизация
+
+Kachō Registry не заводит собственную систему прав — доступ к реестрам и образам определяют роли IAM
+платформы. Это и есть ключевая ценность: кто может создавать реестры, пушить и тянуть образы,
+задаётся теми же grant'ами, что и остальной доступ в проекте. Эта страница описывает модель авторизации:
+объекты, verb-relations, как гейтятся control-plane RPC и data-plane push/pull.
+
+Авторизация — **per-RPC / per-request, ReBAC** через **OpenFGA**, вызывается как
+`InternalIAMService.Check` в kacho-iam. Проверяется на **всех** поверхностях: public control-plane
+(`:9090`), internal (`:9091`) и data-plane. Внутренний периметр не доверенный (defense-in-depth).
+
+## Два объекта авторизации
+
+<table>
+  <thead><tr><th>FGA object-type</th><th>Что представляет</th><th>Родитель</th></tr></thead>
+  <tbody>
+    <tr><td><code>registry_registry</code></td><td>Namespace-реестр (единица владения). List/Create/Delete + list-filter</td><td><code>iam_project</code></td></tr>
+    <tr><td><code>registry_repository</code></td><td>Конкретный репозиторий внутри namespace (pull/push/delete образов)</td><td><code>registry_registry</code></td></tr>
+  </tbody>
+</table>
+
+Иерархия: `iam_project → registry_registry → registry_repository`. Доступ наследуется по родителю
+(доступ к реестру распространяется на его репозитории), а per-repo grant позволяет выдать доступ к
+одному репозиторию, не открывая весь реестр.
+
+## Verb-bearing модель
+
+Модель Kachō — **verb-bearing**: каждому действию соответствует своё verb-relation, развязанное от
+grant-tier (роли). Это позволяет точечно выдавать «только pull» или «только push» без роли-владельца.
+
+<table>
+  <thead><tr><th>Verb-relation</th><th>Смысл</th><th>Действия</th></tr></thead>
+  <tbody>
+    <tr><td><code>v_get</code></td><td>читать один объект</td><td>Registry.Get; data-plane pull</td></tr>
+    <tr><td><code>v_list</code></td><td>видеть в списке</td><td>List / ListRepositories / ListTags / ListOperations (row-filter)</td></tr>
+    <tr><td><code>v_create</code></td><td>создавать дочерний объект</td><td>Registry.Create (на project); push нового repo (на registry)</td></tr>
+    <tr><td><code>v_update</code></td><td>изменять</td><td>Registry.Update; push в существующий repo</td></tr>
+    <tr><td><code>v_delete</code></td><td>удалять</td><td>Registry.Delete; DeleteTag</td></tr>
+  </tbody>
+</table>
+
+## Как гейтятся control-plane RPC
+
+Есть два способа энфорса, в зависимости от того, адресует ли RPC единичный объект или коллекцию.
+
+### Interceptor-gated (единичный объект)
+
+`Get` / `Create` / `Update` / `Delete` / `ListOperations` (и admin GC/Stats) гейтятся **per-RPC
+интерсептором**: он извлекает объект из запроса (по `registryId` или `projectId`) и вызывает Check
+verb@object **до** выполнения метода. Нет отношения → `PERMISSION_DENIED` (`403`).
+
+<table>
+  <thead><tr><th>RPC</th><th>verb</th><th>object</th></tr></thead>
+  <tbody>
+    <tr><td><code>Registry.Get</code></td><td><code>v_get</code></td><td><code>registry_registry</code></td></tr>
+    <tr><td><code>Registry.Create</code></td><td><code>v_create</code> (editor-tier)</td><td><code>iam_project</code> (parent — объекта ещё нет)</td></tr>
+    <tr><td><code>Registry.Update</code></td><td><code>v_update</code></td><td><code>registry_registry</code></td></tr>
+    <tr><td><code>Registry.Delete</code></td><td><code>v_delete</code></td><td><code>registry_registry</code></td></tr>
+    <tr><td><code>ListOperations</code></td><td><code>v_list</code></td><td><code>registry_registry</code></td></tr>
+  </tbody>
+</table>
+
+### Scope-filtered (коллекции)
+
+`List` / `ListRepositories` / `ListTags` / `DeleteTag` помечены **ScopeFiltered** — единичный Check не
+выражает row-filter + existence-hiding сразу. Интерсептор их пропускает, а авторизацию делает
+**хендлер** (`internal/handler/listauthz.go`): call-gate на namespace + row-filter по объектам, к
+которым есть `v_list` (для `DeleteTag` — синхронный `v_delete` до создания операции).
+
+- **Existence-hiding**: нет доступа к namespace → `NOT_FOUND` (не `403`), сервис не подтверждает
+  существование чужого реестра.
+- **Row-filter**: недоступные репозитории/реестры просто не попадают в выдачу.
+- **Non-member List**: `200` + пустой список (паритет с exempt — не член проекта не получает `403`).
+- **Fail-closed**: ошибка Check в IAM → отказ, не «пропустить».
+
+## Data-plane (push/pull)
+
+Data-plane применяет ту же модель к OCI-запросам: pull → `v_get`, push в существующий repo →
+`v_update`, push в новый repo → `v_create` на реестре. Полная verb-map и токен-обмен —
+[Data-plane](/architecture/data-plane).
+
+## Метки и label-scoping
+
+Метки реестра (`labels`) участвуют в **label-scoped** авторизации Kachō: grant роли можно ограничить
+селектором меток, и доступ распространяется только на реестры с подходящими метками. Поэтому метки —
+не только организационный тег, но и часть периметра доступа: снятие/смена метки может отозвать
+label-scoped доступ.
+
+## Owner-tuple и видимость создателя
+
+Чтобы создатель видел свой реестр сразу после Create, сервис пишет owner/project-tuple в FGA через
+transactional-outbox (см. [Архитектура](/architecture/overview#owner-tuple-через-transactional-outbox)).
+Модель `registry_registry` несёт relation `owner`, поэтому creator-tuple успешно материализуется.
+Через proxy (`RegisterResource`) разрешены **только** hierarchy-relations (`project`/`owner`) —
+`admin/editor/viewer` через proxy запрещены (privilege-guard в iam).
+
+:::note Grant-latency
+Между записью tuple и его учётом в authz-фильтрованном `List` проходит ~0.6–2 с (FGA-пропагация).
+Только что созданный реестр или только что запушенный репозиторий может не появиться в списке мгновенно
+— клиент/UI делает poll-retry, а не мгновенный refetch.
+:::
+
+## Регистрации нового типа ресурса
+
+Полный набор authz-регистраций реестра (чтобы push/pull и List не падали `403`/`400`):
+
+<table>
+  <thead><tr><th>Что</th><th>Где</th></tr></thead>
+  <tbody>
+    <tr><td>FGA-типы <code>registry_registry</code> / <code>registry_repository</code> + relations</td><td>FGA-модель kacho-iam</td></tr>
+    <tr><td>PermissionMap (per-RPC verb + extractor)</td><td><code>internal/check/permission_map.go</code></td></tr>
+    <tr><td>id-префикс <code>reg</code> (валидатор)</td><td><code>kacho-corelib/validate</code></td></tr>
+    <tr><td>SA сервиса как <code>fga_writer@iam_fgaproxy:system</code></td><td>seed kacho-iam (owner-tuple через proxy)</td></tr>
+  </tbody>
+</table>

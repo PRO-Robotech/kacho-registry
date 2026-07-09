@@ -1,0 +1,223 @@
+---
+id: overview
+sidebar_position: 1
+title: Обзор API
+---
+
+import CodeBlock from '@theme/CodeBlock'
+import dedent from 'ts-dedent'
+
+# Обзор API
+
+Эта страница описывает **конвенции**, общие для всего control-plane API Kachō Registry: ресурсы и
+поверхности, порты, REST-пути, формат JSON, sync-vs-async, аутентификацию и авторизацию, формат
+ошибок, пагинацию, идентификаторы и точность временных меток. Конкретные поля и операции каждого
+ресурса — на отдельных страницах ([Registry](/api/registry), [Repository](/api/repository),
+[Tag](/api/tag)). Data-plane push/pull (OCI Distribution) — отдельная поверхность, описана в
+[Data-plane](/architecture/data-plane).
+
+:::info Единый контракт — gRPC, REST — проекция
+Источник истины control-plane — Protocol Buffers в `kacho-proto` (домен `kacho.cloud.registry.v1`).
+REST строится через **grpc-gateway**: каждый RPC аннотирован `google.api.http`. Семантика (коды
+ошибок, валидация) одинакова для gRPC и REST; примеры ниже — в REST-форме (через `api-gateway`).
+:::
+
+:::tip Сначала — практика
+Если вы только знакомитесь с сервисом, начните с [Быстрого старта](/getting-started): создать реестр,
+залогиниться, запушить и стянуть образ. Эта страница — справочник по конвенциям.
+:::
+
+## Ресурсы и их назначение
+
+Kachō Registry управляет **тремя типами ресурсов**. Все — плоские (flat): domain-поля на верхнем
+уровне сообщения, без K8s-envelope.
+
+<table>
+  <thead><tr><th>Ресурс</th><th>Бизнес-назначение</th><th>Природа</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Registry</strong></td><td>Namespace-реестр в проекте — единица владения и авторизации. Хранит имя, метки, endpoint, статус</td><td>persisted (БД) · CRUD</td></tr>
+    <tr><td><strong>Repository</strong></td><td>OCI-репозиторий (образ) внутри namespace</td><td>проекция из zot · read-only</td></tr>
+    <tr><td><strong>Tag</strong></td><td>Тегированный образ (манифест)</td><td>проекция из zot · read + удаление</td></tr>
+  </tbody>
+</table>
+
+Постраничный справочник: [Registry](/api/registry), [Repository](/api/repository), [Tag](/api/tag),
+плюс [Операции](/api/operations) (LRO) и [Internal](/api/internal) (admin :9091).
+
+## Две плоскости, три поверхности
+
+Registry — это **control-plane** (управление и просмотр) и **data-plane** (push/pull). Control-plane
+слушает два gRPC-listener'а; data-plane — отдельный HTTP-листенер OCI Distribution.
+
+<table>
+  <thead><tr><th>Поверхность</th><th>Порт (дефолт)</th><th>Протокол</th><th>Кто ходит</th><th>Что доступно</th></tr></thead>
+  <tbody>
+    <tr><td>public control-plane</td><td><code>:9090</code></td><td>gRPC (+ REST через api-gateway)</td><td>Tenant через <code>api-gateway</code></td><td><code>RegistryService</code> (CRUD реестра, список repo/tag, DeleteTag), <code>OperationService</code></td></tr>
+    <tr><td>internal control-plane</td><td><code>:9091</code></td><td>gRPC (mTLS)</td><td>Admin-tooling (cluster-internal)</td><td><code>InternalRegistryService</code> (GC, статистика namespace)</td></tr>
+    <tr><td>data-plane</td><td><code>:8080</code> → <code>registry.kacho.local</code></td><td>OCI Distribution / Docker Registry v2</td><td><code>docker</code> / <code>helm</code></td><td>push / pull блобов и манифестов</td></tr>
+  </tbody>
+</table>
+
+`Internal*`-сервис **не публикуется** на external endpoint — даже его REST-проекция доступна только
+на cluster-internal mux `api-gateway`. Authz проверяется на **обеих** control-plane-поверхностях и в
+data-plane (internal не считается доверенным — defense-in-depth). Подробнее —
+[Авторизация](/architecture/authz).
+
+## REST-пути control-plane
+
+Ресурсы доступны по шаблону пути с префиксом `/registry/v1/`. Дочерние коллекции (репозитории, теги,
+операции) вложены в путь реестра.
+
+<table>
+  <thead><tr><th>Операция</th><th>HTTP-метод</th><th>Путь</th><th>Тип</th></tr></thead>
+  <tbody>
+    <tr><td><code>Registry.Get</code></td><td><code>GET</code></td><td><code>/registry/v1/registries/&#123;registryId&#125;</code></td><td>sync</td></tr>
+    <tr><td><code>Registry.List</code></td><td><code>GET</code></td><td><code>/registry/v1/registries</code></td><td>sync</td></tr>
+    <tr><td><code>Registry.Create</code></td><td><code>POST</code></td><td><code>/registry/v1/registries</code></td><td>async · Operation</td></tr>
+    <tr><td><code>Registry.Update</code></td><td><code>PATCH</code></td><td><code>/registry/v1/registries/&#123;registryId&#125;</code></td><td>async · Operation</td></tr>
+    <tr><td><code>Registry.Delete</code></td><td><code>DELETE</code></td><td><code>/registry/v1/registries/&#123;registryId&#125;</code></td><td>async · Operation</td></tr>
+    <tr><td><code>ListRepositories</code></td><td><code>GET</code></td><td><code>/registry/v1/registries/&#123;registryId&#125;/repositories</code></td><td>sync</td></tr>
+    <tr><td><code>ListTags</code></td><td><code>GET</code></td><td><code>/registry/v1/registries/&#123;registryId&#125;/repositories/&#123;repository&#125;/tags</code></td><td>sync</td></tr>
+    <tr><td><code>DeleteTag</code></td><td><code>DELETE</code></td><td><code>/registry/v1/registries/&#123;registryId&#125;/repositories/&#123;repository&#125;/tags/&#123;tag&#125;</code></td><td>async · Operation</td></tr>
+    <tr><td><code>ListOperations</code></td><td><code>GET</code></td><td><code>/registry/v1/registries/&#123;registryId&#125;/operations</code></td><td>sync</td></tr>
+  </tbody>
+</table>
+
+## Read — sync, мутации — async через Operation
+
+Kachō Registry следует базовой конвенции платформы: **чтение синхронно, мутации асинхронны**.
+`Get` / `List*` возвращают ресурс(ы) немедленно. `Create` / `Update` / `Delete` / `DeleteTag`
+возвращают `Operation` (LRO): клиент поллит `OperationService.Get(id)` до `done=true`, а в
+`response`/`error` приходит результат. Watch-RPC не существует — только поллинг. Подробнее —
+[Операции](/api/operations).
+
+## Формат JSON
+
+Тело запроса и ответа — **JSON с camelCase-ключами** (`registryId`, `projectId`, `createdAt`,
+`repositoryCount`). Это grpc-gateway-проекция proto-полей (в `.proto` — `snake_case`). Перечисления
+(`status`, `artifactType`) сериализуются как строковые константы enum (`REGISTRY_STATUS_ACTIVE`,
+`ARTIFACT_TYPE_CONTAINER_IMAGE`). `int64`-поля (`sizeBytes`, `downloadCount`) в JSON — строки.
+Временные метки — RFC 3339.
+
+<CodeBlock language="json">
+  {dedent`
+    {
+      "id": "reg7h9x2k4m8p0q1r5",
+      "projectId": "prj-demo",
+      "name": "team-images",
+      "labels": { "env": "dev" },
+      "endpoint": "registry.kacho.local/reg7h9x2k4m8p0q1r5",
+      "repositoryCount": 3,
+      "status": "REGISTRY_STATUS_ACTIVE",
+      "createdAt": "2026-07-10T10:00:00Z"
+    }
+  `}
+</CodeBlock>
+
+## Аутентификация
+
+Все control-plane-запросы проходят через **`api-gateway`**, который проверяет **JWT** в заголовке
+`Authorization: Bearer <token>`. Отсутствующий или невалидный токен → `UNAUTHENTICATED` (HTTP `401`)
+— до того, как запрос дойдёт до сервиса. Транспорт service→service — **mTLS** (verified client-cert).
+Data-plane аутентифицирует `docker`/`helm` по отдельному identity-JWT (см. [Data-plane](/architecture/data-plane)).
+
+## Авторизация
+
+Авторизация — **per-RPC, ReBAC** через **OpenFGA**, проверяется на **обеих** control-plane-поверхностях
+и в data-plane. Интерсептор перед выполнением метода вызывает `InternalIAMService.Check` в kacho-iam.
+Модель — verb-bearing: каждому действию соответствует verb-relation (`v_get` / `v_list` / `v_create`
+/ `v_update` / `v_delete`) на объекте `registry_registry` (реестр) или `registry_repository`
+(репозиторий). Коллекционные RPC (`List` / `ListRepositories` / `ListTags`) дополнительно
+row-фильтруются в хендлере (existence-hiding: чужое — `NOT_FOUND`, не `403`). Полная модель —
+[Авторизация](/architecture/authz).
+
+Если отношения нет → `PERMISSION_DENIED` (HTTP `403`) на interceptor-gated RPC, либо `NOT_FOUND` на
+scope-filtered (existence-hiding). Недоступность kacho-iam на request-path — `UNAVAILABLE`
+(fail-closed).
+
+## Формат ошибок
+
+Ошибки возвращаются в формате **`google.rpc.Status`** — `{code, message, details[]}` — единообразно
+для gRPC и REST. `code` — числовой gRPC-код (REST мапит его на HTTP-статус), `message` — текст в
+стабильной формулировке Kachō, `details[]` — массив (обычно пустой).
+
+<CodeBlock language="json">
+  {dedent`
+    {
+      "code": 5,
+      "message": "registry reg000notexist000000 not found",
+      "details": []
+    }
+  `}
+</CodeBlock>
+
+<table>
+  <thead><tr><th>gRPC-код</th><th>HTTP</th><th>Когда</th></tr></thead>
+  <tbody>
+    <tr><td><code>INVALID_ARGUMENT</code></td><td>400</td><td>Нарушение формата/валидации: malformed id (<code>"invalid registry id '&lt;X&gt;'"</code>), unknown update-mask поле, immutable-поле в mask, garbage page-token, <code>"Illegal argument: …"</code></td></tr>
+    <tr><td><code>NOT_FOUND</code></td><td>404</td><td>Корректный по формату, но несуществующий реестр (<code>"registry %s not found"</code>); также existence-hiding для authenticated-deny на scope-filtered RPC</td></tr>
+    <tr><td><code>ALREADY_EXISTS</code></td><td>409</td><td>Create с уже занятым именем среди живых реестров project'а (<code>"registry %s already exists"</code>)</td></tr>
+    <tr><td><code>FAILED_PRECONDITION</code></td><td>409</td><td>Состояние не позволяет: Delete непустого реестра (<code>"registry is not empty"</code>)</td></tr>
+    <tr><td><code>UNAVAILABLE</code></td><td>503</td><td>Peer недоступен (kacho-iam / zot) — fail-closed для мутаций</td></tr>
+    <tr><td><code>UNAUTHENTICATED</code></td><td>401</td><td>Нет / невалиден JWT</td></tr>
+    <tr><td><code>PERMISSION_DENIED</code></td><td>403</td><td>Нет нужного отношения в authz-Check (interceptor-gated RPC)</td></tr>
+    <tr><td><code>INTERNAL</code></td><td>500</td><td>Внутренняя ошибка (фиксированный текст, <strong>без утечки SQL/pgx</strong>)</td></tr>
+  </tbody>
+</table>
+
+## Пагинация — cursor-based
+
+`List*`-RPC используют **курсорную** пагинацию. Запрос принимает `pageSize` (0 → дефолт 50,
+максимум 1000) и `pageToken`; ответ возвращает `nextPageToken` (пустая строка — последняя страница).
+`pageToken` — opaque-значение; передавать как есть, не парсить. Мусорный токен → `INVALID_ARGUMENT`
+(`"invalid page_token"`).
+
+<CodeBlock language="bash">
+  {dedent`
+    # первая страница
+    curl 'http://localhost:18080/registry/v1/registries?projectId=prj-demo&pageSize=50' \\
+      -H 'Authorization: Bearer <JWT>'
+    # следующая — подставить nextPageToken из ответа
+    curl 'http://localhost:18080/registry/v1/registries?projectId=prj-demo&pageSize=50&pageToken=<nextPageToken>' \\
+      -H 'Authorization: Bearer <JWT>'
+  `}
+</CodeBlock>
+
+## Идентификаторы
+
+Идентификатор Registry генерирует сервер: префикс **`reg`** + crockford-base32 (`kacho-corelib/ids`).
+Идентификатор LRO — префикс **`rop`**. Тип ресурса читается по префиксу; malformed id (не тот
+префикс) → `INVALID_ARGUMENT` первым стейтментом RPC. Repository и Tag не имеют собственного id — они
+адресуются составным ключом (`registryId` + `name` / `repository` + `tag`).
+
+## Точность временных меток
+
+Все `createdAt` в proto-ответе **усечены до секунд** (`Truncate(time.Second)`) — конвенция Kachō. БД
+и хранилище держат бо́льшую точность, но клиент видит секунды (`2026-07-10T10:00:00Z`, без долей).
+Проекционные метки (`updatedAt`, `lastPulledAt`) приходят из zot.
+
+## Сводка сервисов и RPC
+
+<table>
+  <thead><tr><th>Сервис</th><th>RPC</th><th>REST</th><th>Тип</th></tr></thead>
+  <tbody>
+    <tr><td rowSpan="9"><code>RegistryService</code><br/>(public :9090)</td><td><code>Get</code></td><td><code>GET /registry/v1/registries/&#123;id&#125;</code></td><td>sync</td></tr>
+    <tr><td><code>List</code></td><td><code>GET /registry/v1/registries</code></td><td>sync</td></tr>
+    <tr><td><code>Create</code></td><td><code>POST /registry/v1/registries</code></td><td>async</td></tr>
+    <tr><td><code>Update</code></td><td><code>PATCH /registry/v1/registries/&#123;id&#125;</code></td><td>async</td></tr>
+    <tr><td><code>Delete</code></td><td><code>DELETE /registry/v1/registries/&#123;id&#125;</code></td><td>async</td></tr>
+    <tr><td><code>ListRepositories</code></td><td><code>GET …/&#123;id&#125;/repositories</code></td><td>sync</td></tr>
+    <tr><td><code>ListTags</code></td><td><code>GET …/repositories/&#123;repo&#125;/tags</code></td><td>sync</td></tr>
+    <tr><td><code>DeleteTag</code></td><td><code>DELETE …/tags/&#123;tag&#125;</code></td><td>async</td></tr>
+    <tr><td><code>ListOperations</code></td><td><code>GET …/&#123;id&#125;/operations</code></td><td>sync</td></tr>
+    <tr><td><code>OperationService</code><br/>(оба listener'а)</td><td><code>Get</code></td><td><code>GET /registry/v1/operations/&#123;id&#125;</code></td><td>sync</td></tr>
+    <tr><td rowSpan="2"><code>InternalRegistryService</code><br/>(internal :9091)</td><td><code>TriggerGarbageCollection</code></td><td>— (gRPC only)</td><td>async</td></tr>
+    <tr><td><code>GetRegistryStats</code></td><td>— (gRPC only)</td><td>sync</td></tr>
+  </tbody>
+</table>
+
+:::tip Дальше
+Конкретные поля, тела запросов, примеры и ресурс-специфичные ошибки — на страницах ресурсов:
+[Registry](/api/registry), [Repository](/api/repository), [Tag](/api/tag), [Операции](/api/operations),
+[Internal](/api/internal).
+:::
