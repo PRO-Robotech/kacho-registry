@@ -482,11 +482,12 @@ func TestDataplane_REG37_NoRepoGet_404(t *testing.T) {
 	require.Equal(t, 0, fw.count())
 }
 
-// REG-20 — cross-repo blob mount exfil-guard: ДВА Check (v_get на src + v_create на dst).
-// v_get(src)=deny → mount 404 (блоб не смонтирован). Оба allow → forward.
+// REG-20 — cross-repo blob mount exfil-guard: ДВА Check (v_get на src + write-verb на
+// dst). v_get(src)=deny → mount 404 (блоб не смонтирован). Оба allow → forward.
+// dst — новый repo (fakeBackend без exists) → dst-verb = v_create@registry_registry.
 func TestDataplane_REG20_CrossRepoMount_ExfilGuard(t *testing.T) {
 	// src deny → 404.
-	azDeny := &fakeAuthz{allow: map[string]bool{"v_create registry_repository:reg-A/dst": true}}
+	azDeny := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
 	fwDeny := &fakeForwarder{}
 	hDeny := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azDeny, &fakeBackend{}, fwDeny, &fakeRepoReg{})
 	rec := doReq(hDeny, http.MethodPost, "/v2/reg-A/dst/blobs/uploads/?mount=sha256:x&from=reg-A/src", true)
@@ -495,8 +496,8 @@ func TestDataplane_REG20_CrossRepoMount_ExfilGuard(t *testing.T) {
 
 	// оба allow → forward.
 	azAllow := &fakeAuthz{allow: map[string]bool{
-		"v_get registry_repository:reg-A/src":    true,
-		"v_create registry_repository:reg-A/dst": true,
+		"v_get registry_repository:reg-A/src": true,
+		"v_create registry_registry:reg-A":    true,
 	}}
 	fwAllow := &fakeForwarder{status: 201}
 	hAllow := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azAllow, &fakeBackend{}, fwAllow, &fakeRepoReg{})
@@ -535,14 +536,14 @@ func TestDataplane_REG20_MountFromTraversal_400(t *testing.T) {
 }
 
 // REG-20 cross-registry — mount из ДРУГОГО реестра (from=reg-B/src в dst reg-A/dst):
-// exfil-guard делает ДВА Check (v_get на src-объекте reg-B/src И v_create на
+// exfil-guard делает ДВА Check (v_get на src-объекте reg-B/src И write-verb на
 // dst-объекте reg-A/dst). Оба allow → forward; src deny → 404 (чужой блоб из reg-B
-// не вытекает в reg-A).
+// не вытекает в reg-A). dst — новый repo → dst-verb = v_create@registry_registry:reg-A.
 func TestDataplane_REG20_CrossRegistryMount_TwoChecks(t *testing.T) {
 	// оба allow → forward + ровно два Check на правильные объекты.
 	az := &fakeAuthz{allow: map[string]bool{
-		"v_get registry_repository:reg-B/src":    true,
-		"v_create registry_repository:reg-A/dst": true,
+		"v_get registry_repository:reg-B/src": true,
+		"v_create registry_registry:reg-A":    true,
 	}}
 	fw := &fakeForwarder{status: 201}
 	h := newTestHandler(&fakeVerifier{subject: "sva-ci"}, az, &fakeBackend{}, fw, &fakeRepoReg{})
@@ -552,15 +553,63 @@ func TestDataplane_REG20_CrossRegistryMount_TwoChecks(t *testing.T) {
 	calls := az.checkedObjects()
 	require.Len(t, calls, 2, "cross-registry mount checks src AND dst")
 	require.Contains(t, calls, checkCall{"service_account:sva-ci", "v_get", "registry_repository:reg-B/src"})
-	require.Contains(t, calls, checkCall{"service_account:sva-ci", "v_create", "registry_repository:reg-A/dst"})
+	require.Contains(t, calls, checkCall{"service_account:sva-ci", "v_create", "registry_registry:reg-A"})
 
 	// src (reg-B) deny → 404, блоб чужого реестра не смонтирован.
-	azDeny := &fakeAuthz{allow: map[string]bool{"v_create registry_repository:reg-A/dst": true}}
+	azDeny := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
 	fwDeny := &fakeForwarder{}
 	hDeny := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azDeny, &fakeBackend{}, fwDeny, &fakeRepoReg{})
 	recDeny := doReq(hDeny, http.MethodPost, "/v2/reg-A/dst/blobs/uploads/?mount=sha256:x&from=reg-B/src", true)
 	require.Equal(t, http.StatusNotFound, recDeny.Code)
 	require.Equal(t, 0, fwDeny.count(), "cross-registry blob not mounted without src v_get")
+}
+
+// REG-20 dst verb-map (audit-r1) — cross-repo mount dst-Check зеркалит servePush:
+// НОВЫЙ dst-repo гейтится v_create@registry_registry (право создать repo в namespace),
+// СУЩЕСТВУЮЩИЙ — v_update@registry_repository. Хардкод v_create@registry_repository
+// расходился бы с push-путём (verb-mismatch): namespace-creator не смонтировал бы в
+// новый repo (silent 404 → полный re-upload), а v_create-only принципал писал бы в
+// существующий repo мимо v_update-гейта.
+func TestDataplane_REG20_MountDst_VerbMapMirrorsPush(t *testing.T) {
+	const mountURL = "/v2/reg-A/dst/blobs/uploads/?mount=sha256:x&from=reg-A/src"
+
+	// dst — НОВЫЙ repo: dst-Check должен быть v_create@registry_registry:reg-A.
+	// Принципал с namespace-level v_create (+ v_get на src) → mount проходит.
+	azNew := &fakeAuthz{allow: map[string]bool{
+		"v_get registry_repository:reg-A/src": true,
+		"v_create registry_registry:reg-A":    true,
+	}}
+	fwNew := &fakeForwarder{status: 201}
+	hNew := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azNew, &fakeBackend{}, fwNew, &fakeRepoReg{})
+	require.Equal(t, 201, doReq(hNew, http.MethodPost, mountURL, true).Code)
+	require.Equal(t, 1, fwNew.count(), "namespace-creator mounts into a brand-new dst repo")
+	require.Contains(t, azNew.checkedObjects(),
+		checkCall{"service_account:sva-ci", "v_create", "registry_registry:reg-A"})
+
+	// dst — СУЩЕСТВУЮЩИЙ repo: dst-Check должен быть v_update@registry_repository:reg-A/dst.
+	beExisting := &fakeBackend{exists: map[string]bool{"reg-A/dst": true}}
+	azUpd := &fakeAuthz{allow: map[string]bool{
+		"v_get registry_repository:reg-A/src":    true,
+		"v_update registry_repository:reg-A/dst": true,
+	}}
+	fwUpd := &fakeForwarder{status: 201}
+	hUpd := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azUpd, beExisting, fwUpd, &fakeRepoReg{})
+	require.Equal(t, 201, doReq(hUpd, http.MethodPost, mountURL, true).Code)
+	require.Equal(t, 1, fwUpd.count(), "v_update holder mounts into an existing dst repo")
+	require.Contains(t, azUpd.checkedObjects(),
+		checkCall{"service_account:sva-ci", "v_update", "registry_repository:reg-A/dst"})
+
+	// verb-mismatch guard: dst СУЩЕСТВУЕТ, принципал держит только namespace v_create
+	// (без v_update на repo) → mount отклонён 404 (нельзя писать в существующий repo
+	// мимо v_update), несмотря на v_get(src).
+	azMismatch := &fakeAuthz{allow: map[string]bool{
+		"v_get registry_repository:reg-A/src": true,
+		"v_create registry_registry:reg-A":    true,
+	}}
+	fwMismatch := &fakeForwarder{}
+	hMismatch := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azMismatch, beExisting, fwMismatch, &fakeRepoReg{})
+	require.Equal(t, http.StatusNotFound, doReq(hMismatch, http.MethodPost, mountURL, true).Code)
+	require.Equal(t, 0, fwMismatch.count(), "v_create-only principal cannot write to an existing repo via mount")
 }
 
 // helper: убеждаемся, что Authorization без "Bearer " схемы → 401.

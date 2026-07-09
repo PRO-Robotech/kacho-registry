@@ -4,8 +4,6 @@
 package handler
 
 import (
-	"google.golang.org/protobuf/types/known/timestamppb"
-
 	"github.com/PRO-Robotech/kacho-corelib/operations"
 	operationpb "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/operation"
 	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
@@ -93,9 +91,9 @@ func operationToProto(op *operations.Operation) *operationpb.Operation {
 	p := &operationpb.Operation{
 		Id:                   op.ID,
 		Description:          op.Description,
-		CreatedAt:            timestamppb.New(op.CreatedAt),
+		CreatedAt:            prototime.Truncate(op.CreatedAt),
 		CreatedBy:            op.CreatedBy,
-		ModifiedAt:           timestamppb.New(op.ModifiedAt),
+		ModifiedAt:           prototime.Truncate(op.ModifiedAt),
 		Done:                 op.Done,
 		Metadata:             op.Metadata,
 		PrincipalType:        op.Principal.Type,
