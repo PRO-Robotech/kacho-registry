@@ -221,7 +221,15 @@ func (v *Verifier) keyFor(ctx context.Context, kid string) (crypto.PublicKey, er
 	v.lastRefresh = now
 	v.mu.Unlock()
 
-	if err := v.refresh(ctx); err != nil {
+	// Рефетч отвязан от request-ctx вызывающего: слот уже захвачен (lastRefresh
+	// продвинут), поэтому отмена/RST победителя слота (в т.ч. pre-auth флуд
+	// attacker-controlled kid'ов с немедленным RST) не должна ни срывать общий фетч
+	// ключей, ни жечь троттл-слот, блокируя подхват ротации для остальных вызывающих.
+	// Собственный дедлайн — http.Client.Timeout (как register-on-push в
+	// dataplane/handler.go, отвязанный от request-ctx через context.WithoutCancel).
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), v.http.Timeout)
+	defer cancel()
+	if err := v.refresh(fetchCtx); err != nil {
 		return nil, err
 	}
 

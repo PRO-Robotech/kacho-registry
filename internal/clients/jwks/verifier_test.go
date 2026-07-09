@@ -432,6 +432,48 @@ func TestJWKS_Verify_ConcurrentUnknownKid_BoundsRefetch(t *testing.T) {
 		"concurrent unknown-kid flood must collapse to a single JWKS refetch")
 }
 
+// SEC/avail (audit-r11, concurrency) — рефетч JWKS не должен исполняться на request-ctx
+// вызывающего: отмена/RST одного клиента (включая pre-auth флуд attacker-controlled kid'ов
+// с немедленным RST) не должна ни срывать общий фетч ключей, ни жечь троттл-слот, блокируя
+// подхват ротации для всех остальных. Победитель слота рефетча с УЖЕ ОТМЕНЁННЫМ ctx обязан
+// всё равно довести фетч (detached ctx), иначе легитимный токен, подписанный только что
+// ротированным ключом, отвергается как "unknown kid" на всё окно minRefresh.
+func TestJWKS_Verify_RefreshDetachedFromRequestCtx(t *testing.T) {
+	js := newJWKSServer(t, "kid-rsa")
+	v := New(js.srv.URL, testAud, testHydraIss)
+	clock := time.Now()
+	v.now = func() time.Time { return clock }
+
+	// Первый Verify: наполняем кэш (kid-rsa), fetch=1.
+	tok := js.mintRS256(t, "kid-rsa", hydraClaims("cid-ci", clock.Add(24*time.Hour)))
+	_, err := v.Verify(context.Background(), tok)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), js.fetch.Load())
+
+	// Ротация Hydra: добавлен новый ES256-ключ kid-ec2. Часы за окном TTL (max-age=300) →
+	// следующий Verify инициирует рефетч.
+	js.addEC(t, "kid-ec2")
+	clock = clock.Add(6 * time.Minute)
+
+	// «Атакующий» захватывает слот рефетча запросом с УЖЕ ОТМЕНЁННЫМ ctx (модель
+	// disconnect/RST победителя слота). Его собственный Verify падает (bogus kid), но общий
+	// фетч ключей не должен быть сорван его отменой, а троттл-слот — сожжён впустую.
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	bogus := joseSigningInput("RS256", "attacker-kid", hydraClaims("cid-x", clock.Add(time.Hour))) + ".QUFB"
+	_, _ = v.Verify(canceled, bogus)
+
+	// Легитимный токен, подписанный только что ротированным kid-ec2, в пределах окна
+	// minRefresh после хода атакующего. С рефетчем на request-ctx атакующего фетч сорвался,
+	// троттл-слот сожжён → здесь был бы "unknown kid". С detached-ctx рефетч довёл ключи —
+	// токен верифицируется.
+	tok2 := js.mintES256(t, "kid-ec2", hydraClaims("cid-ci2", clock.Add(time.Hour)))
+	sub, err := v.Verify(context.Background(), tok2)
+	require.NoError(t, err,
+		"legit token signed by a freshly-rotated key must verify; a disconnecting client's canceled ctx must not poison the shared JWKS refresh")
+	require.Equal(t, "cid-ci2", sub)
+}
+
 // REG-TX-21(a) — JWKS недоступен И ключа нет в кэше → fail-closed (не пропускаем).
 func TestJWKS_Verify_JWKSUnreachable_FailClosed(t *testing.T) {
 	js := newJWKSServer(t, "kid-rsa")
