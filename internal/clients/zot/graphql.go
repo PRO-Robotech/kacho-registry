@@ -30,6 +30,16 @@ import (
 // на internal-endpoint, сохраняя скорость против N последовательных round-trip'ов.
 const zotFanout = 8
 
+// maxGraphQLBytes — верхняя граница тела search-ext GraphQL-ответа (ImageList/
+// GlobalSearch), читаемого под io.LimitReader перед декодом. zot ImageList не
+// поддерживает server-side tag-пагинацию, поэтому tenant-controlled tag/repo-count
+// иначе материализуется в память целиком на каждый ListTags/ListRepositories (CWE-770:
+// pathological tag-push в собственный repo → O(N) память на каждый запрос → OOM shared
+// control-plane). LimitReader — defense-in-depth (паритет с decodeManifest /
+// maxManifestBytes): оверсайз-ответ деградирует в fail-closed ErrUnavailable, не в
+// безразмерную аллокацию. Bound щедрый — реальные проекции namespace/тегов много ниже.
+const maxGraphQLBytes = 16 << 20 // 16 MiB
+
 // ListRepositories возвращает repos namespace через search-ext GraphQL. GlobalSearch
 // даёт per-repo агрегаты (Size / LastUpdated / DownloadCount) + имена одним дешёвым
 // запросом. Имена сортируются и режутся ОКНОМ (page_size/page_token) ДО per-repo
@@ -327,13 +337,21 @@ func (c *Client) gqlQuery(ctx context.Context, query string, out any) error {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return failClosed("graphql non-2xx", "status", resp.StatusCode)
 	}
+	return decodeGraphQL(resp.Body, maxGraphQLBytes, out)
+}
+
+// decodeGraphQL декодирует search-ext GraphQL envelope из body под io.LimitReader(limit)
+// и раскладывает поле data в out. Тело сверх лимита → усечение → decode error; непустой
+// errors-массив; невалидный data — всё → failClosed ErrUnavailable (сырой zot-текст
+// наружу не течёт, оверсайз-ответ деградирует в fail-closed, не в безразмерную аллокацию).
+func decodeGraphQL(body io.Reader, limit int64, out any) error {
 	var wrapper struct {
 		Data   json.RawMessage `json:"data"`
 		Errors []struct {
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
-	if derr := json.NewDecoder(resp.Body).Decode(&wrapper); derr != nil {
+	if derr := json.NewDecoder(io.LimitReader(body, limit)).Decode(&wrapper); derr != nil {
 		return failClosed("graphql decode", "err", derr)
 	}
 	if len(wrapper.Errors) > 0 {

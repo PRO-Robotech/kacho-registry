@@ -53,6 +53,14 @@ var errNotFound = fmt.Errorf("zot: not found")
 // JSON → decode error → failClosed ErrUnavailable.
 const maxManifestBytes = 16 << 20 // 16 MiB
 
+// maxJSONBytes — верхняя граница тела getJSON/do()-ответа (Distribution-API: кросс-
+// тенантный /v2/_catalog, per-repo tags/list), читаемого под io.LimitReader перед
+// json.Decode. _catalog не пагинируется server-side, а tags/list несёт все теги repo —
+// tenant-controlled count иначе материализуется в память целиком на каждый вызов
+// (CWE-770). LimitReader — defense-in-depth (паритет с decodeManifest / maxManifestBytes):
+// оверсайз-ответ деградирует в fail-closed ErrUnavailable, не в безразмерную аллокацию.
+const maxJSONBytes = 16 << 20 // 16 MiB
+
 // decodeManifest разбирает тело манифеста (config + layers) под io.LimitReader(limit).
 // Ошибка декода (в т.ч. усечение сверх лимита) → failClosed ErrUnavailable (сырой
 // zot-текст наружу не течёт).
@@ -62,6 +70,16 @@ func decodeManifest(body io.Reader, limit int64) (manifestBody, error) {
 		return manifestBody{}, failClosed("GET manifest decode", "err", err)
 	}
 	return mb, nil
+}
+
+// decodeJSONBody декодирует JSON-тело из body под io.LimitReader(limit) в out. Ошибка
+// декода (в т.ч. усечение тела сверх лимита) → failClosed ErrUnavailable (сырой zot-текст
+// наружу не течёт; оверсайз-ответ деградирует в fail-closed, не в безразмерную аллокацию).
+func decodeJSONBody(body io.Reader, limit int64, out any) error {
+	if err := json.NewDecoder(io.LimitReader(body, limit)).Decode(out); err != nil {
+		return failClosed("json decode", "err", err)
+	}
+	return nil
 }
 
 // repoPath url-кодирует сегменты полного repo-пути (multi-segment), сохраняя '/'.
@@ -162,8 +180,8 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ou
 		return failClosed("non-2xx", "method", method, "path", path, "status", resp.StatusCode)
 	}
 	if out != nil {
-		if derr := json.NewDecoder(resp.Body).Decode(out); derr != nil {
-			return failClosed("decode", "method", method, "path", path, "err", derr)
+		if derr := decodeJSONBody(resp.Body, maxJSONBytes, out); derr != nil {
+			return derr
 		}
 		// json.Decoder останавливается на первом значении, не доходя до io.EOF —
 		// без дренажа net/http не вернёт persistent-соединение в пул на Body.Close

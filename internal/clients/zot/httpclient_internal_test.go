@@ -37,6 +37,24 @@ func TestDecodeManifest_LimitReader(t *testing.T) {
 	require.ErrorIs(t, err, regerrors.ErrUnavailable)
 }
 
+// TestDecodeJSONBody_LimitReader — getJSON/do()-тело декодируется под io.LimitReader
+// (defense-in-depth, CWE-770): тело в пределах лимита разбирается штатно, а тело сверх
+// лимита усекается LimitReader'ом → decode рвётся → fail-closed ErrUnavailable. Иначе
+// кросс-тенантный /v2/_catalog (и tags/list) материализуют безразмерный ответ zot в
+// память на каждый вызов (паритет с decodeManifest / maxManifestBytes).
+func TestDecodeJSONBody_LimitReader(t *testing.T) {
+	// В пределах лимита — разбирается штатно.
+	var out map[string]string
+	require.NoError(t, decodeJSONBody(strings.NewReader(`{"a":"b"}`), 1<<20, &out))
+	require.Equal(t, "b", out["a"])
+
+	// Одиночное JSON-значение сверх лимита → LimitReader усекает → decode падает →
+	// failClosed ErrUnavailable (сырой zot-текст наружу не течёт).
+	var out2 map[string]string
+	err := decodeJSONBody(strings.NewReader(`{"a":"`+strings.Repeat("x", 500)+`"}`), 50, &out2)
+	require.ErrorIs(t, err, regerrors.ErrUnavailable)
+}
+
 // TestDo_DrainsBodyForKeepalive — на success-decode-ветке do() обязан дренировать
 // resp.Body до io.EOF перед Close, иначе net/http не вернёт persistent-соединение в
 // пул (json.Decoder останавливается на первом значении, не доходя до EOF), и на каждый
