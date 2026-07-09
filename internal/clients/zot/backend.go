@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
+
+	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
 )
 
 // RepoExists сообщает, зарегистрирован ли repo (несёт ≥1 тег) — data-plane
@@ -68,6 +70,28 @@ func manifestHasDigest(mb manifestBody, digest string) bool {
 	return false
 }
 
+// blobScopeVerdict сводит результат tag-скана к (in, err, cacheable):
+//   - found → true, кэшируемо: positive-hit — единственный вердикт, достоверный из
+//     ЧАСТИЧНОГО скана (приоритетнее транзиентного блипа соседа).
+//   - соседний fetch блипнул (werr!=nil) → fail-closed werr, НЕ кэшируем.
+//   - скан НЕПОЛНЫЙ (parent-ctx отменён до просмотра всех тегов, но ни один запущенный
+//     fetch не вернул ошибки → werr==nil), блоб не найден → ответ ДЕЙСТВИТЕЛЬНО неизвестен
+//     → fail-closed ErrUnavailable, НЕ кэшируем. Кэш ложного not-in-repo (blobCacheTTL)
+//     иначе ловил бы легитимный pull присутствующего слоя в 404 на всё окно (cross-client).
+//   - полный скан без совпадения → достоверный not-in-repo, кэшируемо.
+func blobScopeVerdict(found bool, werr error, scannedAll bool) (in bool, err error, cacheable bool) {
+	if found {
+		return true, nil, true
+	}
+	if werr != nil {
+		return false, werr, false
+	}
+	if !scannedAll {
+		return false, regerrors.ErrUnavailable, false
+	}
+	return false, nil, true
+}
+
 // BlobInRepo проверяет per-repo blob-scope (REG-37): <digest> достижим только если
 // входит в config/layers манифеста(ов) авторизованного repo. Cross-reference:
 // перебирает теги repo (bounded-concurrency fan-out, cap blobScopeConcurrency),
@@ -99,9 +123,16 @@ func (c *Client) BlobInRepo(ctx context.Context, registryID, repo, digest string
 	var found atomic.Bool
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(blobScopeConcurrency)
+	// scannedAll различает полный скан от прерванного отменой parent-ctx: при break по
+	// gctx.Err() оставшиеся теги НЕ просмотрены — вердикт «не найден» недостоверен.
+	scannedAll := true
 	for _, tag := range tags {
-		if found.Load() || gctx.Err() != nil {
-			break // блоб найден либо дедлайн исчерпан — новые fetch'и не планируем
+		if found.Load() {
+			break // блоб найден — новые fetch'и не планируем (early-exit)
+		}
+		if gctx.Err() != nil {
+			scannedAll = false // дедлайн/отмена — остаток тегов не просканирован
+			break
 		}
 		tag := tag
 		g.Go(func() error {
@@ -122,21 +153,11 @@ func (c *Client) BlobInRepo(ctx context.Context, registryID, repo, digest string
 		})
 	}
 	werr := g.Wait()
-	// Positive-hit приоритетнее транзиентного сбоя соседа: если блоб найден, ответ ИЗВЕСТЕН —
-	// возвращаем true, даже если параллельный manifest-fetch блипнул ErrUnavailable. Fail-closed
-	// корректен ТОЛЬКО когда ответ действительно неизвестен (found=false), иначе авторизованный
-	// pull присутствующего слоя ложно упал бы в 503/deny.
-	if found.Load() {
-		if c.blobCache != nil {
-			c.blobCache.set(key, true)
-		}
-		return true, nil
+	// Positive-hit приоритетнее транзиентного сбоя соседа (ответ известен из частичного
+	// скана); неполный скан без совпадения — fail-closed ErrUnavailable, НЕ кэшируется.
+	in, err, cacheable := blobScopeVerdict(found.Load(), werr, scannedAll)
+	if cacheable && c.blobCache != nil {
+		c.blobCache.set(key, in)
 	}
-	if werr != nil {
-		return false, werr
-	}
-	if c.blobCache != nil {
-		c.blobCache.set(key, false)
-	}
-	return false, nil
+	return in, err
 }
