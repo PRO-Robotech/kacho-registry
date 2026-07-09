@@ -38,8 +38,10 @@ const zotFanout = 8
 // вызывающим). ImageList (теги для tag_count/artifact-типов/last-pull) запрашивается
 // ТОЛЬКО для окна, распараллелен zotFanout. Имя repo — БЕЗ namespace-префикса. Repo с
 // НУЛЁМ тегов (все теги удалены, GC ещё не снял запись) — скрывается. Возвращает
-// окно (отсортировано ASC) + next-token (по сырым именам окна, ghost-скрытие/authz-
-// фильтр handler'а страницу не «удлиняют» — все repos достижимы пагинацией).
+// окно (отсортировано ASC) + next-token — ОПАКОВЫЙ offset, НЕ имя граничного репо:
+// handler фильтрует per-repo v_list ПОСЛЕ окна, поэтому name-курсор echo'ил бы имя
+// скрытого репо (existence-oracle). Offset скрытие/фильтр страницу не «удлиняют» — все
+// разрешённые repos достижимы пагинацией даже через полностью-скрытые окна.
 func (c *Client) ListRepositories(ctx context.Context, q registry.RepoListQuery) ([]*domain.Repository, string, error) {
 	if err := c.ready(); err != nil {
 		return nil, "", err
@@ -61,10 +63,10 @@ func (c *Client) ListRepositories(ctx context.Context, q registry.RepoListQuery)
 	sort.Slice(kept, func(i, j int) bool { return kept[i].Name < kept[j].Name })
 
 	// Окно по (page_size, page_token) ДО ImageList-fan-out — bound per-request нагрузки
-	// к zot. keyOf = имя БЕЗ префикса (курсор байт-совместим с тем, что видит клиент).
-	window, next, err := namepage.Window(kept, func(rs gqlRepoSummary) string {
-		return strings.TrimPrefix(rs.Name, prefix)
-	}, q.PageSize, q.PageToken)
+	// к zot. Курсор — ОПАКОВЫЙ offset (позиция в отсортированном срезе), НЕ имя репо:
+	// per-repo authz-фильтр handler'а применяется ПОСЛЕ окна, поэтому name-курсор
+	// раскрыл бы имя скрытого репо (existence-oracle).
+	window, next, err := namepage.WindowByOffset(kept, q.PageSize, q.PageToken)
 	if err != nil {
 		return nil, "", err
 	}

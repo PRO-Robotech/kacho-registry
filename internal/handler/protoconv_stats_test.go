@@ -5,7 +5,6 @@ package handler
 
 import (
 	"testing"
-	"time"
 
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
@@ -20,16 +19,14 @@ func TestToProtoStats_Nil(t *testing.T) {
 
 // TestToProtoStats_Maps фиксирует полный перенос domain.RegistryStats →
 // registryv1.RegistryStats (Internal-only проекция; путь GetRegistryStats иначе
-// не покрыт). LastGcAt truncate до секунд (api-conventions timestamp-дисциплина).
+// не покрыт).
 func TestToProtoStats_Maps(t *testing.T) {
-	gc := time.Date(2026, 7, 6, 12, 34, 56, 789_000_000, time.UTC)
 	s := &domain.RegistryStats{
 		RegistryID:      "reg-abc",
 		RepositoryCount: 7,
 		TagCount:        42,
 		TotalSizeBytes:  1 << 30,
 		BlobCount:       128,
-		LastGCAt:        gc,
 	}
 
 	got := toProtoStats(s)
@@ -51,21 +48,17 @@ func TestToProtoStats_Maps(t *testing.T) {
 	if got.GetBlobCount() != s.BlobCount {
 		t.Errorf("BlobCount = %d, want %d", got.GetBlobCount(), s.BlobCount)
 	}
-	// truncate до секунд: под-секундная часть отбрасывается.
-	wantGC := gc.Truncate(time.Second)
-	if !got.GetLastGcAt().AsTime().Equal(wantGC) {
-		t.Errorf("LastGcAt = %s, want %s (truncated to second)", got.GetLastGcAt().AsTime(), wantGC)
-	}
 }
 
-// TestToProtoStats_ZeroGCTime — нулевой LastGCAt (GC ещё не запускался) →
-// LastGcAt отсутствует (prototime.Truncate возвращает nil на zero-time).
-func TestToProtoStats_ZeroGCTime(t *testing.T) {
+// TestToProtoStats_LastGcNotPopulated — last_gc_at НЕ заполняется (нет источника
+// GC-времени у zot): proto-поле остаётся unset (честный zero), а не всегда-нулевая
+// колонка. Регресс-лок против повторного добавления vestigial-маппинга.
+func TestToProtoStats_LastGcNotPopulated(t *testing.T) {
 	got := toProtoStats(&domain.RegistryStats{RegistryID: "reg-z"})
 	if got == nil {
 		t.Fatal("toProtoStats returned nil for non-nil input")
 	}
 	if got.GetLastGcAt() != nil {
-		t.Errorf("LastGcAt = %v, want nil for zero GC time", got.GetLastGcAt())
+		t.Errorf("LastGcAt = %v, want nil (no GC-time source)", got.GetLastGcAt())
 	}
 }

@@ -5,6 +5,7 @@ package dataplane
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -329,6 +330,12 @@ const catalogAuthzConcurrency = 8
 // Синтезирует отфильтрованный ответ, а не проксирует сырой каталог. OCI-пагинация
 // `n=`/`last=` ограничивает окно ДО authz-цикла (bounded Check-count), Check'и окна —
 // bounded-concurrency; при усечении отдаётся Link: rel="next".
+//
+// Курсор `last=` — ОПАКОВЫЙ offset (base64 позиции в отсортированном каталоге), а НЕ
+// сырое имя репо: echo pageSize-го имени окна раскрыл бы вызывающему имена чужих репо
+// (за пределами его per-repo v_list) — existence-oracle. Offset ничего не именует, но
+// доводит пагинацию до всех разрешённых репо даже через полностью-отфильтрованные окна
+// (OCI-клиент следует URL из Link как есть, поэтому непрозрачный `last` совместим).
 func (h *Handler) serveCatalog(w http.ResponseWriter, r *http.Request, subject string) {
 	if r.Method != http.MethodGet {
 		writeNotFound(w)
@@ -341,7 +348,7 @@ func (h *Handler) serveCatalog(w http.ResponseWriter, r *http.Request, subject s
 	}
 
 	pageSize := parseCatalogPageSize(r.URL.Query().Get("n"))
-	window, more := catalogWindow(names, r.URL.Query().Get("last"), pageSize)
+	window, nextOffset, more := catalogWindow(names, r.URL.Query().Get("last"), pageSize)
 
 	// Bounded-concurrency authz-фильтр окна; результат собирается в порядке имён
 	// (indexed slice) — детерминированная сортировка сохраняется.
@@ -372,10 +379,9 @@ func (h *Handler) serveCatalog(w http.ResponseWriter, r *http.Request, subject s
 	}
 
 	if more && len(window) > 0 {
-		last := window[len(window)-1]
 		next := "/v2/_catalog?" + url.Values{
 			"n":    []string{strconv.Itoa(pageSize)},
-			"last": []string{last},
+			"last": []string{encodeCatalogCursor(nextOffset)},
 		}.Encode()
 		w.Header().Set("Link", `<`+next+`>; rel="next"`)
 	}
@@ -398,22 +404,48 @@ func parseCatalogPageSize(n string) int {
 	return v
 }
 
-// catalogWindow выделяет страницу из отсортированных имён: пропускает имена ≤ last
-// (курсор предыдущей страницы, OCI `last=`), берёт до pageSize. more=true, если за
-// окном остались ещё имена (клиенту нужен Link: rel="next"). names ожидается
-// отсортированным (CatalogRepoNames сортирует).
-func catalogWindow(names []string, last string, pageSize int) (window []string, more bool) {
-	start := 0
-	if last != "" {
-		for start < len(names) && names[start] <= last {
-			start++
-		}
+// catalogWindow выделяет страницу из отсортированных имён по ОПАКОВОМУ offset-курсору
+// (last — base64 позиции, не имя репо: см. serveCatalog — echo сырого имени течёт
+// existence-oracle). Берёт до pageSize имён от offset; nextOffset — позиция после
+// окна (следующий курсор), more=true, если за окном остались имена. Пустой/битый/
+// вне-диапазона курсор → clamp в [0..len] (fail-safe рестарт, без leak/паники). names
+// ожидается отсортированным (CatalogRepoNames сортирует).
+func catalogWindow(names []string, last string, pageSize int) (window []string, nextOffset int, more bool) {
+	start := decodeCatalogCursor(last)
+	if start < 0 {
+		start = 0
+	}
+	if start > len(names) {
+		start = len(names)
 	}
 	rest := names[start:]
 	if len(rest) > pageSize {
-		return rest[:pageSize], true
+		return rest[:pageSize], start + pageSize, true
 	}
-	return rest, false
+	return rest, start + len(rest), false
+}
+
+// encodeCatalogCursor кодирует offset в опаковый base64-курсор (`last=`). Не несёт
+// имён репо — только позицию в отсортированном каталоге.
+func encodeCatalogCursor(offset int) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
+}
+
+// decodeCatalogCursor разбирает опаковый offset-курсор. Пусто/битьё → 0 (рестарт с
+// начала — безопасно: leak'а нет, лишь повторный листинг).
+func decodeCatalogCursor(cursor string) int {
+	if cursor == "" {
+		return 0
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0
+	}
+	off, err := strconv.Atoi(string(raw))
+	if err != nil {
+		return 0
+	}
+	return off
 }
 
 // check — single per-request Check против repo/namespace-объекта. allow → true

@@ -11,6 +11,7 @@
 package zot_test
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -419,6 +420,33 @@ func TestZot_ListRepositories_PaginatedBoundsImageListFanout(t *testing.T) {
 	require.Len(t, repos2, 5)
 	require.Equal(t, int64(5), fz.imageListCalls.Load(), "вторая страница — тоже только окно")
 	require.Equal(t, "repo-1005", repos2[0].Name, "продолжение строго после курсора первой страницы")
+}
+
+// REG-22 cursor-leak — next-token ListRepositories обязан быть ОПАКОВЫМ offset, а НЕ
+// сырым именем репо на границе окна. handler фильтрует per-repo v_list ПОСЛЕ окна:
+// name-курсор раскрыл бы вызывающему имя скрытого (отфильтрованного) репо — existence-
+// oracle (REG-22/23 per-repo hiding). Регресс-гейт против утечки имён через курсор.
+func TestZot_REG22_ListRepositories_NextTokenIsOpaqueOffset(t *testing.T) {
+	fz := newFakeZot()
+	for _, n := range []string{"reg-A/alpha", "reg-A/bravo", "reg-A/charlie"} {
+		fz.addGqlTag(n, containerTag("v1", "sha256:d", 100, "linux", "amd64"))
+	}
+	srv := fz.server(t)
+	cli := zotclient.New(srv.URL)
+
+	repos, next, err := cli.ListRepositories(t.Context(),
+		registry.RepoListQuery{RegistryID: "reg-A", PageSize: 1})
+	require.NoError(t, err)
+	require.Len(t, repos, 1)
+	require.NotEmpty(t, next, "есть ещё репо → next-token")
+
+	raw, derr := base64.StdEncoding.DecodeString(next)
+	require.NoError(t, derr, "token — base64")
+	// Курсор — опаковый offset (целое), не имя граничного репо: name-курсор течёт
+	// existence-oracle после per-repo фильтра handler'а.
+	_, aerr := strconv.Atoi(string(raw))
+	require.NoError(t, aerr, "cursor must be an opaque offset, not a raw repo name (leak)")
+	require.NotContains(t, string(raw), "alpha", "cursor must not echo a raw repo name")
 }
 
 // REG-22 — ListRepositories агрегирует размер/last-update/download-count из GlobalSearch,

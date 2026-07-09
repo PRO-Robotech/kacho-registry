@@ -73,9 +73,11 @@ func manifestHasDigest(mb manifestBody, digest string) bool {
 // перебирает теги repo (bounded-concurrency fan-out, cap blobScopeConcurrency),
 // читает манифесты, ищет digest. Чужой content-addressable блоб (принадлежит
 // манифесту другого repo) → false. Найден → перестаём планировать новые fetch'и
-// (early-exit). Решение мемоизируется коротким TTL-кэшем (blob_scope_cache.go) —
-// повторный blob-GET того же слоя не пере-сканирует теги. zot недоступен →
-// ErrUnavailable (fail-closed).
+// (early-exit) и возвращаем true, даже если параллельный fetch соседнего тега блипнул
+// ErrUnavailable (positive-hit приоритетнее — ответ известен). Решение мемоизируется
+// коротким TTL-кэшем (blob_scope_cache.go) — повторный blob-GET того же слоя не
+// пере-сканирует теги. Блоб НЕ найден и zot недоступен → ErrUnavailable (fail-closed:
+// ответ действительно неизвестен).
 func (c *Client) BlobInRepo(ctx context.Context, registryID, repo, digest string) (bool, error) {
 	if err := c.ready(); err != nil {
 		return false, err
@@ -119,12 +121,22 @@ func (c *Client) BlobInRepo(ctx context.Context, registryID, repo, digest string
 			return nil
 		})
 	}
-	if err := g.Wait(); err != nil {
-		return false, err
+	werr := g.Wait()
+	// Positive-hit приоритетнее транзиентного сбоя соседа: если блоб найден, ответ ИЗВЕСТЕН —
+	// возвращаем true, даже если параллельный manifest-fetch блипнул ErrUnavailable. Fail-closed
+	// корректен ТОЛЬКО когда ответ действительно неизвестен (found=false), иначе авторизованный
+	// pull присутствующего слоя ложно упал бы в 503/deny.
+	if found.Load() {
+		if c.blobCache != nil {
+			c.blobCache.set(key, true)
+		}
+		return true, nil
 	}
-	in := found.Load()
+	if werr != nil {
+		return false, werr
+	}
 	if c.blobCache != nil {
-		c.blobCache.set(key, in)
+		c.blobCache.set(key, false)
 	}
-	return in, nil
+	return false, nil
 }
