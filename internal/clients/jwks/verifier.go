@@ -186,10 +186,12 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (string, error) {
 // валидным без ограничения TTL. Рефетч удался, но kid по-прежнему нет → отказ.
 //
 // Троттл (CWE-770/400): kid берётся из attacker-controlled JOSE-header ДО верификации
-// подписи, поэтому рефетч по неизвестному/протухшему kid'у ограничен одним на окно
-// minRefresh. Слот рефетча захватывается под lock'ом ДО отпускания его на outbound-GET,
-// поэтому конкурентные промахи (флуд случайных kid) коллапсируют в один фетч (не
-// thundering herd), а не в N одновременных исходящих HTTPS-соединений.
+// подписи, поэтому рефетч ограничен одним на окно minRefresh. Слот рефетча захватывается
+// под lock'ом ДО отпускания его на outbound-GET, поэтому конкурентные промахи (флуд
+// случайных kid) коллапсируют в один фетч (не thundering herd), а не в N одновременных
+// исходящих HTTPS-соединений. Троттлятся только по-прежнему-НЕИЗВЕСТНЫЕ kid'ы: если kid
+// уже в кэше (протух по TTL, но известен), при активном троттл-окне он обслуживается из
+// кэша — транзиентный сбой рефетча не блокирует валидные токены на всё окно minRefresh.
 func (v *Verifier) keyFor(ctx context.Context, kid string) (crypto.PublicKey, error) {
 	v.mu.Lock()
 	now := v.now()
@@ -205,6 +207,15 @@ func (v *Verifier) keyFor(ctx context.Context, kid string) (crypto.PublicKey, er
 	// throttled-fail, а не собственный outbound-фетч.
 	if now.Sub(v.lastRefresh) < v.minRefresh {
 		v.mu.Unlock()
+		// Троттл — DoS-guard против флуда attacker-controlled НЕИЗВЕСТНЫХ kid'ов (каждый
+		// форсил бы outbound-GET). Известный (уже в кэше) kid — из конечного набора
+		// реальных ключей, для амплификации непригоден: при активном троттл-окне (недавний
+		// рефетч, в т.ч. транзиентно неудачный) отдаём кэшированный ключ, а не блокируем
+		// весь набор известных kid'ов как «unknown kid». Иначе один сетевой blip рефетча
+		// амплифицировался бы в minRefresh-окно тотального auth-отказа для валидных токенов.
+		if ok {
+			return key, nil
+		}
 		return nil, fmt.Errorf("unknown kid %q", kid)
 	}
 	v.lastRefresh = now

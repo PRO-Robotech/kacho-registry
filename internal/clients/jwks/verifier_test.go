@@ -467,6 +467,39 @@ func TestJWKS_Verify_StaleCacheJWKSDown_FailClosed(t *testing.T) {
 	require.Error(t, err, "stale cache must not be served after TTL when JWKS is down")
 }
 
+// SEC/avail (audit-r1, CWE-770) — транзиентный сбой рефетча JWKS не должен блокировать
+// уже-закэшированные ИЗВЕСТНЫЕ kid'ы на всё окно minRefresh. Троттл существует против
+// флуда attacker-controlled НЕИЗВЕСТНЫХ kid'ов (каждый форсил бы outbound-GET); известный
+// kid — из конечного набора реальных ключей, для амплификации непригоден и обязан
+// обслуживаться из кэша, пока троттл-окно активно. Иначе один сетевой blip рефетча
+// амплифицируется в minRefresh-окно тотального auth-отказа для валидных токенов.
+func TestJWKS_Verify_KnownKidServedFromCache_WhileRefetchThrottled(t *testing.T) {
+	js := newJWKSServer(t, "kid-rsa") // Cache-Control: max-age=300
+	v := New(js.srv.URL, testAud, testHydraIss)
+	clock := time.Now()
+	v.now = func() time.Time { return clock }
+
+	tok := js.mintRS256(t, "kid-rsa", hydraClaims("cid-ci", clock.Add(24*time.Hour)))
+	sub, err := v.Verify(context.Background(), tok)
+	require.NoError(t, err)
+	require.Equal(t, "cid-ci", sub)
+	require.Equal(t, int32(1), js.fetch.Load())
+
+	// TTL кэша (max-age=300) истёк → следующий Verify инициирует рефетч. JWKS ложится
+	// (транзиентный blip): этот один рефетч-запрос падает fail-closed и захватывает
+	// троттл-слот (lastRefresh = now).
+	clock = clock.Add(6 * time.Minute)
+	js.srv.Close()
+	_, err = v.Verify(context.Background(), tok)
+	require.Error(t, err, "the refetch-triggering request fails closed while JWKS is down")
+
+	// В пределах окна minRefresh после неудачного рефетча повторный Verify того же
+	// ИЗВЕСТНОГО kid'а обязан обслужиться из кэша, а не быть отклонён как «unknown kid».
+	sub, err = v.Verify(context.Background(), tok)
+	require.NoError(t, err, "known cached kid must be served during the refetch throttle window")
+	require.Equal(t, "cid-ci", sub)
+}
+
 // SEC (CWE-613) — сервер JWKS отдаёт непомерный Cache-Control max-age → verifier
 // НЕ должен адоптировать его дословно: TTL кэша клампится до maxTTL, иначе
 // ротированный/отозванный ключ оставался бы валидным годами (нарушение fail-closed

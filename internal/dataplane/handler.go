@@ -252,7 +252,9 @@ func (h *Handler) resolveRegistryProject(ctx context.Context, registryID string)
 }
 
 // serveMount — cross-repo blob mount exfil-guard: ДВА Check — v_get на src-repo И
-// v_create на dst-repo. v_get(src)=deny → mount 404 (нельзя вытащить чужой блоб).
+// write-verb на dst-repo. v_get(src)=deny → mount 404 (нельзя вытащить чужой блоб).
+// dst-verb зеркалит servePush: существующий dst-repo → v_update@registry_repository,
+// новый → v_create@registry_registry (право создавать repo в namespace).
 func (h *Handler) serveMount(w http.ResponseWriter, r *http.Request, p parsed, subject, from string) {
 	if strings.Contains(from, "..") {
 		writeError(w, http.StatusBadRequest, "NAME_INVALID", "malformed mount source")
@@ -264,7 +266,21 @@ func (h *Handler) serveMount(w http.ResponseWriter, r *http.Request, p parsed, s
 		h.failClosed(w, "mount src check failed", err)
 		return
 	}
-	allowedDst, err := h.checkAllowed(ctx, subject, relVCreate, repositoryObject(p.registryID, p.repo))
+	// dst verb-map зеркалит servePush: mount пишет блоб в dst-repo, поэтому существующий
+	// repo гейтится v_update@registry_repository, новый — v_create@registry_registry.
+	// Хардкод v_create@registry_repository расходился бы с push-путём (verb-mismatch):
+	// namespace-creator не прошёл бы mount в новый repo, а v_create-only принципал писал
+	// бы в существующий repo мимо v_update.
+	dstExists, err := h.backend.RepoExists(ctx, p.registryID, p.repo)
+	if err != nil {
+		h.failClosed(w, "mount dst existence check failed", err)
+		return
+	}
+	dstRelation, dstObject := relVCreate, registryObject(p.registryID)
+	if dstExists {
+		dstRelation, dstObject = relVUpdate, repositoryObject(p.registryID, p.repo)
+	}
+	allowedDst, err := h.checkAllowed(ctx, subject, dstRelation, dstObject)
 	if err != nil {
 		h.failClosed(w, "mount dst check failed", err)
 		return
