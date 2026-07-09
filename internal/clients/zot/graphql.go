@@ -337,7 +337,16 @@ func (c *Client) gqlQuery(ctx context.Context, query string, out any) error {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return failClosed("graphql non-2xx", "status", resp.StatusCode)
 	}
-	return decodeGraphQL(resp.Body, maxGraphQLBytes, out)
+	if derr := decodeGraphQL(resp.Body, maxGraphQLBytes, out); derr != nil {
+		return derr
+	}
+	// decodeGraphQL останавливается на первом top-level object под LimitReader, не доходя
+	// до io.EOF — без дренажа net/http не вернёт persistent-соединение в пул на Body.Close
+	// (свежий TCP+TLS handshake на каждый ListRepositories/ListTags-вызов к zot на hot
+	// projection-пути, плюс per-repo fan-out). Дренируем, как в non-2xx-ветке выше и в
+	// httpclient.go do()/getManifest, чтобы сохранить keepalive.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }
 
 // decodeGraphQL декодирует search-ext GraphQL envelope из body под io.LimitReader(limit)
