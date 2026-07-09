@@ -130,6 +130,10 @@ func (c *Client) getManifest(ctx context.Context, fullRepo, ref string) (manifes
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return manifestBody{}, err
 	}
+	// decodeManifest останавливается на первом значении под LimitReader, не доходя до
+	// io.EOF — дренируем остаток тела, чтобы net/http вернул соединение в пул
+	// (keepalive к zot на hot manifest-fan-out пути), как в error-ветках выше.
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return mb, nil
 }
 
@@ -161,6 +165,11 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ou
 		if derr := json.NewDecoder(resp.Body).Decode(out); derr != nil {
 			return failClosed("decode", "method", method, "path", path, "err", derr)
 		}
+		// json.Decoder останавливается на первом значении, не доходя до io.EOF —
+		// без дренажа net/http не вернёт persistent-соединение в пул на Body.Close
+		// (свежий TCP+TLS handshake на каждый introspection-вызов к zot). Дренируем,
+		// как в non-2xx/404-ветках выше, чтобы сохранить keepalive.
+		_, _ = io.Copy(io.Discard, resp.Body)
 	} else {
 		_, _ = io.Copy(io.Discard, resp.Body)
 	}
