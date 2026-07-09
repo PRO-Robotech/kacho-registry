@@ -11,6 +11,7 @@ package handler
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -20,6 +21,75 @@ import (
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 	regerrors "github.com/PRO-Robotech/kacho-registry/internal/errors"
 )
+
+// barrierAuthorizer — Check блокируется до тех пор, пока в barrier не соберётся `want`
+// одновременных вызовов; затем все разблокируются. Если filterRegistries вызывает
+// Check последовательно, второй вызов никогда не стартует → barrier не наберётся →
+// filterRegistries зависнет (тест ловит по таймауту). Доказывает bounded-concurrency
+// fan-out (паритет с filterRepos/filterOperations).
+type barrierAuthorizer struct {
+	want    int
+	arrived chan struct{}
+	release chan struct{}
+}
+
+func newBarrierAuthorizer(want int) *barrierAuthorizer {
+	return &barrierAuthorizer{want: want, arrived: make(chan struct{}, want), release: make(chan struct{})}
+}
+
+func (b *barrierAuthorizer) Check(_ context.Context, _, _, _ string) (bool, error) {
+	b.arrived <- struct{}{}
+	if len(b.arrived) == b.want {
+		close(b.release) // достигнут порог одновременности → отпускаем всех
+	}
+	<-b.release
+	return true, nil
+}
+
+// REG-06 concurrency — filterRegistries фанит per-registry Check bounded-concurrency
+// (как filterRepos), а не последовательно: barrier требует 2 одновременных Check →
+// последовательная реализация зависла бы (второй Check не стартовал бы, пока первый
+// блокирован). Тест проходит только при параллельном fan-out.
+func TestRepoAuthz_REG06_FilterRegistries_Concurrent(t *testing.T) {
+	az := newBarrierAuthorizer(2)
+	ra := newRepoAuthz(az)
+	regs := []*domain.Registry{
+		{ID: regA, ProjectID: "prj-P", Name: "team-a", Status: domain.RegistryStatusActive},
+		{ID: regB, ProjectID: "prj-P", Name: "team-b", Status: domain.RegistryStatusActive},
+	}
+	done := make(chan struct{})
+	var got []*domain.Registry
+	var ferr error
+	go func() {
+		got, ferr = ra.filterRegistries(carolCtx(), regs)
+		close(done)
+	}()
+	select {
+	case <-done:
+		require.NoError(t, ferr)
+		require.Len(t, got, 2, "оба реестра allow → оба видны")
+	case <-time.After(2 * time.Second):
+		t.Fatal("filterRegistries не фанит Check concurrently (barrier не набрался) — последовательная реализация")
+	}
+}
+
+// REG-06 order — row-filter сохраняет входной порядок реестров (детерминизм после
+// параллельного fan-out): allow всех → выход в том же порядке, что вход.
+func TestRepoAuthz_REG06_FilterRegistries_PreservesOrder(t *testing.T) {
+	az := &recordingAuthorizer{allow: map[string]bool{
+		registryObjectRef(regA): true,
+		registryObjectRef(regB): true,
+	}}
+	regs := []*domain.Registry{
+		{ID: regA, ProjectID: "prj-P", Name: "team-a", Status: domain.RegistryStatusActive},
+		{ID: regB, ProjectID: "prj-P", Name: "team-b", Status: domain.RegistryStatusActive},
+	}
+	got, err := newRepoAuthz(az).filterRegistries(carolCtx(), regs)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, regA, got[0].ID)
+	require.Equal(t, regB, got[1].ID)
+}
 
 // listReader — фейк RegistryReader, возвращающий заранее заданный набор реестров
 // (сервер-side курсор эмулируется полем next).

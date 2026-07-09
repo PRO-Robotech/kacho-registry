@@ -113,18 +113,36 @@ func (a repoAuthz) checkRepo(ctx context.Context, registryID, repository, relati
 // registry_registry:<id> которых subject имеет v_list. non-member → пустой список
 // (200+empty, НЕ 403 — List не гейтится per-object Check). breakglass → все;
 // az-error → UNAVAILABLE (не отдаём нефильтрованный список — no-leak).
+//
+// Fan-out ограничен: сами Check выполняются bounded-concurrency (repoAuthzConcurrency)
+// — паритет с filterRepos/filterOperations (List latency не масштабируется линейно по
+// числу реестров страницы). Результат детерминирован (indexed slice сохраняет входной
+// порядок).
 func (a repoAuthz) filterRegistries(ctx context.Context, regs []*domain.Registry) ([]*domain.Registry, error) {
 	if a.az == nil {
 		return regs, nil
 	}
 	subject := subjectFromContext(ctx)
+	allowed := make([]bool, len(regs))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(repoAuthzConcurrency)
+	for i, r := range regs {
+		i, r := i, r
+		g.Go(func() error {
+			ok, err := a.az.Check(gctx, subject, relationVList, registryObjectRef(r.ID))
+			if err != nil {
+				return err
+			}
+			allowed[i] = ok
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, errAuthzUnavailable()
+	}
 	out := make([]*domain.Registry, 0, len(regs))
-	for _, r := range regs {
-		allowed, err := a.az.Check(ctx, subject, relationVList, registryObjectRef(r.ID))
-		if err != nil {
-			return nil, errAuthzUnavailable()
-		}
-		if allowed {
+	for i, r := range regs {
+		if allowed[i] {
 			out = append(out, r)
 		}
 	}
