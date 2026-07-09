@@ -500,7 +500,8 @@ func TestDataplane_REG20_CrossRepoMount_ExfilGuard(t *testing.T) {
 		"v_create registry_registry:reg-A":    true,
 	}}
 	fwAllow := &fakeForwarder{status: 201}
-	hAllow := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azAllow, &fakeBackend{}, fwAllow, &fakeRepoReg{})
+	beAllow := &fakeBackend{blobs: map[string]bool{"reg-A/src|sha256:x": true}} // digest — член src-repo (REG-37)
+	hAllow := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azAllow, beAllow, fwAllow, &fakeRepoReg{})
 	require.Equal(t, 201, doReq(hAllow, http.MethodPost, "/v2/reg-A/dst/blobs/uploads/?mount=sha256:x&from=reg-A/src", true).Code)
 	require.Equal(t, 1, fwAllow.count())
 }
@@ -546,7 +547,8 @@ func TestDataplane_REG20_CrossRegistryMount_TwoChecks(t *testing.T) {
 		"v_create registry_registry:reg-A":    true,
 	}}
 	fw := &fakeForwarder{status: 201}
-	h := newTestHandler(&fakeVerifier{subject: "sva-ci"}, az, &fakeBackend{}, fw, &fakeRepoReg{})
+	beMember := &fakeBackend{blobs: map[string]bool{"reg-B/src|sha256:x": true}} // digest — член src-repo (REG-37)
+	h := newTestHandler(&fakeVerifier{subject: "sva-ci"}, az, beMember, fw, &fakeRepoReg{})
 	rec := doReq(h, http.MethodPost, "/v2/reg-A/dst/blobs/uploads/?mount=sha256:x&from=reg-B/src", true)
 	require.Equal(t, 201, rec.Code)
 	require.Equal(t, 1, fw.count())
@@ -580,14 +582,18 @@ func TestDataplane_REG20_MountDst_VerbMapMirrorsPush(t *testing.T) {
 		"v_create registry_registry:reg-A":    true,
 	}}
 	fwNew := &fakeForwarder{status: 201}
-	hNew := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azNew, &fakeBackend{}, fwNew, &fakeRepoReg{})
+	beNew := &fakeBackend{blobs: map[string]bool{"reg-A/src|sha256:x": true}} // digest — член src-repo (REG-37)
+	hNew := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azNew, beNew, fwNew, &fakeRepoReg{})
 	require.Equal(t, 201, doReq(hNew, http.MethodPost, mountURL, true).Code)
 	require.Equal(t, 1, fwNew.count(), "namespace-creator mounts into a brand-new dst repo")
 	require.Contains(t, azNew.checkedObjects(),
 		checkCall{"service_account:sva-ci", "v_create", "registry_registry:reg-A"})
 
 	// dst — СУЩЕСТВУЮЩИЙ repo: dst-Check должен быть v_update@registry_repository:reg-A/dst.
-	beExisting := &fakeBackend{exists: map[string]bool{"reg-A/dst": true}}
+	beExisting := &fakeBackend{
+		exists: map[string]bool{"reg-A/dst": true},
+		blobs:  map[string]bool{"reg-A/src|sha256:x": true}, // digest — член src-repo (REG-37)
+	}
 	azUpd := &fakeAuthz{allow: map[string]bool{
 		"v_get registry_repository:reg-A/src":    true,
 		"v_update registry_repository:reg-A/dst": true,
@@ -610,6 +616,32 @@ func TestDataplane_REG20_MountDst_VerbMapMirrorsPush(t *testing.T) {
 	hMismatch := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azMismatch, beExisting, fwMismatch, &fakeRepoReg{})
 	require.Equal(t, http.StatusNotFound, doReq(hMismatch, http.MethodPost, mountURL, true).Code)
 	require.Equal(t, 0, fwMismatch.count(), "v_create-only principal cannot write to an existing repo via mount")
+}
+
+// REG-37 mount blob-scope — cross-repo mount обязан проверять, что монтируемый digest
+// ДЕЙСТВИТЕЛЬНО входит в src-repo (как serveBlob для GET/HEAD): zot не изолирует блобы
+// по repo (content-addressable глобальны), поэтому v_get(src)+v_update(dst) НЕ доказывает
+// членство digest'а в src. Без BlobInRepo(from-reg, from-repo, mount-digest) атакующий с
+// легальным доступом к своим reg-A/src и reg-A/dst смонтировал бы чужой глобальный блоб.
+func TestDataplane_REG37_MountBlobScope_NonMember_404(t *testing.T) {
+	const mountURL = "/v2/reg-A/dst/blobs/uploads/?mount=sha256:victim&from=reg-A/src"
+	// Оба Check allow, но digest sha256:victim НЕ член reg-A/src (blobs пуст) → 404.
+	az := &fakeAuthz{allow: map[string]bool{
+		"v_get registry_repository:reg-A/src": true,
+		"v_create registry_registry:reg-A":    true,
+	}}
+	fw := &fakeForwarder{status: 201}
+	be := &fakeBackend{} // src-repo не содержит sha256:victim
+	h := newTestHandler(&fakeVerifier{subject: "sva-evil"}, az, be, fw, &fakeRepoReg{})
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodPost, mountURL, true).Code)
+	require.Equal(t, 0, fw.count(), "non-member digest not mounted despite two authz allows")
+
+	// Тот же digest, но реально член src-repo → mount проходит (forward).
+	beMember := &fakeBackend{blobs: map[string]bool{"reg-A/src|sha256:victim": true}}
+	fwOK := &fakeForwarder{status: 201}
+	hOK := newTestHandler(&fakeVerifier{subject: "sva-ci"}, az, beMember, fwOK, &fakeRepoReg{})
+	require.Equal(t, 201, doReq(hOK, http.MethodPost, mountURL, true).Code)
+	require.Equal(t, 1, fwOK.count(), "member digest mounts")
 }
 
 // helper: убеждаемся, что Authorization без "Bearer " схемы → 401.

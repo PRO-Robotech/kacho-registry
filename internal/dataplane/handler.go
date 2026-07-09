@@ -252,7 +252,9 @@ func (h *Handler) resolveRegistryProject(ctx context.Context, registryID string)
 }
 
 // serveMount — cross-repo blob mount exfil-guard: ДВА Check — v_get на src-repo И
-// write-verb на dst-repo. v_get(src)=deny → mount 404 (нельзя вытащить чужой блоб).
+// write-verb на dst-repo — ПЛЮС blob-scope членство digest'а в src-repo (REG-37,
+// как serveBlob). v_get(src)=deny → mount 404 (нельзя вытащить чужой блоб); digest не
+// член src-repo → тоже 404 (zot не изолирует content-addressable блобы по repo).
 // dst-verb зеркалит servePush: существующий dst-repo → v_update@registry_repository,
 // новый → v_create@registry_registry (право создавать repo в namespace).
 func (h *Handler) serveMount(w http.ResponseWriter, r *http.Request, p parsed, subject, from string) {
@@ -287,6 +289,25 @@ func (h *Handler) serveMount(w http.ResponseWriter, r *http.Request, p parsed, s
 	}
 	if !allowedSrc || !allowedDst {
 		writeNotFound(w) // exfil-guard: чужой блоб не монтируется (existence-hiding)
+		return
+	}
+	// REG-37 mount blob-scope: v_get(src) доказывает доступ к src-repo, но zot НЕ
+	// изолирует блобы по repo (content-addressable глобальны) — точно как в serveBlob.
+	// Поэтому дополнительно проверяем, что монтируемый digest реально входит в src-repo;
+	// иначе принципал с легальным доступом к своим src/dst смонтировал бы чужой
+	// глобальный блоб (cross-tenant exfil). non-member → 404 (existence-hiding).
+	fromRegistryID, fromRepo, ok := strings.Cut(from, "/")
+	if !ok {
+		writeNotFound(w) // from без repo-сегмента не адресует реальный блоб
+		return
+	}
+	in, err := h.backend.BlobInRepo(ctx, fromRegistryID, fromRepo, r.URL.Query().Get("mount"))
+	if err != nil {
+		h.failClosed(w, "mount blob scope check failed", err)
+		return
+	}
+	if !in {
+		writeNotFound(w)
 		return
 	}
 	h.forwarder.Forward(w, r)
