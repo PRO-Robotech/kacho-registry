@@ -67,6 +67,9 @@ func toProtoTag(t *domain.Tag) *registryv1.Tag {
 }
 
 // toProtoStats конвертирует domain.RegistryStats → registryv1.RegistryStats.
+// proto-поле last_gc_at НЕ заполняется: у zot нет ad-hoc GC-триггера с меткой времени
+// (TriggerGC — лишь handshake), источника GC-времени нет → поле остаётся unset (честный
+// zero), а не всегда-нулевая колонка, вводящая оператора в заблуждение.
 func toProtoStats(s *domain.RegistryStats) *registryv1.RegistryStats {
 	if s == nil {
 		return nil
@@ -77,7 +80,6 @@ func toProtoStats(s *domain.RegistryStats) *registryv1.RegistryStats {
 		TagCount:        s.TagCount,
 		TotalSizeBytes:  s.TotalSizeBytes,
 		BlobCount:       s.BlobCount,
-		LastGcAt:        prototime.Truncate(s.LastGCAt),
 	}
 }
 

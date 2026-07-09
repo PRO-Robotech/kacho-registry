@@ -10,7 +10,6 @@ package registry_test
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -31,7 +30,6 @@ func TestRegistry_REG38_Stats_HappyPath(t *testing.T) {
 		TagCount:        7,
 		TotalSizeBytes:  4096,
 		BlobCount:       11,
-		LastGCAt:        time.Unix(1700000000, 0).UTC(),
 	}
 	zot := &mockZot{statsResult: want}
 	uc := newUC(&mockRepo{}, zot, &mockIAM{}, newMemOps())
@@ -44,7 +42,6 @@ func TestRegistry_REG38_Stats_HappyPath(t *testing.T) {
 	require.Equal(t, int32(7), got.TagCount)
 	require.Equal(t, int64(4096), got.TotalSizeBytes)
 	require.Equal(t, int64(11), got.BlobCount)
-	require.Equal(t, want.LastGCAt, got.LastGCAt)
 	require.Equal(t, []string{validRegID}, zot.statsCalls, "zot-бэкенд получил ровно наш registryID")
 }
 

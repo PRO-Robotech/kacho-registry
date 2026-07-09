@@ -120,9 +120,11 @@ func (h *RegistryHandler) Delete(ctx context.Context, req *registryv1.DeleteRegi
 // → fan-out только для окна), иначе дешёвый ListRepositories(page_size=1) развернулся
 // бы в N per-repo iam.Check + N zot round-trip по ВСЕЙ проекции namespace (N не
 // контролируется вызывающим; паритет с data-plane serveCatalog-гейтом). Handler лишь
-// довершает bounded-concurrency authz-фильтр уже-ограниченного окна. next-token
-// (по сырым именам окна) сохраняется, поэтому все разрешённые репо достижимы
-// пагинацией, даже если ghost-скрытие/фильтр схлопнули отдельную страницу.
+// довершает bounded-concurrency authz-фильтр уже-ограниченного окна. next-token —
+// ОПАКОВЫЙ offset (не имя граничного репо): per-repo фильтр применяется ПОСЛЕ окна,
+// поэтому name-курсор раскрыл бы имя скрытого репо (existence-oracle). Offset
+// сохраняется verbatim, поэтому все разрешённые репо достижимы пагинацией, даже если
+// ghost-скрытие/фильтр схлопнули отдельную страницу.
 func (h *RegistryHandler) ListRepositories(ctx context.Context, req *registryv1.ListRepositoriesRequest) (*registryv1.ListRepositoriesResponse, error) {
 	registryID := req.GetRegistryId()
 	if err := registry.ValidateRegistryID(registryID); err != nil {

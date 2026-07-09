@@ -132,6 +132,54 @@ func TestBlobInRepo_BoundsFanoutConcurrency(t *testing.T) {
 	}
 }
 
+// TestBlobInRepo_FoundSurvivesSiblingError — positive blob-hit НЕ должен теряться из-за
+// транзиентного сбоя соседнего манифеста. Один тег несёт digest (found=true), соседний
+// отдаёт 500 (→ ErrUnavailable). Авторизованный docker-pull присутствующего слоя обязан
+// вернуть (true, nil), а не fail-closed (false, ErrUnavailable): fail-closed корректен
+// ТОЛЬКО когда ответ действительно неизвестен, а здесь блоб найден. Ordering: bad-хендлер
+// ждёт, пока good отдан клиенту, чтобы found.Store гарантированно случился до ошибки.
+func TestBlobInRepo_FoundSurvivesSiblingError(t *testing.T) {
+	const target = "sha256:hit"
+	goodServed := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case strings.HasSuffix(path, "/tags/list"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "reg-A/app", "tags": []string{"good", "zbad"}})
+		case strings.Contains(path, "/manifests/good"):
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+				"config": map[string]any{"mediaType": "application/vnd.oci.image.config.v1+json", "size": 1, "digest": target},
+				"layers": []any{},
+			})
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			once.Do(func() { close(goodServed) })
+		case strings.Contains(path, "/manifests/zbad"):
+			// Транзиентный blip соседа — но только ПОСЛЕ того как good-манифест ушёл
+			// клиенту (+запас на чтение/decode), иначе errgroup-cancel гонял бы чтение good.
+			<-goodServed
+			time.Sleep(30 * time.Millisecond)
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli := New(srv.URL)
+	in, err := cli.BlobInRepo(context.Background(), "reg-A", "app", target)
+	if err != nil {
+		t.Fatalf("BlobInRepo returned error despite blob found: %v", err)
+	}
+	if !in {
+		t.Fatal("blob present in good manifest must be reported found (true), not lost to sibling error")
+	}
+}
+
 // TestBlobInRepo_EarlyExitOnMatch — найденный блоб коротит скан: планируется НЕ весь
 // набор тегов (реальный блоб не форсит чтение всех манифестов).
 func TestBlobInRepo_EarlyExitOnMatch(t *testing.T) {

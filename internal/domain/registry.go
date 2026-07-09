@@ -144,5 +144,4 @@ type RegistryStats struct {
 	TagCount        int32
 	TotalSizeBytes  int64
 	BlobCount       int64
-	LastGCAt        time.Time
 }

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -383,7 +384,7 @@ func TestDataplane_REG23_Catalog_PerRepoFilter(t *testing.T) {
 // per-repo authz-Check'ов ОКНОМ страницы ДО authz-цикла: запрос не разворачивается в
 // N последовательных iam.Check по всему кросс-тенантному каталогу. При n=2 из 5 репо
 // проверяется ровно 2, отдаётся ≤2 видимых, а Link-заголовок сигналит следующую
-// страницу (rel="next", cursor last=<последнее имя окна>).
+// страницу (rel="next", cursor last=<опаковый offset, НЕ имя репо>).
 func TestDataplane_REG23_Catalog_PaginationBoundsChecks(t *testing.T) {
 	az := &fakeAuthz{} // allow-all
 	be := &fakeBackend{catalog: []string{"reg-A/a", "reg-A/b", "reg-A/c", "reg-B/x", "reg-B/y"}}
@@ -401,18 +402,20 @@ func TestDataplane_REG23_Catalog_PaginationBoundsChecks(t *testing.T) {
 
 	link := rec.Header().Get("Link")
 	require.Contains(t, link, `rel="next"`, "truncated catalog advertises next page")
-	require.Contains(t, link, "last=reg-A%2Fb", "next cursor = last name of window")
 	require.Contains(t, link, "n=2")
+	// Курсор — опаковый offset (позиция 2), НЕ сырое имя окна (иначе existence-oracle).
+	require.Contains(t, link, "last="+url.QueryEscape(encodeCatalogCursor(2)), "next cursor = opaque offset")
+	require.NotContains(t, link, "reg-A", "cursor must not echo a raw repo name")
 }
 
-// REG-23 pagination cursor — `?n=2&last=reg-A/b` продолжает со следующего имени после
-// курсора (окно = ["reg-A/c","reg-B/x"]); authz-Check только по окну.
+// REG-23 pagination cursor — опаковый offset-курсор (позиция 2) продолжает со
+// следующего имени после окна (window = ["reg-A/c","reg-B/x"]); authz-Check только по окну.
 func TestDataplane_REG23_Catalog_PaginationCursor(t *testing.T) {
 	az := &fakeAuthz{}
 	be := &fakeBackend{catalog: []string{"reg-A/a", "reg-A/b", "reg-A/c", "reg-B/x", "reg-B/y"}}
 	h := newTestHandler(&fakeVerifier{subject: "sva-ci"}, az, be, &fakeForwarder{}, &fakeRepoReg{})
 
-	rec := doReq(h, http.MethodGet, "/v2/_catalog?n=2&last=reg-A/b", true)
+	rec := doReq(h, http.MethodGet, "/v2/_catalog?n=2&last="+url.QueryEscape(encodeCatalogCursor(2)), true)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var body struct {
 		Repositories []string `json:"repositories"`
@@ -420,6 +423,49 @@ func TestDataplane_REG23_Catalog_PaginationCursor(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Equal(t, []string{"reg-A/c", "reg-B/x"}, body.Repositories)
 	require.Len(t, az.checkedObjects(), 2)
+}
+
+// REG-23 pagination cursor-leak — Link `last=` НЕ должен раскрывать сырое имя репо,
+// которое вызывающий не видит (existence-oracle). Каталог целиком чужой на первой
+// странице (n=1): курсор обязан быть опаковым (offset), не именем; и пагинация всё
+// равно доводит до собственного репо вызывающего (reachability на схлопнутых страницах).
+func TestDataplane_REG23_Catalog_CursorDoesNotLeakForeignName(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_list registry_repository:reg-A/mine": true}}
+	be := &fakeBackend{catalog: []string{"reg-B/secret", "reg-B/other", "reg-A/mine"}}
+	h := newTestHandler(&fakeVerifier{subject: "sva-ci"}, az, be, &fakeForwarder{}, &fakeRepoReg{})
+
+	seenVisible := false
+	last := ""
+	for i := 0; i < 10; i++ { // ограничитель против бесконечного цикла в тесте
+		path := "/v2/_catalog?n=1"
+		if last != "" {
+			path += "&last=" + url.QueryEscape(last)
+		}
+		rec := doReq(h, http.MethodGet, path, true)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var body struct {
+			Repositories []string `json:"repositories"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		for _, r := range body.Repositories {
+			require.Equal(t, "reg-A/mine", r, "видимым может быть только собственный репо")
+			seenVisible = true
+		}
+
+		link := rec.Header().Get("Link")
+		if link == "" {
+			break // хвост каталога
+		}
+		// Извлекаем cursor last= из Link и проверяем, что он НЕ несёт сырое чужое имя.
+		u, err := url.Parse(strings.Trim(strings.SplitN(link, ">", 2)[0], "<"))
+		require.NoError(t, err)
+		last = u.Query().Get("last")
+		require.NotContains(t, last, "reg-B", "cursor must not echo foreign raw repo name")
+		require.NotContains(t, last, "secret", "cursor must not echo foreign raw repo name")
+		require.NotContains(t, last, "other", "cursor must not echo foreign raw repo name")
+	}
+	require.True(t, seenVisible, "пагинация обязана доводить до собственного репо через схлопнутые страницы")
 }
 
 // REG-23 pagination last page — окно покрывает хвост каталога → без Link (нет
