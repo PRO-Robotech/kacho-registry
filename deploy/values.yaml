@@ -57,6 +57,14 @@ service:
   grpcPort: 9090
   internalGrpcPort: 9091
   dataplanePort: 8080
+  # Dedicated external VIP for the data-plane (type=LoadBalancer). Cloud LB
+  # (fe3455 Beget/Cilium) assigns a separate external IP for the OCI endpoint.
+  dataplaneLB:
+    enabled: false
+    port: 80              # LB port → container `dataplane` (:8080)
+    loadBalancerIP: ""    # request a specific VIP (empty → provider assigns)
+    loadBalancerClass: "" # e.g. Cilium/io class if the provider needs it
+    annotations: {}
 
 # ─── Postgres (database-per-service, ban #8) — own pg-registry instance ────────
 # host = bitnami release-name + alias (`kacho-umbrella-pg-registry`). Password via
@@ -116,6 +124,8 @@ zot:
     pullPolicy: IfNotPresent
   # OCI blob storage — PVC (volumeClaimTemplates on the StatefulSet).
   storage:
+    # false → ephemeral emptyDir (clusters w/o dynamic StorageClass, e.g. fe3455).
+    persistence: true
     size: 10Gi
     # storageClassName: ""   # empty → cluster default StorageClass
     path: /var/lib/registry

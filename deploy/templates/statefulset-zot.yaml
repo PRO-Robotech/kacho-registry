@@ -106,6 +106,14 @@ spec:
         - name: config
           configMap:
             name: {{ .Values.zot.serviceName }}-config
+        {{- if not .Values.zot.storage.persistence }}
+        # No PVC: clusters without a dynamic StorageClass (e.g. fe3455) use an
+        # ephemeral emptyDir for OCI blobs — mirrors the pg persistence.enabled=false
+        # posture. Blobs are lost on pod restart; acceptable for a greenfield stand.
+        - name: storage
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.zot.storage.persistence }}
   volumeClaimTemplates:
     - metadata:
         name: storage
@@ -117,4 +125,5 @@ spec:
         resources:
           requests:
             storage: {{ .Values.zot.storage.size }}
+  {{- end }}
 {{- end }}
