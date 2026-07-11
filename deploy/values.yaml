@@ -1,12 +1,228 @@
 # Copyright (c) PRO-Robotech
 # SPDX-License-Identifier: BUSL-1.1
+#
+# kacho-registry sub-chart defaults — OCI/Docker registry control-plane + data-plane
+# auth-proxy, over a zot storage backend. Modeled on the kacho-geo sub-chart shape:
+#   - public :9090 (RegistryService Get/List/Create/Update/Delete) + internal :9091
+#     (InternalRegistryService admin — ban #6: never on external TLS);
+#   - goose migrator init-container (kacho-migrator up) → schema kacho_registry;
+#   - data-plane :8080 (Docker Registry v2 / OCI token-auth proxy in front of zot);
+#   - runtime edges registry→iam INTERNAL (:9091 Check + fga-proxy) and registry→iam
+#     PUBLIC (:9090 ProjectService.Get); data-plane verifies Hydra identity-JWT (JWKS);
+#   - own pg-registry Postgres (schema kacho_registry) — the bitnami dependency is
+#     added at the umbrella level (NOT in this chart);
+#   - bundled zot OCI backend StatefulSet + Service + blob-storage PVC.
+#
+# Image tag is a PLACEHOLDER (override per env / umbrella profile). The real
+# docker.io/prorobotech/kacho-registry:<tag> is provisioned at deploy time.
+name: registry
+replicaCount: 1
 
-# Значения Helm для kacho-registry. Полный сервисный sub-chart (Deployment/Service/
-# ConfigMap/Secret/ServiceMonitor + pg-registry + zot StatefulSet + registry.kacho.local
-# ingress) живёт в umbrella-чарте kacho-deploy. Здесь — анкер: базовые порты/образ.
+# ─── Container image (kacho-registry api-server + kacho-migrator, same image) ──
 image:
-  repository: prorobotech/kacho-registry
-  tag: dev
+  repository: docker.io/prorobotech/kacho-registry
+  tag: main-latest
+  # Optional immutable digest pin (sha256:...). When set, overrides tag →
+  # repository@sha256:... for reproducible, tamper-evident deploys.
+  digest: ""
+imagePullPolicy: IfNotPresent
+
+# INFRA sec-hardening — pod- and per-container securityContext floor for the
+# kacho-registry workload (main server + goose migrate init). runAsNonRoot +
+# readOnlyRootFilesystem + drop ALL caps + no privilege escalation + seccomp
+# RuntimeDefault (CIS Kubernetes 5.2 / PSS restricted). A writable emptyDir at
+# /tmp keeps the read-only rootfs from breaking scratch writes.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+
+# ─── Listeners ──────────────────────────────────────────────────────────────
+# grpcPort — public control-plane RegistryService.
+# internalGrpcPort — cluster-internal InternalRegistryService (never external, ban #6).
+# dataplanePort — data-plane OCI auth-proxy HTTP listener (registry.kacho.local).
 service:
   grpcPort: 9090
   internalGrpcPort: 9091
+  dataplanePort: 8080
+  # Dedicated external VIP for the data-plane (type=LoadBalancer). Cloud LB
+  # (fe3455 Beget/Cilium) assigns a separate external IP for the OCI endpoint.
+  dataplaneLB:
+    enabled: false
+    port: 80              # LB port → container `dataplane` (:8080)
+    loadBalancerIP: ""    # request a specific VIP (empty → provider assigns)
+    loadBalancerClass: "" # e.g. Cilium/io class if the provider needs it
+    annotations: {}
+
+# ─── Postgres (database-per-service, ban #8) — own pg-registry instance ────────
+# host = bitnami release-name + alias (`kacho-umbrella-pg-registry`). Password via
+# secretKeyRef (the pg-registry Secret the bitnami subchart provisions at umbrella).
+db:
+  host: kacho-umbrella-pg-registry
+  port: "5432"
+  user: registry
+  name: kacho_registry
+  # Kubernetes Secret carrying the DB password (bitnami pg-registry Secret).
+  existingSecret: kacho-umbrella-pg-registry
+  passwordSecretKey: password
+  # sslmode for the DSN. dev → disable; prod (production-strict) → require|verify-ca|verify-full.
+  sslmode: disable
+  # pgx pool cap (0 = pgx default max(4, NumCPU)).
+  maxConns: "0"
+  # server-side statement_timeout backstop for pooled conns (libpq value). "0"/"" → off.
+  statementTimeout: "30s"
+
+# AUTH_MODE — fail-closed gate: dev | production | production-strict.
+# dev (default) allows insecure/plaintext (local fixtures). production/-strict enforce
+# the serve.go prod-guards (mTLS both listeners + issuer-pinning + dataplane TLS ack +
+# https JWKS). production-strict additionally requires DB sslmode require|verify-*.
+authMode: dev
+
+# ─── registry→iam edges + authz ──────────────────────────────────────────────
+authz:
+  # AUTHZ_IAM_GRPC_ADDR — kacho-iam INTERNAL listener (:9091) for per-RPC Check +
+  # fga-proxy RegisterResource/UnregisterResource. Empty + breakglass=false →
+  # validateSecurityConfig REJECTS start (authz Check required).
+  iamGrpcAddr: "kacho-iam-internal.kacho.svc.cluster.local:9091"
+  # IAM_PROJECT_GRPC_ADDR — kacho-iam PUBLIC listener (:9090) for ProjectService.Get
+  # (existence-validation of project on Create). Separate conn from iamGrpcAddr —
+  # ProjectService is registered ONLY on public :9090.
+  iamProjectGrpcAddr: "kacho-iam.kacho.svc.cluster.local:9090"
+  # Emergency pass-all (dev / break-glass only): bypasses authz Check + mTLS on BOTH
+  # gRPC listeners AND data-plane AuthN+AuthZ. production forbids leaving it on.
+  breakglass: false
+
+# ─── zot OCI storage backend (bundled StatefulSet + Service + PVC) ────────────
+# zot is NEVER publicly reachable — the registry data-plane proxies to it over the
+# cluster-internal Service. The search extension MUST be enabled: the zot adapter
+# reads Repository/Tag projections via zot GraphQL (POST /v2/_zot/ext/search).
+zot:
+  enabled: true
+  # Service name the registry dials + StatefulSet governing service.
+  serviceName: zot
+  port: 5000
+  # ZOT_ADDR the registry uses. Empty → derived http://<serviceName>:<port>.
+  addr: ""
+  image:
+    # Extensions-enabled zot variant (carries the search/GraphQL extension the
+    # adapter requires). ASSUMPTION — confirm the exact tag your stand runs.
+    repository: ghcr.io/project-zot/zot-linux-amd64
+    tag: v2.1.2
+    digest: ""
+    pullPolicy: IfNotPresent
+  # OCI blob storage — PVC (volumeClaimTemplates on the StatefulSet).
+  storage:
+    # false → ephemeral emptyDir (clusters w/o dynamic StorageClass, e.g. fe3455).
+    persistence: true
+    size: 10Gi
+    # storageClassName: ""   # empty → cluster default StorageClass
+    path: /var/lib/registry
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  # zot runs as its own non-root user (image default uid 1000). Storage PVC must be
+  # group-writable (fsGroup). readOnlyRootFilesystem left off — zot writes cache/tmp.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
+
+# ─── data-plane OCI auth-proxy (registry.kacho.local) ─────────────────────────
+hydra:
+  # HYDRA_JWKS_URL — Hydra-public JWKS endpoint verifying data-plane identity-JWT.
+  # production/-strict require https:// (requireSecureJWKSURL).
+  jwksUrl: "http://kacho-umbrella-hydra-public.kacho.svc:4444/.well-known/jwks.json"
+  # HYDRA_ISSUER — expected iss of identity-JWT. production/-strict require it
+  # non-empty (requireIssuerPinned) — else federation-out on any RP sharing JWKS+aud.
+  issuer: ""
+
+# DATAPLANE_TLS_TERMINATED_EXTERNALLY — operator ack that the plaintext data-plane
+# HTTP listener sits behind external TLS termination (ingress/mesh).
+# production/-strict require true (requireDataplaneTLSAck) — bearer identity-JWTs
+# must not transit cleartext. dev ignores it.
+dataplaneTLSTerminatedExternally: false
+
+# TOKEN_REALM — WWW-Authenticate realm docker follows for a Bearer token (kacho-iam token shim).
+tokenRealm: "https://api.kacho.local/iam/token"
+# SERVICE_AUD — expected audience of the identity-JWT + service= in WWW-Authenticate.
+serviceAud: "registry.kacho.local"
+# ENDPOINT_BASE — tenant-facing base OCI endpoint namespace (Registry.endpoint = "<base>/<id>").
+endpointBase: "registry.kacho.local"
+
+# ─── mTLS — per-edge opt-in (cert-manager internal-CA certs) ──────────────────
+# enable=false (default) → NO cert-secret, NO KACHO_REGISTRY_*_MTLS_* env → insecure
+# dev (zero regression). umbrella propagates .mtls.enable + per-edge flags.
+#
+# When enable=true (corelib config.LoadPrefixed("KACHO_REGISTRY")):
+#   server (both listeners): KACHO_REGISTRY_PUBLIC_SERVER_MTLS_* /
+#                            KACHO_REGISTRY_INTERNAL_SERVER_MTLS_*
+#   registry→iam Check+fga:  KACHO_REGISTRY_IAM_AUTHZ_MTLS_*  (:9091, ServerName ∈ SAN)
+#   registry→iam Project:    KACHO_REGISTRY_IAM_PROJECT_MTLS_* (:9090, ServerName ∈ SAN)
+# Both client edges present the SAME client leaf (one clientSecretName); only the
+# verified peer ServerName differs (internal vs public iam dial-host).
+mtls:
+  enable: false
+  # internal-CA leaf issuance (this chart owns its Certificate). client-cert URI-SAN
+  # saName MUST match the IAM module-SA / trusted-principal seed for registry so the
+  # registry→iam edges resolve at the IAM-side trusted-principal map.
+  issuer:
+    name: kacho-internal-ca
+    kind: ClusterIssuer   # cluster-scoped, NOT a namespaced Issuer
+  # server-cert DNS-SANs: BOTH dial-hosts — public Service `registry` (:9090/:8080)
+  # AND internal Service `registry-internal` (:9091). Consumers/api-gateway dialing
+  # the internal listener verify against `registry-internal`.
+  serverHosts: ["registry", "registry-internal"]
+  spiffe:
+    trustDomain: kacho.cloud
+    namespace: kacho
+    saName: kacho-registry
+  leafDuration: 2160h
+  leafRenewBefore: 720h
+  serverSecretName: registry-server-tls
+  clientSecretName: registry-client-tls
+  mountPath: /etc/kacho-registry/tls   # <mp>/server|client/{tls.crt,tls.key,ca.crt}
+  edges:
+    iamAuthz: false     # registry→iam Check + fga-proxy (internal :9091)
+    iamProject: false   # registry→iam ProjectService.Get (public :9090)
+  serverName:
+    iamAuthz: kacho-iam-internal.kacho.svc.cluster.local
+    iamProject: kacho-iam.kacho.svc.cluster.local
+
+# Extra free-form env (KACHO_REGISTRY_*) — merged verbatim onto the server container.
+env: {}
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi

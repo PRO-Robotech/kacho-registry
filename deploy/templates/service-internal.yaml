@@ -1,0 +1,18 @@
+{{/*
+Cluster-internal listener (:9091) — InternalRegistryService admin RPCs. NOT published
+on the api-gateway external TLS endpoint (ban #6); only the api-gateway internal mux +
+admin-tooling + port-forward reach it. Separate Service so the internal :9091 dial-host
+(`registry-internal`) is a distinct SAN/ServerName from the public dial-host (`registry`).
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.name }}-internal
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Values.name }}
+  ports:
+    - name: grpc-internal
+      port: {{ .Values.service.internalGrpcPort }}
+      targetPort: grpc-internal

@@ -1,0 +1,39 @@
+{{/*
+Dedicated external VIP for the registry DATA-PLANE (the OCI Registry-v2 endpoint
+`docker login/push/pull` hits) — a type=LoadBalancer Service so the cloud LB
+(fe3455: Beget + Cilium LB-IPAM) assigns a separate external IP, independent of the
+console (kacho.in-cloud.io / uif-lb). The control-plane gRPC (:9090) stays on the
+in-cluster `registry` Service; only the data-plane :8080 is published here.
+
+The data-plane serves plaintext HTTP and expects TLS terminated externally
+(DATAPLANE_TLS_TERMINATED_EXTERNALLY=true) — front this VIP with the edge TLS
+terminator / configure the LB accordingly. Gated on service.dataplaneLB.enabled.
+*/}}
+{{- if .Values.service.dataplaneLB.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.name }}-lb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Values.name }}
+    app.kubernetes.io/component: registry-dataplane-lb
+  {{- with .Values.service.dataplaneLB.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: LoadBalancer
+  {{- with .Values.service.dataplaneLB.loadBalancerIP }}
+  loadBalancerIP: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.service.dataplaneLB.loadBalancerClass }}
+  loadBalancerClass: {{ . | quote }}
+  {{- end }}
+  selector:
+    app: {{ .Values.name }}
+  ports:
+    - name: dataplane
+      port: {{ .Values.service.dataplaneLB.port | default 80 }}
+      targetPort: dataplane
+{{- end }}
