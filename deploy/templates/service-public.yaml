@@ -1,0 +1,21 @@
+{{/*
+Public listener Service (`registry`) — control-plane RegistryService gRPC (:9090)
+plus the data-plane OCI auth-proxy HTTP port (:8080, registry.kacho.local). Dial-host
+= `registry` (server-cert DNS-SAN, mtls.serverHosts). Consumers and the api-gateway
+public mux dial :9090; the umbrella ingress routes registry.kacho.local → :8080.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Values.name }}
+  ports:
+    - name: grpc
+      port: {{ .Values.service.grpcPort }}
+      targetPort: grpc
+    - name: dataplane
+      port: {{ .Values.service.dataplanePort }}
+      targetPort: dataplane

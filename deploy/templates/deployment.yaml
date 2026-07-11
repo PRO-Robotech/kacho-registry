@@ -1,0 +1,217 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Values.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.name }}
+    spec:
+      # INFRA sec-hardening — pod-level securityContext (runAsNonRoot + seccomp
+      # RuntimeDefault). Per-container floor applied on each container below.
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+        # goose migrator (separate binary, evgeniy §9 K.1 / AP-9) — applies the
+        # kacho_registry schema BEFORE the API server starts. KACHO_REGISTRY_DB_PASSWORD
+        # is required:true → the migrator needs the same DB env as the server.
+        - name: migrate
+          image: "{{ include "registry.image" . }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command: ["/usr/local/bin/kacho-migrator", "up"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          env:
+            - name: KACHO_REGISTRY_DB_HOST
+              value: "{{ .Values.db.host }}"
+            - name: KACHO_REGISTRY_DB_PORT
+              value: "{{ .Values.db.port }}"
+            - name: KACHO_REGISTRY_DB_USER
+              value: "{{ .Values.db.user }}"
+            - name: KACHO_REGISTRY_DB_NAME
+              value: "{{ .Values.db.name }}"
+            - name: KACHO_REGISTRY_DB_SSLMODE
+              value: "{{ .Values.db.sslmode }}"
+            - name: KACHO_REGISTRY_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.db.existingSecret }}
+                  key: {{ .Values.db.passwordSecretKey }}
+      containers:
+        - name: {{ .Values.name }}
+          image: "{{ include "registry.image" . }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command: ["/usr/local/bin/kacho-registry", "serve"]
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.service.grpcPort }}
+            - name: grpc-internal
+              containerPort: {{ .Values.service.internalGrpcPort }}
+            - name: dataplane
+              containerPort: {{ .Values.service.dataplanePort }}
+          env:
+            # ─── Postgres (schema kacho_registry) ───
+            - name: KACHO_REGISTRY_DB_HOST
+              value: "{{ .Values.db.host }}"
+            - name: KACHO_REGISTRY_DB_PORT
+              value: "{{ .Values.db.port }}"
+            - name: KACHO_REGISTRY_DB_USER
+              value: "{{ .Values.db.user }}"
+            - name: KACHO_REGISTRY_DB_NAME
+              value: "{{ .Values.db.name }}"
+            - name: KACHO_REGISTRY_DB_SSLMODE
+              value: "{{ .Values.db.sslmode }}"
+            - name: KACHO_REGISTRY_DB_MAX_CONNS
+              value: "{{ .Values.db.maxConns }}"
+            - name: KACHO_REGISTRY_DB_STATEMENT_TIMEOUT
+              value: "{{ .Values.db.statementTimeout }}"
+            - name: KACHO_REGISTRY_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.db.existingSecret }}
+                  key: {{ .Values.db.passwordSecretKey }}
+            # ─── Listeners ───
+            - name: KACHO_REGISTRY_GRPC_PORT
+              value: "{{ .Values.service.grpcPort }}"
+            - name: KACHO_REGISTRY_INTERNAL_PORT
+              value: "{{ .Values.service.internalGrpcPort }}"
+            - name: KACHO_REGISTRY_DATAPLANE_ADDR
+              value: ":{{ .Values.service.dataplanePort }}"
+            # AuthN fail-closed gate (dev | production | production-strict).
+            - name: KACHO_REGISTRY_AUTH_MODE
+              value: "{{ .Values.authMode }}"
+            # ─── registry→iam edges + authz ───
+            # INTERNAL (:9091): per-RPC Check + fga-proxy RegisterResource/Unregister.
+            - name: KACHO_REGISTRY_AUTHZ_IAM_GRPC_ADDR
+              value: "{{ .Values.authz.iamGrpcAddr }}"
+            # PUBLIC (:9090): ProjectService.Get existence-validation on Create.
+            - name: KACHO_REGISTRY_IAM_PROJECT_GRPC_ADDR
+              value: "{{ .Values.authz.iamProjectGrpcAddr }}"
+            - name: KACHO_REGISTRY_AUTHZ_BREAKGLASS
+              value: "{{ .Values.authz.breakglass }}"
+            # ─── zot OCI backend (cluster-internal, never public) ───
+            - name: KACHO_REGISTRY_ZOT_ADDR
+              value: "{{ include "registry.zotAddr" . }}"
+            # ─── data-plane OCI auth-proxy (registry.kacho.local) ───
+            - name: KACHO_REGISTRY_HYDRA_JWKS_URL
+              value: "{{ .Values.hydra.jwksUrl }}"
+            - name: KACHO_REGISTRY_HYDRA_ISSUER
+              value: "{{ .Values.hydra.issuer }}"
+            - name: KACHO_REGISTRY_DATAPLANE_TLS_TERMINATED_EXTERNALLY
+              value: "{{ .Values.dataplaneTLSTerminatedExternally }}"
+            - name: KACHO_REGISTRY_TOKEN_REALM
+              value: "{{ .Values.tokenRealm }}"
+            - name: KACHO_REGISTRY_SERVICE_AUD
+              value: "{{ .Values.serviceAud }}"
+            - name: KACHO_REGISTRY_ENDPOINT_BASE
+              value: "{{ .Values.endpointBase }}"
+            {{- if .Values.mtls.enable }}
+            {{- $srv := printf "%s/server" .Values.mtls.mountPath }}
+            {{- $cli := printf "%s/client" .Values.mtls.mountPath }}
+            # mTLS server-creds (both gRPC listeners) — corelib grpcsrv.TLSServer via
+            # config.LoadPrefixed("KACHO_REGISTRY"). ca.crt = client-CA bundle.
+            # Internal :9091 is NOT exempt from mTLS (security.md AuthN+AuthZ ВЕЗДЕ).
+            - name: KACHO_REGISTRY_PUBLIC_SERVER_MTLS_ENABLE
+              value: "true"
+            - name: KACHO_REGISTRY_PUBLIC_SERVER_MTLS_CERTFILE
+              value: {{ printf "%s/tls.crt" $srv | quote }}
+            - name: KACHO_REGISTRY_PUBLIC_SERVER_MTLS_KEYFILE
+              value: {{ printf "%s/tls.key" $srv | quote }}
+            - name: KACHO_REGISTRY_PUBLIC_SERVER_MTLS_CLIENTCAFILES
+              value: {{ printf "%s/ca.crt" $srv | quote }}
+            - name: KACHO_REGISTRY_INTERNAL_SERVER_MTLS_ENABLE
+              value: "true"
+            - name: KACHO_REGISTRY_INTERNAL_SERVER_MTLS_CERTFILE
+              value: {{ printf "%s/tls.crt" $srv | quote }}
+            - name: KACHO_REGISTRY_INTERNAL_SERVER_MTLS_KEYFILE
+              value: {{ printf "%s/tls.key" $srv | quote }}
+            - name: KACHO_REGISTRY_INTERNAL_SERVER_MTLS_CLIENTCAFILES
+              value: {{ printf "%s/ca.crt" $srv | quote }}
+            {{- if .Values.mtls.edges.iamAuthz }}
+            # registry→iam Check + fga-proxy (internal :9091) client-creds —
+            # grpcclient.TLSClient. ServerName = kacho-iam-internal (∈ iam server-SAN).
+            - name: KACHO_REGISTRY_IAM_AUTHZ_MTLS_ENABLE
+              value: "true"
+            - name: KACHO_REGISTRY_IAM_AUTHZ_MTLS_CERTFILE
+              value: {{ printf "%s/tls.crt" $cli | quote }}
+            - name: KACHO_REGISTRY_IAM_AUTHZ_MTLS_KEYFILE
+              value: {{ printf "%s/tls.key" $cli | quote }}
+            - name: KACHO_REGISTRY_IAM_AUTHZ_MTLS_CAFILES
+              value: {{ printf "%s/ca.crt" $cli | quote }}
+            - name: KACHO_REGISTRY_IAM_AUTHZ_MTLS_SERVERNAME
+              value: {{ .Values.mtls.serverName.iamAuthz | quote }}
+            {{- end }}
+            {{- if .Values.mtls.edges.iamProject }}
+            # registry→iam ProjectService.Get (public :9090) client-creds — same client
+            # leaf as iamAuthz, ServerName = kacho-iam (public dial-host, ∈ iam server-SAN).
+            - name: KACHO_REGISTRY_IAM_PROJECT_MTLS_ENABLE
+              value: "true"
+            - name: KACHO_REGISTRY_IAM_PROJECT_MTLS_CERTFILE
+              value: {{ printf "%s/tls.crt" $cli | quote }}
+            - name: KACHO_REGISTRY_IAM_PROJECT_MTLS_KEYFILE
+              value: {{ printf "%s/tls.key" $cli | quote }}
+            - name: KACHO_REGISTRY_IAM_PROJECT_MTLS_CAFILES
+              value: {{ printf "%s/ca.crt" $cli | quote }}
+            - name: KACHO_REGISTRY_IAM_PROJECT_MTLS_SERVERNAME
+              value: {{ .Values.mtls.serverName.iamProject | quote }}
+            {{- end }}
+            {{- end }}
+            {{- range $k, $v := .Values.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          volumeMounts:
+            # Writable scratch for the read-only-rootfs container.
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.mtls.enable }}
+            # mTLS — cert-manager internal-CA server + client secrets in separate
+            # dirs. cert-manager writes tls.crt/tls.key/ca.crt.
+            - name: mtls-server
+              mountPath: {{ printf "%s/server" .Values.mtls.mountPath | quote }}
+              readOnly: true
+            - name: mtls-client
+              mountPath: {{ printf "%s/client" .Values.mtls.mountPath | quote }}
+              readOnly: true
+            {{- end }}
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requests.cpu }}
+              memory: {{ .Values.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.resources.limits.cpu }}
+              memory: {{ .Values.resources.limits.memory }}
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        # Writable scratch for the read-only-rootfs container.
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.mtls.enable }}
+        # mTLS — cert-manager internal-CA secrets (server + client).
+        - name: mtls-server
+          secret:
+            secretName: {{ .Values.mtls.serverSecretName | quote }}
+        - name: mtls-client
+          secret:
+            secretName: {{ .Values.mtls.clientSecretName | quote }}
+        {{- end }}

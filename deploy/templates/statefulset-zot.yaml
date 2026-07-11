@@ -1,0 +1,120 @@
+{{- if .Values.zot.enabled }}
+{{/*
+zot OCI storage backend for kacho-registry — the data-plane proxies pushes/pulls here
+and the zot adapter reads Repository/Tag projections via the zot search extension
+(POST /v2/_zot/ext/search). zot is NEVER publicly reachable: only the cluster-internal
+`{{ .Values.zot.serviceName }}` Service (registry dials http://<svc>:<port>). A PVC
+(volumeClaimTemplates) holds the OCI blob storage.
+
+NOTE: the search/GraphQL extension MUST be present in the image — use the
+extensions-enabled zot variant (values.zot.image), not zot-minimal.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.zot.serviceName }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Values.zot.serviceName }}
+data:
+  config.json: |
+    {
+      "distSpecVersion": "1.1.0",
+      "storage": {
+        "rootDirectory": {{ .Values.zot.storage.path | quote }}
+      },
+      "http": {
+        "address": "0.0.0.0",
+        "port": {{ .Values.zot.port | quote }}
+      },
+      "log": {
+        "level": "info"
+      },
+      "extensions": {
+        "search": {
+          "enable": true
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.zot.serviceName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Values.zot.serviceName }}
+spec:
+  selector:
+    app: {{ .Values.zot.serviceName }}
+  ports:
+    - name: http
+      port: {{ .Values.zot.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Values.zot.serviceName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Values.zot.serviceName }}
+spec:
+  serviceName: {{ .Values.zot.serviceName }}
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Values.zot.serviceName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.zot.serviceName }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.zot.podSecurityContext | nindent 8 }}
+      containers:
+        - name: zot
+          image: "{{ include "registry.zotImage" . }}"
+          imagePullPolicy: {{ .Values.zot.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.zot.containerSecurityContext | nindent 12 }}
+          args: ["serve", "/etc/zot/config.json"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.zot.port }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/zot
+              readOnly: true
+            - name: storage
+              mountPath: {{ .Values.zot.storage.path }}
+          resources:
+            {{- toYaml .Values.zot.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Values.zot.serviceName }}-config
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.zot.storage.storageClassName }}
+        storageClassName: {{ .Values.zot.storage.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.zot.storage.size }}
+{{- end }}

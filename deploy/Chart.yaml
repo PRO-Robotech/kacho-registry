@@ -1,3 +1,8 @@
+# Copyright (c) PRO-Robotech
+# SPDX-License-Identifier: BUSL-1.1
 apiVersion: v2
 name: registry
 version: 1.0.0
+appVersion: 1.0.0
+type: application
+description: "Kachō Registry — OCI/Docker registry control-plane (RegistryService public :9090 + InternalRegistryService admin :9091 + Operation LRO) over a zot storage backend, plus the data-plane Docker Registry v2 / OCI auth-proxy (:8080, registry.kacho.local). Owns schema kacho_registry on its own Postgres (pg-registry, database-per-service, goose migrator init-container). Runtime edges: registry→iam INTERNAL (:9091, per-RPC Check + fga-proxy RegisterResource) and registry→iam PUBLIC (:9090, ProjectService.Get); data-plane verifies Hydra-issued identity-JWT via JWKS. mTLS server-creds on both gRPC listeners; per-RPC IAM Check authz on both. Bundles the zot OCI backend StatefulSet + Service + blob-storage PVC."
