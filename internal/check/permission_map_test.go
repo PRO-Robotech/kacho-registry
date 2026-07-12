@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
 )
 
 // TestPermissionMap_ScopeFiltered — List/ListRepositories/ListTags/DeleteTag
@@ -70,6 +72,26 @@ func TestPermissionMap_ListOperations_InterceptorGated(t *testing.T) {
 	require.False(t, e.ScopeFiltered, "ListOperations interceptor-gated (single-object Check)")
 	require.Equal(t, relVList, e.Relation, "ListOperations gated by v_list")
 	require.Equal(t, "registry.registries.listOperations", e.Permission)
+}
+
+// TestPermissionMap_Create_ParentProjectObjectType — Create — это create-child:
+// per-RPC Check выполняется на PARENT-project (объекта registry_registry:<new-id>
+// ещё нет). Тип FGA-объекта проекта в модели Kachō — `project` (тот же тип, каким
+// registry пишет project-hierarchy tuple в fga_intent.go: `project:<pid> #project
+// @registry_registry`). Экстрактор Create ОБЯЗАН вернуть object-type `project`;
+// иначе Check уходит против несуществующего FGA-типа → всегда denied → даже
+// владелец проекта не может создать реестр (`permission denied`).
+func TestPermissionMap_Create_ParentProjectObjectType(t *testing.T) {
+	m := PermissionMap()
+	e, ok := m["/kacho.cloud.registry.v1.RegistryService/Create"]
+	require.True(t, ok, "Create must be mapped")
+	require.NotNil(t, e.Extract, "Create must carry parent-project extractor")
+
+	objType, objID, err := e.Extract(&registryv1.CreateRegistryRequest{ProjectId: "prjhc59hycvx38q2pxr4"})
+	require.NoError(t, err)
+	require.Equal(t, "project", objType,
+		"create-child Check must target FGA type `project` (parity с fga_intent project-tuple + FGA-моделью), не несуществующий тип")
+	require.Equal(t, "prjhc59hycvx38q2pxr4", objID)
 }
 
 // TestPermissionMap_OperationService_PublicExempt — LRO-поллинг: op-id opaque,
