@@ -61,7 +61,12 @@ service:
   # (fe3455 Beget/Cilium) assigns a separate external IP for the OCI endpoint.
   dataplaneLB:
     enabled: false
-    port: 80              # LB port → container `dataplane` (:8080)
+    port: 80              # HTTP LB port → container `dataplane` (:8080)
+    # HTTPS LB-порт. docker требует https для non-localhost registry — публикуем 443
+    # на том же VIP → container `dataplane`. TLS терминируется внешне (edge/Beget),
+    # как и весь data-plane (DATAPLANE_TLS_TERMINATED_EXTERNALLY); pod остаётся
+    # плейнтекстом. 0/пусто → 443-порт не публикуется.
+    httpsPort: 443
     loadBalancerIP: ""    # request a specific VIP (empty → provider assigns)
     loadBalancerClass: "" # e.g. Cilium/io class if the provider needs it
     annotations: {}

@@ -36,4 +36,9 @@ spec:
     - name: dataplane
       port: {{ .Values.service.dataplaneLB.port | default 80 }}
       targetPort: dataplane
+    {{- if .Values.service.dataplaneLB.httpsPort }}
+    - name: dataplane-https
+      port: {{ .Values.service.dataplaneLB.httpsPort }}
+      targetPort: dataplane
+    {{- end }}
 {{- end }}
