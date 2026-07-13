@@ -1,0 +1,41 @@
+{{/*
+TLS-серверный cert для data-plane nginx-sidecar. docker требует https для
+non-localhost registry; sidecar терминирует TLS этим цертом на :8443 и проксирует
+в плейнтекстовый data-plane (:8080). Выпускается cert-manager-ом через тот же
+internal-CA ClusterIssuer (kacho-internal-ca), что и остальная mTLS-оснастка стенда.
+CN/SAN — публичный OCI-хост registry.in-cloud.io; ipAddresses 127.0.0.1 покрывает
+loopback-обращение registry-контейнера к локальному JWKS-прокси sidecar-а.
+Рендерится ТОЛЬКО при включённом data-plane LB + TLS-sidecar (dev/local без LB не
+затрагивается). Секрет registry-dataplane-tls монтируется в sidecar (tls.crt/tls.key)
+и, ключом ca.crt, в registry-контейнер как internal-CA trust-anchor для JWKS-верификации.
+*/}}
+{{- if and .Values.service.dataplaneLB.enabled .Values.service.dataplaneLB.tlsSidecar.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: registry-dataplane-tls
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app: {{ .Values.name }}
+    app.kubernetes.io/component: registry-dataplane-tls
+    app.kubernetes.io/managed-by: helm
+spec:
+  secretName: registry-dataplane-tls
+  duration: 2160h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: kacho-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+  commonName: registry.in-cloud.io
+  dnsNames:
+    - registry.in-cloud.io
+  ipAddresses:
+    - 127.0.0.1
+  usages:
+    - server auth
+{{- end }}
