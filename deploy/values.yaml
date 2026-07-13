@@ -173,9 +173,12 @@ dataplaneTLSTerminatedExternally: false
 # TOKEN_REALM — WWW-Authenticate realm docker follows for a Bearer token (kacho-iam token shim).
 tokenRealm: "https://api.kacho.local/iam/token"
 # SERVICE_AUD — expected audience of the identity-JWT + service= in WWW-Authenticate.
-serviceAud: "registry.kacho.local"
-# ENDPOINT_BASE — tenant-facing base OCI endpoint namespace (Registry.endpoint = "<base>/<id>").
-endpointBase: "registry.kacho.local"
+# Public tenant-facing OCI host (DNS реестра) — должен совпадать с endpointBase,
+# чтобы docker login/push к этому хосту получал identity-JWT с корректным aud.
+serviceAud: "registry.in-cloud.io"
+# ENDPOINT_BASE — tenant-facing base OCI endpoint namespace (Registry.endpoint =
+# "<base>/<id>"). Протекает в UI (колонка Endpoint реестра) → docker pull/push host.
+endpointBase: "registry.in-cloud.io"
 
 # ─── mTLS — per-edge opt-in (cert-manager internal-CA certs) ──────────────────
 # enable=false (default) → NO cert-secret, NO KACHO_REGISTRY_*_MTLS_* env → insecure
