@@ -70,6 +70,25 @@ service:
     loadBalancerIP: ""    # request a specific VIP (empty → provider assigns)
     loadBalancerClass: "" # e.g. Cilium/io class if the provider needs it
     annotations: {}
+    # ─── TLS-терминирующий nginx sidecar для data-plane ──────────────────────
+    # docker требует https для non-localhost registry. Data-plane pod остаётся
+    # плейнтекстом (:8080), но публичный 443-VIP не может быть terminated внешним
+    # edge на fe3455 → рядом с registry-контейнером поднимается nginx-sidecar
+    # (:8443), который терминирует TLS цертом cert-manager (CN/SAN registry.in-cloud.io)
+    # и проксирует: `/` → data-plane 127.0.0.1:8080, `/.well-known/jwks.json` →
+    # Hydra-public JWKS (локальный trust-anchor для верификации identity-JWT),
+    # `/iam/token` → iam registry-token shim (:9096). Когда включён — 443-порт
+    # data-plane LB таргетит sidecar (dp-tls), а registry-контейнер верифицирует
+    # JWKS через локальный https-прокси (SSL_CERT_DIR доверяет internal-CA).
+    # enabled=false (dev/local, без LB/DNS) → sidecar/cert/cm не рендерятся,
+    # поведение неизменно.
+    tlsSidecar:
+      enabled: false
+      image: nginxinc/nginx-unprivileged:1.27-alpine
+      # Upstream, куда nginx проксирует `/.well-known/jwks.json` (Hydra-public JWKS).
+      hydraPublicJwksUpstream: kacho-umbrella-hydra-public.kacho.svc.cluster.local:4444
+      # Upstream, куда nginx проксирует `/iam/token` (iam registry-token shim :9096).
+      iamTokenShimUpstream: kacho-iam.kacho.svc.cluster.local:9096
 
 # ─── Postgres (database-per-service, ban #8) — own pg-registry instance ────────
 # host = bitnami release-name + alias (`kacho-umbrella-pg-registry`). Password via
@@ -176,7 +195,9 @@ hydra:
 dataplaneTLSTerminatedExternally: false
 
 # TOKEN_REALM — WWW-Authenticate realm docker follows for a Bearer token (kacho-iam token shim).
-tokenRealm: "https://api.kacho.local/iam/token"
+# Публичный OCI-хост реестра (== serviceAud/endpointBase): docker идёт за Bearer-токеном
+# на https://registry.in-cloud.io/iam/token, который TLS-sidecar проксирует в iam-shim.
+tokenRealm: "https://registry.in-cloud.io/iam/token"
 # SERVICE_AUD — expected audience of the identity-JWT + service= in WWW-Authenticate.
 # Public tenant-facing OCI host (DNS реестра) — должен совпадать с endpointBase,
 # чтобы docker login/push к этому хосту получал identity-JWT с корректным aud.

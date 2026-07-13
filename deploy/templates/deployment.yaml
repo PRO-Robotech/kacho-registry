@@ -104,8 +104,13 @@ spec:
             - name: KACHO_REGISTRY_ZOT_ADDR
               value: "{{ include "registry.zotAddr" . }}"
             # ─── data-plane OCI auth-proxy (registry.kacho.local) ───
+            {{- if not (and .Values.service.dataplaneLB.enabled .Values.service.dataplaneLB.tlsSidecar.enabled) }}
+            # Без TLS-sidecar JWKS берётся напрямую из values (внешний Hydra-эндпоинт).
+            # При включённом sidecar эта переменная переопределяется на локальный
+            # https-прокси ниже (K8s берёт ПЕРВОЕ вхождение env-имени — дубль исключаем).
             - name: KACHO_REGISTRY_HYDRA_JWKS_URL
               value: "{{ .Values.hydra.jwksUrl }}"
+            {{- end }}
             - name: KACHO_REGISTRY_HYDRA_ISSUER
               value: "{{ .Values.hydra.issuer }}"
             - name: KACHO_REGISTRY_DATAPLANE_TLS_TERMINATED_EXTERNALLY
@@ -116,6 +121,17 @@ spec:
               value: "{{ .Values.serviceAud }}"
             - name: KACHO_REGISTRY_ENDPOINT_BASE
               value: "{{ .Values.endpointBase }}"
+            {{- if and .Values.service.dataplaneLB.enabled .Values.service.dataplaneLB.tlsSidecar.enabled }}
+            # data-plane TLS-sidecar активен: data-plane верификатор identity-JWT
+            # тянет JWKS через локальный https-прокси sidecar-а (:8443). AuthMode
+            # остаётся production (requireSecureJWKSURL проходит — схема https), а
+            # доверие к internal-CA-серту прокси даётся через SSL_CERT_DIR
+            # (смонтированный ca.crt из секрета registry-dataplane-tls).
+            - name: SSL_CERT_DIR
+              value: /etc/registry-ca
+            - name: KACHO_REGISTRY_HYDRA_JWKS_URL
+              value: "https://127.0.0.1:8443/.well-known/jwks.json"
+            {{- end }}
             {{- if .Values.mtls.enable }}
             {{- $srv := printf "%s/server" .Values.mtls.mountPath }}
             {{- $cli := printf "%s/client" .Values.mtls.mountPath }}
@@ -175,6 +191,13 @@ spec:
             # Writable scratch for the read-only-rootfs container.
             - name: tmp
               mountPath: /tmp
+            {{- if and .Values.service.dataplaneLB.enabled .Values.service.dataplaneLB.tlsSidecar.enabled }}
+            # internal-CA trust-anchor (ca.crt из секрета sidecar-серта) для верификации
+            # локального https-JWKS-прокси. SSL_CERT_DIR=/etc/registry-ca доверяет ему.
+            - name: internal-ca
+              mountPath: /etc/registry-ca
+              readOnly: true
+            {{- end }}
             {{- if .Values.mtls.enable }}
             # mTLS — cert-manager internal-CA server + client secrets in separate
             # dirs. cert-manager writes tls.crt/tls.key/ca.crt.
@@ -202,10 +225,54 @@ spec:
               port: grpc
             initialDelaySeconds: 10
             periodSeconds: 30
+        {{- if and .Values.service.dataplaneLB.enabled .Values.service.dataplaneLB.tlsSidecar.enabled }}
+        # data-plane TLS-sidecar — nginx терминирует TLS на :8443 (server-cert
+        # registry-dataplane-tls) и проксирует OCI-трафик в плейнтекстовый data-plane
+        # (127.0.0.1:8080), а также JWKS/token-эндпоинты (см. registry-dataplane-nginx).
+        # docker требует https для non-localhost registry — публичный 443-VIP таргетит
+        # этот порт (dp-tls). unprivileged-образ слушает :8443 без root.
+        - name: dataplane-tls
+          image: {{ .Values.service.dataplaneLB.tlsSidecar.image | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          ports:
+            - name: dp-tls
+              containerPort: 8443
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: registry-dataplane-tls
+              mountPath: /etc/registry-tls
+              readOnly: true
+            - name: registry-dataplane-nginx
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+        {{- end }}
       volumes:
         # Writable scratch for the read-only-rootfs container.
         - name: tmp
           emptyDir: {}
+        {{- if and .Values.service.dataplaneLB.enabled .Values.service.dataplaneLB.tlsSidecar.enabled }}
+        # data-plane TLS-sidecar: server-cert + nginx-конфиг + internal-CA trust-anchor.
+        - name: registry-dataplane-tls
+          secret:
+            secretName: registry-dataplane-tls
+        - name: registry-dataplane-nginx
+          configMap:
+            name: registry-dataplane-nginx
+        # ca.crt того же серта, смонтированный в registry-контейнер как /etc/registry-ca
+        # (SSL_CERT_DIR) для доверия локальному https-JWKS-прокси.
+        - name: internal-ca
+          secret:
+            secretName: registry-dataplane-tls
+            items:
+              - key: ca.crt
+                path: internal-ca.crt
+        {{- end }}
         {{- if .Values.mtls.enable }}
         # mTLS — cert-manager internal-CA secrets (server + client).
         - name: mtls-server

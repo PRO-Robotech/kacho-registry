@@ -37,8 +37,10 @@ spec:
       port: {{ .Values.service.dataplaneLB.port | default 80 }}
       targetPort: dataplane
     {{- if .Values.service.dataplaneLB.httpsPort }}
+    # При включённом TLS-sidecar 443 таргетит sidecar (dp-tls :8443, TLS-терминация
+    # внутри pod); иначе — плейнтекстовый data-plane (внешняя TLS-терминация на edge).
     - name: dataplane-https
       port: {{ .Values.service.dataplaneLB.httpsPort }}
-      targetPort: dataplane
+      targetPort: {{ if .Values.service.dataplaneLB.tlsSidecar.enabled }}dp-tls{{ else }}dataplane{{ end }}
     {{- end }}
 {{- end }}
