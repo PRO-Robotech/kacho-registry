@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -67,6 +68,17 @@ type Config struct {
 	// AuthZBreakglass — аварийный режим: пропускать все RPC без Check + WARN
 	// (только dev / break-glass).
 	AuthZBreakglass bool `envconfig:"KACHO_REGISTRY_AUTHZ_BREAKGLASS" default:"false"`
+
+	// AuthZCacheTTL — TTL positive-кеша authz-Check gRPC-интерсептора (ОБА
+	// листенера). Ограничивает окно, в течение которого отозванный (revoked)
+	// субъект держит закешированный allow ПОСЛЕ удаления AccessBinding: registry НЕ
+	// подписан на IAM cache-invalidation (InternalAuthzCacheService.InvalidateSubject
+	// бьёт только api-gateway) и db-per-service ⇒ LISTEN/NOTIFY от iam сюда не доходит →
+	// revoke-окно = этот TTL + async fga-drain. Короткий дефолт (2s) держит окно
+	// узким; 0 → positive-кеш выключен (каждый gRPC-RPC — живой IAM Check,
+	// немедленный revoke). data-plane /v2/ (OCI-proxy) authz НЕ кеширует (прямой
+	// per-request Check), поэтому этот knob влияет только на control-plane gRPC. См. #33.
+	AuthZCacheTTL time.Duration `envconfig:"KACHO_REGISTRY_AUTHZ_CACHE_TTL" default:"2s"`
 
 	// ZotAddr — internal HTTP-endpoint zot-бэкенда (data/registry-API). zot
 	// никогда не публично достижим; клиент ходит на cluster-internal endpoint.
