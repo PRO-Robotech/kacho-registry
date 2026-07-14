@@ -20,6 +20,9 @@ data:
   config.json: |
     {
       "distSpecVersion": "1.1.0",
+      {{- with .Values.zot.compat }}
+      "compat": {{ . | toJson }},
+      {{- end }}
       "storage": {
         "rootDirectory": {{ .Values.zot.storage.path | quote }}
       },

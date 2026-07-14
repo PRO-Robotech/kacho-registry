@@ -139,6 +139,14 @@ zot:
   port: 5000
   # ZOT_ADDR the registry uses. Empty → derived http://<serviceName>:<port>.
   addr: ""
+  # Media-type compat. `docker2s2` lets clients push/pull Docker Image Manifest
+  # V2 Schema 2 (application/vnd.docker.distribution.manifest.v2+json) — the media
+  # type the classic `docker push` emits. Without it zot rejects such manifests
+  # with 415 Unsupported Media Type (it accepts only OCI manifests otherwise), so
+  # a plain `docker push <img>` of a Docker-format image fails at the manifest.
+  # Empty list → the compat key is omitted. Verified against zot v2.1.18.
+  compat:
+    - docker2s2
   image:
     # Extensions-enabled zot variant (carries the search/GraphQL extension the
     # adapter requires). ASSUMPTION — confirm the exact tag your stand runs.
