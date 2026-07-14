@@ -60,6 +60,26 @@ func (a *fakeAuthz) checkedObjects() []checkCall {
 	return out
 }
 
+// vCreateErrAuthz — Authorizer, отвечающий на v_get детерминированным allow/deny (без
+// ошибки), но на v_create возвращающий заданную ошибку. Нужен, чтобы изолированно
+// проверить fail-closed ветку fallback именно на v_create-Check (fakeAuthz.err
+// применился бы ко ВСЕМ Check, в т.ч. первому v_get, и до fallback не дошло бы).
+type vCreateErrAuthz struct {
+	allowGet   bool
+	vCreateErr error
+}
+
+func (a *vCreateErrAuthz) Check(ctx context.Context, subject, relation, object string) (bool, error) {
+	switch relation {
+	case relVCreate:
+		return false, a.vCreateErr
+	case relVGet:
+		return a.allowGet, nil
+	default:
+		return false, nil
+	}
+}
+
 // ---- fake Backend (zot introspection) -------------------------------------
 
 type fakeBackend struct {
