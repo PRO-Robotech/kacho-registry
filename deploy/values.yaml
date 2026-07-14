@@ -144,23 +144,46 @@ zot:
   # type the classic `docker push` emits. Without it zot rejects such manifests
   # with 415 Unsupported Media Type (it accepts only OCI manifests otherwise), so
   # a plain `docker push <img>` of a Docker-format image fails at the manifest.
-  # Empty list → the compat key is omitted. Verified against zot v2.1.18.
+  # NB: rendered under `http.compat` (NOT top-level — zot rejects a top-level key).
+  # Requires a zot whose config schema carries it (verified v2.1.18). Empty → omitted.
   compat:
     - docker2s2
   image:
     # Extensions-enabled zot variant (carries the search/GraphQL extension the
-    # adapter requires). ASSUMPTION — confirm the exact tag your stand runs.
+    # adapter requires). v2.1.18 — supports http.compat + s3 storageDriver + the
+    # redirectBlobURL offload (all verified against sha256:34f18f… = ReleaseTag v2.1.18).
     repository: ghcr.io/project-zot/zot-linux-amd64
-    tag: v2.1.2
+    tag: v2.1.18
     digest: ""
     pullPolicy: IfNotPresent
-  # OCI blob storage — PVC (volumeClaimTemplates on the StatefulSet).
+  # OCI blob storage — local PVC by default; S3 remote backend opt-in (storage.s3).
   storage:
     # false → ephemeral emptyDir (clusters w/o dynamic StorageClass, e.g. fe3455).
     persistence: true
     size: 10Gi
     # storageClassName: ""   # empty → cluster default StorageClass
+    # rootDirectory — local blob dir (also the local staging/cache dir when s3 is on).
     path: /var/lib/registry
+    # Content dedup. With REMOTE (s3) storage zot needs a REMOTE cache DB (dynamodb)
+    # for dedup — a local boltdb cache is rejected — so keep false when s3 is enabled.
+    dedupe: false
+    # redirectBlobURL — blob GET → 307 to an S3 presigned URL; clients pull blobs
+    # DIRECTLY from object storage (offloads zot, faster/parallel pulls). Post-authz:
+    # the data-plane still enforces v_get before zot issues the redirect. s3-only.
+    redirectBlobURL: false
+    # S3 remote storage backend (object storage). enabled=false → local rootDirectory.
+    # region/endpoint/bucket are operational config (not secrets); the ACCESS/SECRET
+    # keys live ONLY in `existingSecret` (env AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY),
+    # never in values or the config.json ConfigMap.
+    s3:
+      enabled: false
+      region: ""
+      regionEndpoint: ""
+      bucket: ""
+      rootDirectory: /zot
+      secure: true
+      forcePathStyle: true
+      existingSecret: ""
   resources:
     requests:
       cpu: 100m
