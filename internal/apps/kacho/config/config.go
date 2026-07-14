@@ -94,6 +94,19 @@ type Config struct {
 	// в проде — REG-33 не закрыт).
 	PendingBlobTTL time.Duration `envconfig:"KACHO_REGISTRY_PENDING_BLOB_TTL" default:"1h"`
 
+	// PushGrantTTL — freshness-окно durable per-subject push-ownership кеша
+	// (registry_push_grant, REG-33 immediate-pull). На успешном manifest-PUT пишется
+	// строка (registry_id, repo, subject); pull-path раскрывает repo толкавшему, если он
+	// запушил его не старше этого TTL, ПОКА async register-on-first-push не материализовал
+	// per-repo v_get в FGA (иначе собственный немедленный `docker pull` толкавшего упрётся
+	// в v_get-deny → 404). Запись лишь мостит окно материализации — как только FGA догнал,
+	// штатный v_get обслуживает repo, а строку подметает sweeper (интервал = TTL). Щедрый
+	// дефолт 1h безопасен: запись повторно даёт доступ ТОЛЬКО толкавшему к ЕГО СОБСТВЕННОМУ
+	// repo (он и так получает его перманентно после материализации), поэтому длинный TTL
+	// безвреден и устойчив к медленной материализации. 0 → fallback выключен (не задавать
+	// в проде — REG-33 immediate-pull не закрыт).
+	PushGrantTTL time.Duration `envconfig:"KACHO_REGISTRY_PUSH_GRANT_TTL" default:"1h"`
+
 	// ===== data-plane OCI auth-proxy (registry.kacho.local) =====
 
 	// DataplaneAddr — адрес data-plane HTTP-листенера (Docker Registry v2 / OCI).

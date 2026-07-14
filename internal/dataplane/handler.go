@@ -22,24 +22,27 @@ import (
 // Handler — data-plane HTTP-обработчик Docker Registry v2 / OCI Distribution:
 // AuthN (Bearer-JWT по JWKS) → parse path → per-request Check → reverse-proxy в zot.
 type Handler struct {
-	verifier  TokenVerifier
-	authz     Authorizer
-	backend   Backend
-	forwarder Forwarder
-	repoReg   RepoRegistrar
-	regLookup RegistryLookup
-	uploads   UploadRecorder
-	realm     string // IAM /token realm для WWW-Authenticate
-	service   string // service-audience для WWW-Authenticate
-	logger    *slog.Logger
+	verifier   TokenVerifier
+	authz      Authorizer
+	backend    Backend
+	forwarder  Forwarder
+	repoReg    RepoRegistrar
+	regLookup  RegistryLookup
+	uploads    UploadRecorder
+	pushGrants PushGrantRecorder
+	realm      string // IAM /token realm для WWW-Authenticate
+	service    string // service-audience для WWW-Authenticate
+	logger     *slog.Logger
 }
 
 // New собирает Handler. verifier==nil / authz==nil → breakglass-bypass соответствующей
 // стадии (только аварийный режим); в штатном деплое обе стадии обязательны. uploads==nil
 // → per-repo upload-tracking выключен (blob-finalize не пишет строку, push-time HEAD
 // только-что-загруженного блоба останется 404 до появления манифеста — REG-33 не
-// закрыт); в штатном деплое uploads обязателен.
-func New(verifier TokenVerifier, authz Authorizer, backend Backend, forwarder Forwarder, repoReg RepoRegistrar, regLookup RegistryLookup, uploads UploadRecorder, realm, service string, logger *slog.Logger) *Handler {
+// закрыт); в штатном деплое uploads обязателен. pushGrants==nil → push-ownership
+// fallback выключен (REG-33 immediate-pull не закрыт: собственный pull толкавшего до
+// FGA-материализации останется 404); в штатном деплое pushGrants обязателен.
+func New(verifier TokenVerifier, authz Authorizer, backend Backend, forwarder Forwarder, repoReg RepoRegistrar, regLookup RegistryLookup, uploads UploadRecorder, pushGrants PushGrantRecorder, realm, service string, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -50,16 +53,17 @@ func New(verifier TokenVerifier, authz Authorizer, backend Backend, forwarder Fo
 		service = "registry.kacho.local"
 	}
 	return &Handler{
-		verifier:  verifier,
-		authz:     authz,
-		backend:   backend,
-		forwarder: forwarder,
-		repoReg:   repoReg,
-		regLookup: regLookup,
-		uploads:   uploads,
-		realm:     realm,
-		service:   service,
-		logger:    logger,
+		verifier:   verifier,
+		authz:      authz,
+		backend:    backend,
+		forwarder:  forwarder,
+		repoReg:    repoReg,
+		regLookup:  regLookup,
+		uploads:    uploads,
+		pushGrants: pushGrants,
+		realm:      realm,
+		service:    service,
+		logger:     logger,
 	}
 }
 
@@ -147,10 +151,16 @@ func (h *Handler) serveManifest(w http.ResponseWriter, r *http.Request, p parsed
 // serveBlob — pull блоба (GET/HEAD): v_get на repo + per-repo blob-scope (REG-37).
 // Push блобов идёт через /blobs/uploads (routeUpload), не сюда.
 //
-// v_get-deny обрабатывается НЕ безусловным 404: на брошенном ещё-не-материализованном
-// repo применяется push-context fallback (REG-33 Defect B, см. pushContextRevealsBlob) —
-// иначе первый push зависает в дедлоке (blob HEAD 404 ⟸ repo не материализован ⟸ манифест
-// не запушен ⟸ blob HEAD 404). На established repo v_get-deny остаётся 404 (existence-hiding).
+// v_get-deny обрабатывается НЕ безусловным 404 — два независимых моста могут легитимно
+// раскрыть блоб (оба сохраняют REG-37 blob-scope, см. serveBlobScoped):
+//   - pushContextRevealsBlob (REG-33 Defect B) — first-push в процессе: repo ещё НЕ
+//     материализован, иначе первый push зависает в дедлоке (blob HEAD 404 ⟸ repo не
+//     материализован ⟸ манифест не запушен ⟸ blob HEAD 404);
+//   - pushOwnerRevealsRepo (REG-33 immediate-pull) — repo УЖЕ материализован (manifest-PUT
+//     done), но v_get ещё не материализован в FGA; собственный `docker pull` толкавшего.
+//
+// На established repo без обоих мостов v_get-deny остаётся 404 (легитимный revoke/чужой,
+// existence-hiding сохранён).
 func (h *Handler) serveBlob(w http.ResponseWriter, r *http.Request, p parsed, subject string) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeNotFound(w)
@@ -163,37 +173,56 @@ func (h *Handler) serveBlob(w http.ResponseWriter, r *http.Request, p parsed, su
 		return
 	}
 	if !allowed {
-		// REG-33 Defect B (deadlock): per-object registry_repository authz материализуется
+		// (1) REG-33 Defect B (deadlock): per-object registry_repository authz материализуется
 		// только на manifest-PUT (register-on-first-push), поэтому на первом push blob
 		// HEAD/GET упирается в v_get-deny ДО манифеста. Раскрываем блоб ⟺ это доказуемо
-		// push-in-progress того же тенанта (см. pushContextRevealsBlob); иначе 404.
+		// push-in-progress того же тенанта (см. pushContextRevealsBlob; pending-blob уже
+		// подтверждён внутри → forward напрямую).
 		reveal, ferr := h.pushContextRevealsBlob(ctx, p, subject)
 		if ferr != nil {
 			h.failClosed(w, "push-context blob fallback check failed", ferr)
 			return
 		}
-		if !reveal {
-			writeNotFound(w) // deny + не push-context → 404 (existence-hiding сохранён)
+		if reveal {
+			h.forwarder.Forward(w, r)
 			return
 		}
-		h.forwarder.Forward(w, r)
+		// (2) REG-33 immediate-pull: repo УЖЕ материализован (pushContextRevealsBlob вернул
+		// false из-за RepoExists=true), но v_get ещё не в FGA. Раскрываем ⟺ этот subject
+		// доказуемо запушил repo (push-grant) — собственный pull толкавшего в окне
+		// материализации. REG-37 сохранён: раскрываем только блобы в blob-scope этого repo
+		// (serveBlobScoped), push-grant не становится cross-tenant content-addressable oracle.
+		owner, oerr := h.pushOwnerRevealsRepo(ctx, p, subject)
+		if oerr != nil {
+			h.failClosed(w, "push-owner fallback check failed", oerr)
+			return
+		}
+		if !owner {
+			writeNotFound(w) // deny + ни один мост → 404 (existence-hiding сохранён)
+			return
+		}
+		h.serveBlobScoped(w, r, p)
 		return
 	}
-	// v_get прошёл (established repo) — blob-scope existence-hiding: блоб достижим только
-	// если входит в манифест(ы) авторизованного repo (чужой content-addressable блоб → 404).
+	// v_get прошёл (established repo) — blob-scope existence-hiding.
+	h.serveBlobScoped(w, r, p)
+}
+
+// serveBlobScoped — REG-37 blob-scope existence-hiding: блоб достижим только если входит в
+// манифест(ы) repo (BlobInRepo) ЛИБО доказуемо загружен в него в пределах freshness-TTL
+// (durable pending-blob, REG-33 Defect A: первый push пишет блобы ДО манифеста). Иначе 404 —
+// чужой content-addressable блоб недостижим (zot дедуплицирует блобы глобально: HEAD чужого
+// глобального блоба из любого repo дал бы 200). Применяется на ОБОИХ путях: v_get-allowed
+// (established) И push-owner fallback (толкавший тянет свой только-что-запушенный repo) —
+// поэтому push-grant раскрывает repo, но НЕ произвольный глобальный блоб.
+func (h *Handler) serveBlobScoped(w http.ResponseWriter, r *http.Request, p parsed) {
+	ctx := r.Context()
 	in, err := h.backend.BlobInRepo(ctx, p.registryID, p.repo, p.reference)
 	if err != nil {
 		h.failClosed(w, "blob scope check failed", err)
 		return
 	}
 	if !in {
-		// REG-33 Defect A: блоба ещё нет ни в одном манифесте repo. На первом push
-		// блобы пишутся ДО манифеста, поэтому только-что-загруженный слой не в манифесте,
-		// но docker HEAD'ит его сразу за 201. Раскрываем блоб ⟺ авторизованный writer
-		// реально загрузил ЭТОТ digest в ЭТОТ repo в пределах freshness-TTL (durable
-		// pending-blob record). REG-37 сохранён: zot дедуплицирует блобы глобально, но
-		// раскрываются только блобы, которые writer доказуемо загрузил в этот repo (zot
-		// проверил digest на finalize) — подделать запись под чужой контент нельзя.
 		uploaded, uerr := h.blobUploadedToRepo(ctx, p.registryID, p.repo, p.reference)
 		if uerr != nil {
 			h.failClosed(w, "pending blob check failed", uerr)
@@ -258,16 +287,52 @@ func (h *Handler) blobUploadedToRepo(ctx context.Context, registryID, repo, dige
 }
 
 // servePullOnly — read-путь (manifest GET/HEAD, tags/list, referrers): single Check
-// на repo-объект + forward. Deny → 404 (existence-hiding).
+// на repo-объект + forward. Deny → 404 (existence-hiding), КРОМЕ push-owner fallback:
+// собственный `docker pull` толкавшего сразу за push упирается в v_get/v_list-deny, пока
+// async register-on-first-push не материализовал per-repo authz в FGA (REG-33
+// immediate-pull). Раскрываем ⟺ этот subject доказуемо запушил этот repo (push-grant).
 func (h *Handler) servePullOnly(w http.ResponseWriter, r *http.Request, p parsed, subject, relation string) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeNotFound(w)
 		return
 	}
-	if !h.check(w, r, subject, relation, repositoryObject(p.registryID, p.repo)) {
+	ctx := r.Context()
+	allowed, err := h.checkAllowed(ctx, subject, relation, repositoryObject(p.registryID, p.repo))
+	if err != nil {
+		h.failClosed(w, "authorization check failed", err)
 		return
 	}
+	if !allowed {
+		// REG-33 immediate-pull: v_get/v_list на repo, который caller только что запушил,
+		// может DENY, пока FGA не материализовал per-repo authz (async register-on-first-
+		// push). Раскрываем ⟺ этот subject доказуемо запушил этот repo (push-grant в
+		// пределах TTL) — собственный pull толкавшего в окне материализации. Иначе 404
+		// (легитимный revoke / cross-tenant existence-hiding сохранён).
+		reveal, ferr := h.pushOwnerRevealsRepo(ctx, p, subject)
+		if ferr != nil {
+			h.failClosed(w, "push-owner fallback check failed", ferr)
+			return
+		}
+		if !reveal {
+			writeNotFound(w) // deny + не push-owner → 404 (existence-hiding сохранён)
+			return
+		}
+	}
 	h.forwarder.Forward(w, r)
+}
+
+// pushOwnerRevealsRepo — REG-33 immediate-pull мост. Сообщает, держит ли <subject> свежий
+// push-grant на <reg>/<repo>: т.е. доказуемо запушил этот repo в пределах TTL, поэтому его
+// собственный `docker pull` можно обслужить, пока async register-on-first-push не
+// материализовал v_get@repo в FGA. Кейован по SUBJECT → раскрывает ТОЛЬКО собственный
+// контент толкавшего (чужой субъект/тенант записи не имеет → 404 сохранён). serveBlob
+// дополнительно держит blob-scope поверх этого моста (REG-37). pushGrants==nil → false
+// (мост выключен; established v_get-путь всё равно обслужит repo после материализации).
+func (h *Handler) pushOwnerRevealsRepo(ctx context.Context, p parsed, subject string) (bool, error) {
+	if h.pushGrants == nil {
+		return false, nil
+	}
+	return h.pushGrants.PushGranted(ctx, p.registryID, p.repo, subject)
 }
 
 // registerPushTimeout — дедлайн detached-контекста register-on-first-push. Работа
@@ -319,28 +384,42 @@ func (h *Handler) servePush(w http.ResponseWriter, r *http.Request, p parsed, su
 
 	status := h.forwarder.Forward(w, r)
 
-	// register-on-first-push: repo материализуется как authz-объект на первом
-	// успешном manifest-PUT (parent-tuple ПЕРВЫМ + owner-tuple pushing-SA). Intent
-	// несёт ParentProjectID реестра — иначе resource_mirror строка репо пустая и
-	// iam-reconciler не материализует per-object v_* (репо непуллим даже владельцем).
-	if !exists && p.route == routeManifest && r.Method == http.MethodPut && status >= 200 && status < 300 {
-		// Эта работа идёт ПОСЛЕ Forward — ответ клиенту уже отдан. r.Context()
-		// отменяется в момент, когда клиент закрывает соединение, а single-shot
-		// docker/CI push рвёт connection сразу за 201 → cancellable ctx погиб бы
-		// ДО коммита registry_outbox-транзакции, безвозвратно потеряв owner/parent
-		// FGA-tuple (drainer реплеит только закоммиченные строки → репо непуллим
-		// даже владельцем, без ретрая). Отвязываем от отмены запроса (как LRO-
-		// воркеры) и даём собственный дедлайн на durable-emit + project-lookup.
+	// На успешном manifest-PUT — durable-побочки на пути ответа ПОСЛЕ Forward. r.Context()
+	// отменяется в момент, когда клиент закрывает соединение, а single-shot docker/CI push
+	// рвёт connection сразу за 201 → cancellable ctx погиб бы ДО коммита записи, безвозвратно
+	// её потеряв (без ретрая). Отвязываем от отмены запроса (как LRO-воркеры) и даём
+	// собственный дедлайн на durable-emit + project-lookup:
+	//   - push-grant (REG-33 immediate-pull) — для ЛЮБОГО успешного manifest-PUT (новый ИЛИ
+	//     re-push): фиксируем push-ownership, чтобы собственный немедленный `docker pull`
+	//     толкавшего раскрылся, пока async register-on-first-push не материализовал v_get в FGA;
+	//   - register-on-first-push — ТОЛЬКО для нового repo: parent-tuple ПЕРВЫМ + owner-tuple
+	//     pushing-SA. Intent несёт ParentProjectID реестра — иначе resource_mirror строка репо
+	//     пустая и iam-reconciler не материализует per-object v_* (репо непуллим даже владельцем).
+	if p.route == routeManifest && r.Method == http.MethodPut && status >= 200 && status < 300 {
 		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), registerPushTimeout)
 		defer cancel()
-		projectID := h.resolveRegistryProject(bgCtx, p.registryID)
-		intent := domain.RegisterIntentForRepoPush(p.registryID, p.repo, projectID, subject)
-		if h.repoReg != nil {
-			if rerr := h.repoReg.RegisterRepository(bgCtx, intent); rerr != nil {
-				// Push успешен; register-intent durable-emit провалился (редкий DB-сбой).
-				// Не рвём клиенту уже отданный ответ — логируем.
-				h.logger.Error("register-on-first-push emit failed",
-					"repo", p.registryID+"/"+p.repo, "err", rerr)
+
+		// push-grant — вспомогательный кеш (не критичный путь): manifest уже в zot, push по
+		// сути завершён. Сбой записи → log-and-continue (как register-emit failure): не рвём
+		// клиенту уже отданный 2xx; худший исход — немедленный pull разок упрётся в pre-fix
+		// окно материализации (не новая регрессия). НЕ fail-closed на завершённый push.
+		if h.pushGrants != nil {
+			if gerr := h.pushGrants.RecordPushGrant(bgCtx, p.registryID, p.repo, subject); gerr != nil {
+				h.logger.Error("push-grant record failed",
+					"repo", p.registryID+"/"+p.repo, "err", gerr)
+			}
+		}
+
+		if !exists {
+			projectID := h.resolveRegistryProject(bgCtx, p.registryID)
+			intent := domain.RegisterIntentForRepoPush(p.registryID, p.repo, projectID, subject)
+			if h.repoReg != nil {
+				if rerr := h.repoReg.RegisterRepository(bgCtx, intent); rerr != nil {
+					// Push успешен; register-intent durable-emit провалился (редкий DB-сбой).
+					// Не рвём клиенту уже отданный ответ — логируем.
+					h.logger.Error("register-on-first-push emit failed",
+						"repo", p.registryID+"/"+p.repo, "err", rerr)
+				}
 			}
 		}
 	}

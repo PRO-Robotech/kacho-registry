@@ -107,6 +107,31 @@ type UploadRecorder interface {
 	BlobUploaded(ctx context.Context, registryID, repo, digest string) (bool, error)
 }
 
+// PushGrantRecorder — durable per-subject учёт push-ownership репозитория (REG-33
+// immediate-pull, #33). На успешном manifest-PUT data-plane записывает (registryID, repo,
+// subject) — факт «этот субъект только что запушил этот repo». Пока async-материализация
+// per-repo authz не догнала (register-on-first-push → registry_outbox → fga-proxy drainer →
+// IAM RegisterResource → FGA reconciler), собственный `docker pull` толкавшего упирается в
+// v_get@registry_repository-deny → 404. Pull-path консультируется с этой записью как
+// fallback: v_get denied, НО субъект доказуемо запушил repo → раскрываем (мост на окно
+// материализации). Ключ по SUBJECT — раскрывается ТОЛЬКО собственный только-что-запушенный
+// repo толкавшего; чужой субъект/тенант записи не имеет → остаётся 404 (REG-37 сохранён,
+// не cross-tenant leak). Как только FGA материализует v_get — штатный путь обслуживает repo,
+// а запись протухает по TTL (sweeper). serveBlob дополнительно держит blob-scope (REG-37):
+// push-grant раскрывает repo, но НЕ произвольный глобальный content-addressable блоб.
+//
+// Реализуется pg.PushGrantRepo. nil → no-op (запись не ведётся, fallback не выдаётся).
+type PushGrantRecorder interface {
+	// RecordPushGrant идемпотентно (upsert) фиксирует, что <subject> запушил
+	// <registryID>/<repo>, освежая granted_at (re-push держит запись свежей). ОБЯЗАН
+	// закоммититься до того, как последующий `docker pull` толкавшего дойдёт до pull-path
+	// (иначе немедленный pull проиграет гонку с материализацией).
+	RecordPushGrant(ctx context.Context, registryID, repo, subject string) error
+	// PushGranted сообщает, держит ли <subject> свежий push-grant на <registryID>/<repo>
+	// (granted_at в пределах TTL; протухшие игнорируются и подметаются sweeper'ом).
+	PushGranted(ctx context.Context, registryID, repo, subject string) (bool, error)
+}
+
 // RepoRegistrar — эмит register-intent нового repo (register-on-first-push):
 // registry_repository:<reg>/<repo> parent+owner tuple → registry_outbox →
 // fga-proxy drainer (идемпотентно). Реализуется pg.RegistryRepo. nil → no-op.

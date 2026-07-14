@@ -279,7 +279,7 @@ func TestDataplane_REG14d_PushNewRepo_ProjectLookupError_EmitsEmptyProject_Logge
 
 	var logbuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	h := New(&fakeVerifier{subject: "sva-ci"}, az, be, fw, rr, lk, &fakeUploadRecorder{},
+	h := New(&fakeVerifier{subject: "sva-ci"}, az, be, fw, rr, lk, &fakeUploadRecorder{}, &fakePushGrantRecorder{},
 		"https://api.kacho.local/iam/token", "registry.kacho.local", logger)
 
 	up := doReq(h, http.MethodPost, "/v2/reg-A/app/blobs/uploads/", true)
@@ -325,7 +325,7 @@ func TestDataplane_REG14c_RegisterEmitFailure_PushStill2xx_Logged(t *testing.T) 
 	var logbuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	h := New(&fakeVerifier{subject: "sva-ci"}, az, be, fw, rr,
-		&fakeRegistryLookup{}, &fakeUploadRecorder{}, "https://api.kacho.local/iam/token", "registry.kacho.local", logger)
+		&fakeRegistryLookup{}, &fakeUploadRecorder{}, &fakePushGrantRecorder{}, "https://api.kacho.local/iam/token", "registry.kacho.local", logger)
 
 	up := doReq(h, http.MethodPost, "/v2/reg-A/app/blobs/uploads/", true)
 	require.Equal(t, 201, up.Code)
@@ -1045,6 +1045,235 @@ func TestDataplane_REG33B_BlobHead_FallbackPendingError_FailClosed(t *testing.T)
 
 	rec := doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:x", true)
 	require.GreaterOrEqual(t, rec.Code, 500, "fallback pending-check error → fail-closed 5xx")
+	require.Equal(t, 0, fw.count())
+}
+
+// ============================================================================
+// REG-33 immediate-pull (#33): push-ownership fallback — собственный `docker pull`
+// толкавшего сразу за push НЕ должен возвращать 404, пока async register-on-first-push
+// не материализовал per-repo v_get в FGA (~10-15s на проде). На успешном manifest-PUT
+// пишется push-grant (registryID, repo, subject); pull-path раскрывает repo ИМЕННО
+// толкавшему, пока FGA не догнал. Ключ по subject → чужой subject/тенант → 404 (REG-37).
+// ============================================================================
+
+// REG-33IP — pull манифеста repo, который caller только что запушил (push-grant есть),
+// но v_get@repo ещё DENIED (не материализован) → раньше 404, после фикса форвардится (200).
+// RED до фикса: servePullOnly отдаёт 404 на v_get-deny без консультации push-grant.
+func TestDataplane_REG33IP_PullManifest_PushGrantedVGetDenied_Reveals(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{}} // v_get denied (ещё не материализован)
+	fw := &fakeForwarder{status: 200}
+	pgr := &fakePushGrantRecorder{granted: map[string]bool{
+		pushGrantCacheKey("reg-A", "app", "service_account:sva-ci"): true,
+	}}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, &fakeBackend{}, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodGet, "/v2/reg-A/app/manifests/v1", true).Code,
+		"толкавший тянет свой только-что-запушенный repo в окне материализации → forward, не 404")
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodHead, "/v2/reg-A/app/manifests/v1", true).Code,
+		"HEAD того же манифеста тоже раскрывается")
+	require.Equal(t, 2, fw.count(), "оба запроса проксированы через push-ownership fallback")
+}
+
+// REG-33IP — tags/list репо толкавшего с v_list DENIED, но push-grant есть → forward.
+func TestDataplane_REG33IP_TagsList_PushGrantedVListDenied_Reveals(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{}} // v_list denied
+	fw := &fakeForwarder{status: 200}
+	pgr := &fakePushGrantRecorder{granted: map[string]bool{
+		pushGrantCacheKey("reg-A", "app", "service_account:sva-ci"): true,
+	}}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, &fakeBackend{}, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodGet, "/v2/reg-A/app/tags/list", true).Code,
+		"tags/list собственного только-что-запушенного repo раскрывается через push-grant")
+	require.Equal(t, 1, fw.count())
+}
+
+// REG-33IP — blob GET/HEAD собственного repo: v_get DENIED, repo УЖЕ материализован в zot
+// (RepoExists=true → pushContextRevealsBlob неприменим), push-grant есть, блоб — член
+// манифеста (BlobInRepo=true) → forward. Это ключевой путь `docker pull`: после манифеста
+// docker тянет config+слои. RED до фикса: serveBlob 404 (pushContextRevealsBlob=false,
+// push-owner fallback отсутствует).
+func TestDataplane_REG33IP_Blob_PushGrantedVGetDenied_MemberBlob_Reveals(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{}} // v_get denied
+	fw := &fakeForwarder{status: 200}
+	be := &fakeBackend{
+		exists: map[string]bool{"reg-A/app": true},            // repo материализован в zot (манифест запушен)
+		blobs:  map[string]bool{"reg-A/app|sha256:own": true}, // блоб входит в манифест repo
+	}
+	pgr := &fakePushGrantRecorder{granted: map[string]bool{
+		pushGrantCacheKey("reg-A", "app", "service_account:sva-ci"): true,
+	}}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodGet, "/v2/reg-A/app/blobs/sha256:own", true).Code,
+		"толкавший тянет член-блоб своего repo в окне материализации → forward")
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:own", true).Code)
+	require.Equal(t, 2, fw.count())
+}
+
+// REG-33IP security regression (REG-37 сохранён) — push-grant раскрывает repo, но serveBlob
+// ДОПОЛНИТЕЛЬНО держит blob-scope: чужой глобальный content-addressable блоб, которого НЕТ
+// ни в манифесте repo, ни среди загруженных в него, ОБЯЗАН оставаться 404 даже для толкавшего.
+// Иначе push-grant стал бы cross-tenant blob-oracle (zot дедуплицирует блобы глобально).
+// Должен быть ЗЕЛЁНЫМ после фикса (до фикса — тоже 404, т.к. fallback отсутствует).
+func TestDataplane_REG33IP_Blob_PushGranted_ForeignBlob_Still404(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{}} // v_get denied
+	fw := &fakeForwarder{}
+	be := &fakeBackend{exists: map[string]bool{"reg-A/app": true}} // repo материализован, но digest не член
+	pgr := &fakePushGrantRecorder{granted: map[string]bool{
+		pushGrantCacheKey("reg-A", "app", "service_account:sva-ci"): true,
+	}}
+	up := &fakeUploadRecorder{} // и не загружен в этот repo
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up, pgr)
+
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodGet, "/v2/reg-A/app/blobs/sha256:foreign", true).Code,
+		"push-grant раскрывает repo, но НЕ произвольный глобальный блоб (REG-37 сохранён)")
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:foreign", true).Code)
+	require.Equal(t, 0, fw.count())
+}
+
+// REG-33IP — успешный manifest-PUT НОВОГО repo записывает push-grant (keyed by pushing
+// subject) на detached-контексте. RED до фикса: RecordPushGrant не зовётся → recordedKeys пуст.
+func TestDataplane_REG33IP_RecordPushGrant_OnManifestPut_NewRepo(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	fw := &fakeForwarder{status: 201}
+	be := &fakeBackend{exists: map[string]bool{}} // новый repo
+	pgr := &fakePushGrantRecorder{}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+
+	up := doReq(h, http.MethodPost, "/v2/reg-A/app/blobs/uploads/", true)
+	require.Equal(t, 201, up.Code)
+	require.Empty(t, pgr.recordedKeys(), "blob-upload init не пишет push-grant (только manifest-PUT)")
+
+	mf := doReq(h, http.MethodPut, "/v2/reg-A/app/manifests/v1", true)
+	require.Equal(t, 201, mf.Code)
+	require.Equal(t, []pushGrantKey{{"reg-A", "app", "service_account:sva-ci"}}, pgr.recordedKeys(),
+		"успешный manifest-PUT пишет push-grant ровно один раз, keyed by pushing subject")
+	require.NoError(t, pgr.observedRecCtxErr(),
+		"push-grant пишется на detached-контексте (переживает разрыв соединения клиентом на 201)")
+}
+
+// REG-33IP — re-push в СУЩЕСТВУЮЩИЙ repo тоже пишет/освежает push-grant (не только новый repo).
+func TestDataplane_REG33IP_RecordPushGrant_OnManifestPut_ExistingRepo(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_update registry_repository:reg-A/app": true}}
+	fw := &fakeForwarder{status: 201}
+	be := &fakeBackend{exists: map[string]bool{"reg-A/app": true}} // существующий repo (re-push)
+	pgr := &fakePushGrantRecorder{}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+
+	mf := doReq(h, http.MethodPut, "/v2/reg-A/app/manifests/v2", true)
+	require.Equal(t, 201, mf.Code)
+	require.Equal(t, []pushGrantKey{{"reg-A", "app", "service_account:sva-ci"}}, pgr.recordedKeys(),
+		"re-push существующего repo тоже пишет/освежает push-grant")
+}
+
+// REG-33IP — manifest-PUT, отвергнутый zot (не-2xx), НЕ пишет push-grant.
+func TestDataplane_REG33IP_ManifestPut_ZotReject_NoRecord(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	fw := &fakeForwarder{status: 400} // zot отверг манифест
+	be := &fakeBackend{exists: map[string]bool{}}
+	pgr := &fakePushGrantRecorder{}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+	mf := doReq(h, http.MethodPut, "/v2/reg-A/app/manifests/v1", true)
+	require.Equal(t, 400, mf.Code)
+	require.Empty(t, pgr.recordedKeys(), "не-2xx manifest-PUT не пишет push-grant")
+}
+
+// REG-33IP — запись push-grant упала (транзиентный DB-сбой). В отличие от blob-finalize
+// (Defect A, fail-closed), push-grant — НЕ критичный путь: manifest уже в zot, push
+// по сути завершён. Log-and-continue (как register-on-first-push emit failure): клиент
+// получает свой 2xx, сбой наблюдаемо логируется. Худший исход — немедленный pull может
+// разок упереться в pre-fix окно материализации (не НОВАЯ регрессия). RED-инвариант:
+// НЕ fail-closed на push (не рвём завершённый push из-за сбоя вспомогательного кеша).
+func TestDataplane_REG33IP_RecordPushGrantFailure_PushStill2xx_Logged(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	fw := &fakeForwarder{status: 201}
+	be := &fakeBackend{exists: map[string]bool{}}
+	pgr := &fakePushGrantRecorder{recErr: errors.New("pg down")}
+	var logbuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	h := New(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, &fakeRegistryLookup{}, &fakeUploadRecorder{}, pgr,
+		"https://api.kacho.local/iam/token", "registry.kacho.local", logger)
+
+	mf := doReq(h, http.MethodPut, "/v2/reg-A/app/manifests/v1", true)
+	require.Equal(t, 201, mf.Code, "push 2xx форвардится несмотря на сбой push-grant record (кеш, не критичный путь)")
+	require.Contains(t, logbuf.String(), "push-grant record failed", "сбой push-grant record наблюдаемо залогирован")
+}
+
+// REG-33IP regression — non-pusher субъект с v_get DENIED и БЕЗ push-grant → остаётся 404
+// (легитимный revoke / cross-tenant). Мост НЕ ослабляет existence-hiding для не-толкавших.
+func TestDataplane_REG33IP_NonPusher_VGetDenied_NoPushGrant_Still404(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{}} // v_get/v_list denied
+	fw := &fakeForwarder{}
+	be := &fakeBackend{exists: map[string]bool{"reg-A/app": true}}
+	pgr := &fakePushGrantRecorder{} // нет push-grant для этого субъекта
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-evil"}, az, be, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodGet, "/v2/reg-A/app/manifests/v1", true).Code,
+		"non-pusher без push-grant → 404 (revoke/cross-tenant сохранён)")
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodGet, "/v2/reg-A/app/tags/list", true).Code)
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodGet, "/v2/reg-A/app/blobs/sha256:x", true).Code)
+	require.Equal(t, 0, fw.count())
+}
+
+// REG-33IP regression (cross-tenant, ключевой инвариант) — push-grant СУЩЕСТВУЕТ, но для
+// ДРУГОГО субъекта (легитимного толкавшего sva-ci); чужой sva-evil с v_get DENIED тянет тот
+// же repo → 404. Доказывает subject-keying: мост раскрывает ТОЛЬКО собственный repo
+// толкавшего, не «любой недавно запушенный repo».
+func TestDataplane_REG33IP_CrossSubject_PushGrantForOther_Still404(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{}} // v_get denied для sva-evil
+	fw := &fakeForwarder{}
+	be := &fakeBackend{exists: map[string]bool{"reg-A/app": true}}
+	pgr := &fakePushGrantRecorder{granted: map[string]bool{
+		pushGrantCacheKey("reg-A", "app", "service_account:sva-ci"): true, // grant для ЛЕГИТИМНОГО толкавшего
+	}}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-evil"}, az, be, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodGet, "/v2/reg-A/app/manifests/v1", true).Code,
+		"push-grant кейован по subject → чужой субъект не раскрывается (cross-tenant / REG-37)")
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodGet, "/v2/reg-A/app/blobs/sha256:own", true).Code)
+	require.Equal(t, 0, fw.count())
+}
+
+// REG-33IP regression — established repo, v_get ALLOWED → forward штатным путём БЕЗ
+// консультации push-grant (нулевая добавленная стоимость на hot established-pull).
+func TestDataplane_REG33IP_EstablishedRepo_VGetAllowed_NoFallbackCost(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_get registry_repository:reg-A/app": true}}
+	fw := &fakeForwarder{status: 200}
+	pgr := &fakePushGrantRecorder{granted: map[string]bool{
+		pushGrantCacheKey("reg-A", "app", "service_account:sva-ci"): true,
+	}}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, &fakeBackend{}, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodGet, "/v2/reg-A/app/manifests/v1", true).Code)
+	require.Equal(t, 1, fw.count())
+	require.Equal(t, 0, pgr.getCalls,
+		"established v_get-allowed pull НЕ консультирует push-grant fallback (нулевая добавленная стоимость)")
+}
+
+// REG-33IP — push-grant fallback недоступен на pull-path (PushGranted падает) → fail-closed
+// 5xx (не гадаем 404/200 при недоступной БД). servePullOnly-ветка.
+func TestDataplane_REG33IP_PullManifest_PushGrantFallbackError_FailClosed(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{}} // v_get denied (без az-ошибки)
+	fw := &fakeForwarder{}
+	pgr := &fakePushGrantRecorder{getErr: errors.New("pg down")}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, &fakeBackend{}, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+
+	rec := doReq(h, http.MethodGet, "/v2/reg-A/app/manifests/v1", true)
+	require.GreaterOrEqual(t, rec.Code, 500, "push-grant fallback error → fail-closed 5xx")
+	require.NotEqual(t, http.StatusNotFound, rec.Code, "недоступность зависимости не маскируется под 404")
+	require.Equal(t, 0, fw.count())
+}
+
+// REG-33IP — push-grant fallback недоступен на serveBlob push-owner ветке → fail-closed 5xx.
+func TestDataplane_REG33IP_Blob_PushGrantFallbackError_FailClosed(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{}} // v_get denied
+	fw := &fakeForwarder{}
+	be := &fakeBackend{exists: map[string]bool{"reg-A/app": true}} // materialized → pushContextRevealsBlob=false, доходим до push-owner
+	pgr := &fakePushGrantRecorder{getErr: errors.New("pg down")}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+
+	rec := doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:x", true)
+	require.GreaterOrEqual(t, rec.Code, 500, "serveBlob push-owner fallback error → fail-closed 5xx")
 	require.Equal(t, 0, fw.count())
 }
 

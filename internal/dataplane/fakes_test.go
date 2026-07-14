@@ -270,26 +270,92 @@ func (u *fakeUploadRecorder) observedRecCtxErr() error {
 	return u.recCtxErr
 }
 
+// ---- fake PushGrantRecorder (per-subject push-ownership, REG-33 immediate-pull) ----
+
+// pushGrantKey — записанный (registryID, repo, subject) факт push-ownership.
+type pushGrantKey struct{ registryID, repo, subject string }
+
+type fakePushGrantRecorder struct {
+	mu        sync.Mutex
+	recorded  []pushGrantKey  // порядок вызовов RecordPushGrant
+	granted   map[string]bool // "reg|repo|subject" → PushGranted возвращает true
+	recErr    error           // RecordPushGrant возвращает эту ошибку
+	getErr    error           // PushGranted возвращает эту ошибку
+	recCtxErr error           // ctx.Err() в момент RecordPushGrant (detach-регресс)
+	getCalls  int             // число вызовов PushGranted (проверка «fallback не трогается»)
+}
+
+func pushGrantCacheKey(registryID, repo, subject string) string {
+	return registryID + "|" + repo + "|" + subject
+}
+
+func (g *fakePushGrantRecorder) RecordPushGrant(ctx context.Context, registryID, repo, subject string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.recCtxErr = ctx.Err()
+	if g.recErr != nil {
+		return g.recErr
+	}
+	g.recorded = append(g.recorded, pushGrantKey{registryID, repo, subject})
+	if g.granted == nil {
+		g.granted = map[string]bool{}
+	}
+	g.granted[pushGrantCacheKey(registryID, repo, subject)] = true
+	return nil
+}
+
+func (g *fakePushGrantRecorder) PushGranted(ctx context.Context, registryID, repo, subject string) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.getCalls++
+	if g.getErr != nil {
+		return false, g.getErr
+	}
+	return g.granted[pushGrantCacheKey(registryID, repo, subject)], nil
+}
+
+func (g *fakePushGrantRecorder) recordedKeys() []pushGrantKey {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]pushGrantKey, len(g.recorded))
+	copy(out, g.recorded)
+	return out
+}
+
+// observedRecCtxErr — состояние ctx.Err() в момент durable-записи push-grant. nil ⇒
+// контекст не был отменён (detached от отмены запроса).
+func (g *fakePushGrantRecorder) observedRecCtxErr() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.recCtxErr
+}
+
 // newTestHandler собирает Handler поверх fake-портов с фиксированными realm/service.
 // RegistryLookup — дефолтная пустая fake (тесты, не проверяющие ParentProjectID);
-// UploadRecorder — дефолтная пустая fake (blob-scope reveal не проверяется).
+// UploadRecorder / PushGrantRecorder — дефолтные пустые fake (reveal не проверяется).
 func newTestHandler(v TokenVerifier, az Authorizer, be Backend, fw Forwarder, rr RepoRegistrar) *Handler {
-	return newTestHandlerFull(v, az, be, fw, rr, &fakeRegistryLookup{}, &fakeUploadRecorder{})
+	return newTestHandlerFull(v, az, be, fw, rr, &fakeRegistryLookup{}, &fakeUploadRecorder{}, &fakePushGrantRecorder{})
 }
 
 // newTestHandlerLK — вариант с явной RegistryLookup (проверка project-резолва
 // register-on-first-push).
 func newTestHandlerLK(v TokenVerifier, az Authorizer, be Backend, fw Forwarder, rr RepoRegistrar, lk RegistryLookup) *Handler {
-	return newTestHandlerFull(v, az, be, fw, rr, lk, &fakeUploadRecorder{})
+	return newTestHandlerFull(v, az, be, fw, rr, lk, &fakeUploadRecorder{}, &fakePushGrantRecorder{})
 }
 
 // newTestHandlerU — вариант с явной UploadRecorder (REG-33: blob-finalize record +
 // push-time blob-scope reveal).
 func newTestHandlerU(v TokenVerifier, az Authorizer, be Backend, fw Forwarder, rr RepoRegistrar, up UploadRecorder) *Handler {
-	return newTestHandlerFull(v, az, be, fw, rr, &fakeRegistryLookup{}, up)
+	return newTestHandlerFull(v, az, be, fw, rr, &fakeRegistryLookup{}, up, &fakePushGrantRecorder{})
+}
+
+// newTestHandlerPG — вариант с явными UploadRecorder И PushGrantRecorder (REG-33
+// immediate-pull: push-ownership fallback + record-on-manifest-PUT).
+func newTestHandlerPG(v TokenVerifier, az Authorizer, be Backend, fw Forwarder, rr RepoRegistrar, up UploadRecorder, pg PushGrantRecorder) *Handler {
+	return newTestHandlerFull(v, az, be, fw, rr, &fakeRegistryLookup{}, up, pg)
 }
 
 // newTestHandlerFull — полный конструктор поверх всех fake-портов.
-func newTestHandlerFull(v TokenVerifier, az Authorizer, be Backend, fw Forwarder, rr RepoRegistrar, lk RegistryLookup, up UploadRecorder) *Handler {
-	return New(v, az, be, fw, rr, lk, up, "https://api.kacho.local/iam/token", "registry.kacho.local", nil)
+func newTestHandlerFull(v TokenVerifier, az Authorizer, be Backend, fw Forwarder, rr RepoRegistrar, lk RegistryLookup, up UploadRecorder, pg PushGrantRecorder) *Handler {
+	return New(v, az, be, fw, rr, lk, up, pg, "https://api.kacho.local/iam/token", "registry.kacho.local", nil)
 }
