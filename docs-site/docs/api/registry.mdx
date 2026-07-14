@@ -127,7 +127,7 @@ authz-Check.
 <ApiOperation method="POST" endpoint="/registry/v1/registries" async>
 
 Создаёт реестр в проекте. Это **create-child**: authz-Check выполняется на parent-проекте
-(`editor`-tier на `iam_project`, объекта реестра ещё нет). `projectId` валидируется через
+(`editor`-tier на `project`, объекта реестра ещё нет). `projectId` валидируется через
 `ProjectService.Get`; не найден → `INVALID_ARGUMENT` (`"project <id> not found"`). Owner-tuple
 эмитится в outbox (материализуется в FGA). Ответ — `Operation`; `response` содержит созданный
 Registry.

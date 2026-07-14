@@ -30,6 +30,13 @@ const FGAObjectTypeRegistry = "registry_registry"
 // verb-tuple, namespace-viewer НЕ видит все repos автоматически.
 const FGAObjectTypeRepository = "registry_repository"
 
+// FGAObjectTypeProject — FGA object-type parent-проекта (владелец в модели kacho-iam
+// — тип `project`). Единый источник для обоих planes: project-hierarchy tuple
+// (FGAProjectTuple) и create-child interceptor-Check (check.PermissionMap). Раньше
+// check держал независимый литерал `iam_project` — тип, которого НЕТ в FGA-модели →
+// Create.Check всегда denied. Константа исключает этот drift.
+const FGAObjectTypeProject = "project"
+
 // FGA relation-строки owner-hierarchy tuple'ов registry_registry. `project`
 // линкует ресурс к project-у (cascade tier'ов); `owner` — creator-tuple
 // (обязателен: модель несёт relation owner, иначе creator-intent застрял бы unsent
@@ -142,7 +149,7 @@ func FGAObjectRef(objectType, objectID string) string {
 // "project:<projectID> #project @registry_registry:<registryID>".
 func FGAProjectTuple(registryID, projectID string) FGATuple {
 	return FGATuple{
-		SubjectID: "project:" + projectID,
+		SubjectID: FGAObjectRef(FGAObjectTypeProject, projectID),
 		Relation:  FGARelationProject,
 		Object:    FGAObjectRef(FGAObjectTypeRegistry, registryID),
 	}

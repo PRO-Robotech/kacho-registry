@@ -17,7 +17,7 @@ import (
 //   - registry_registry     — namespace (List/Create/Delete + list-filter).
 //   - registry_repository    — конкретный repo (pull/push/delete, parent=registry).
 //
-// Create — create-child: Check на PARENT-объекте iam_project (ресурса
+// Create — create-child: Check на PARENT-объекте project (ресурса
 // registry_registry:<new-id> ещё нет). List/ListRepositories/ListTags/DeleteTag
 // дополнительно per-repo row-filter'уются В ХЕНДЛЕРЕ (gateway List-exempt) — запись
 // в PermissionMap здесь работает как namespace call-gate.
@@ -27,7 +27,7 @@ import (
 const (
 	objectTypeRegistry   = domain.FGAObjectTypeRegistry
 	objectTypeRepository = domain.FGAObjectTypeRepository
-	objectTypeProject    = "iam_project"
+	objectTypeProject    = domain.FGAObjectTypeProject
 
 	relVGet    = domain.FGARelationVGet
 	relVList   = domain.FGARelationVList
@@ -63,7 +63,7 @@ func registryObject() authz.ObjectExtractor {
 	}
 }
 
-// projectObject — extractor (iam_project, <projectId>) для create-child Check на
+// projectObject — extractor (project, <projectId>) для create-child Check на
 // parent-project (Create) и project-scoped call-gate (List).
 func projectObject() authz.ObjectExtractor {
 	return func(req any) (string, string, error) {
