@@ -16,29 +16,27 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: {{ .Values.zot.serviceName }}
+{{- /*
+  config.json is assembled as a dict → toJson so it is ALWAYS valid JSON regardless
+  of which optional blocks (s3 storageDriver / redirectBlobURL / http.compat) are on
+  — no fragile manual comma juggling. Placement matters for zot:
+    - compat → under `http` (NOT top-level; zot rejects a top-level `compat` key).
+    - storageDriver (s3) + redirectBlobURL → under `storage`.
+  With remote (s3) storage, zot dedup needs a REMOTE cache DB (dynamodb); a local
+  boltdb cache is rejected — so dedupe stays whatever values say (false for s3).
+*/}}
+{{- $storage := dict "rootDirectory" .Values.zot.storage.path "dedupe" (.Values.zot.storage.dedupe | default false) }}
+{{- if .Values.zot.storage.redirectBlobURL }}{{- $_ := set $storage "redirectBlobURL" true }}{{- end }}
+{{- if .Values.zot.storage.s3.enabled }}
+{{-   $s3 := .Values.zot.storage.s3 }}
+{{-   $_ := set $storage "storageDriver" (dict "name" "s3" "region" $s3.region "regionendpoint" $s3.regionEndpoint "bucket" $s3.bucket "rootdirectory" $s3.rootDirectory "secure" (default true $s3.secure) "forcepathstyle" (default true $s3.forcePathStyle)) }}
+{{- end }}
+{{- $http := dict "address" "0.0.0.0" "port" (.Values.zot.port | toString) }}
+{{- with .Values.zot.compat }}{{- $_ := set $http "compat" . }}{{- end }}
+{{- $cfg := dict "distSpecVersion" "1.1.0" "storage" $storage "http" $http "log" (dict "level" "info") "extensions" (dict "search" (dict "enable" true)) }}
 data:
   config.json: |
-    {
-      "distSpecVersion": "1.1.0",
-      {{- with .Values.zot.compat }}
-      "compat": {{ . | toJson }},
-      {{- end }}
-      "storage": {
-        "rootDirectory": {{ .Values.zot.storage.path | quote }}
-      },
-      "http": {
-        "address": "0.0.0.0",
-        "port": {{ .Values.zot.port | quote }}
-      },
-      "log": {
-        "level": "info"
-      },
-      "extensions": {
-        "search": {
-          "enable": true
-        }
-      }
-    }
+    {{- $cfg | toJson | nindent 4 }}
 ---
 apiVersion: v1
 kind: Service
@@ -82,6 +80,14 @@ spec:
           securityContext:
             {{- toYaml .Values.zot.containerSecurityContext | nindent 12 }}
           args: ["serve", "/etc/zot/config.json"]
+          {{- if and .Values.zot.storage.s3.enabled .Values.zot.storage.s3.existingSecret }}
+          # S3 credentials (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) for the zot S3
+          # storageDriver — via the aws-sdk env credential chain, NEVER in config.json
+          # (ConfigMap) or values (git). Provisioned as a K8s Secret out-of-band.
+          envFrom:
+            - secretRef:
+                name: {{ .Values.zot.storage.s3.existingSecret }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.zot.port }}
