@@ -142,11 +142,15 @@ zot:
   # Media-type compat. `docker2s2` lets clients push/pull Docker Image Manifest
   # V2 Schema 2 (application/vnd.docker.distribution.manifest.v2+json) — the media
   # type the classic `docker push` emits. Without it zot rejects such manifests
-  # with 415 Unsupported Media Type (it accepts only OCI manifests otherwise), so
-  # a plain `docker push <img>` of a Docker-format image fails at the manifest.
-  # Empty list → the compat key is omitted. Verified against zot v2.1.18.
-  compat:
-    - docker2s2
+  # with 415 Unsupported Media Type (it accepts only OCI manifests otherwise).
+  #
+  # OPT-IN (default empty): the `compat` config key exists ONLY in zot whose config
+  # schema carries it (verified v2.1.18). Older / some `:latest` builds reject an
+  # unknown `compat` key and CRASH-LOOP ('config.Config' has invalid keys: compat).
+  # So enable it ONLY together with a schema-carrying `zot.image.tag` (>= v2.1.18):
+  #   zot: { image: { tag: v2.1.18 }, compat: [docker2s2] }
+  # Empty list → the key is omitted (safe on any zot; OCI-only push/pull).
+  compat: []
   image:
     # Extensions-enabled zot variant (carries the search/GraphQL extension the
     # adapter requires). ASSUMPTION — confirm the exact tag your stand runs.
