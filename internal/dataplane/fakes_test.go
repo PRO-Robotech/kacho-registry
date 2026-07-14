@@ -116,6 +116,24 @@ func (f *fakeForwarder) Forward(w http.ResponseWriter, r *http.Request) int {
 	return st
 }
 
+// ForwardCapture — буферизованный вариант (blob PUT-finalize): считается тем же
+// count()'ом, что и Forward, и возвращает сконфигурированный статус/тело как
+// CapturedResponse.
+func (f *fakeForwarder) ForwardCapture(r *http.Request) CapturedResponse {
+	f.mu.Lock()
+	f.calls = append(f.calls, r)
+	f.mu.Unlock()
+	st := f.status
+	if st == 0 {
+		st = http.StatusOK
+	}
+	var body []byte
+	if f.body != "" {
+		body = []byte(f.body)
+	}
+	return CapturedResponse{Status: st, Header: http.Header{}, Body: body}
+}
+
 func (f *fakeForwarder) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -174,14 +192,84 @@ func (l *fakeRegistryLookup) RegistryProjectID(ctx context.Context, registryID s
 	return l.projectByRegistry[registryID], nil
 }
 
+// ---- fake UploadRecorder (per-repo blob-upload tracking, REG-33 Defect A) --
+
+// uploadKey — записанный (registryID, repo, digest) факт аплоада.
+type uploadKey struct{ registryID, repo, digest string }
+
+type fakeUploadRecorder struct {
+	mu        sync.Mutex
+	recorded  []uploadKey     // порядок вызовов RecordUploadedBlob
+	uploaded  map[string]bool // "reg|repo|digest" → BlobUploaded возвращает true
+	recErr    error           // RecordUploadedBlob возвращает эту ошибку
+	getErr    error           // BlobUploaded возвращает эту ошибку
+	recCtxErr error           // ctx.Err() в момент RecordUploadedBlob (detach-регресс)
+}
+
+func uploadCacheKey(registryID, repo, digest string) string {
+	return registryID + "|" + repo + "|" + digest
+}
+
+func (u *fakeUploadRecorder) RecordUploadedBlob(ctx context.Context, registryID, repo, digest string) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.recCtxErr = ctx.Err()
+	if u.recErr != nil {
+		return u.recErr
+	}
+	u.recorded = append(u.recorded, uploadKey{registryID, repo, digest})
+	if u.uploaded == nil {
+		u.uploaded = map[string]bool{}
+	}
+	u.uploaded[uploadCacheKey(registryID, repo, digest)] = true
+	return nil
+}
+
+func (u *fakeUploadRecorder) BlobUploaded(ctx context.Context, registryID, repo, digest string) (bool, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.getErr != nil {
+		return false, u.getErr
+	}
+	return u.uploaded[uploadCacheKey(registryID, repo, digest)], nil
+}
+
+func (u *fakeUploadRecorder) recordedKeys() []uploadKey {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	out := make([]uploadKey, len(u.recorded))
+	copy(out, u.recorded)
+	return out
+}
+
+// observedRecCtxErr — состояние ctx.Err() в момент durable-записи. nil ⇒ контекст не
+// был отменён (detached от отмены запроса).
+func (u *fakeUploadRecorder) observedRecCtxErr() error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.recCtxErr
+}
+
 // newTestHandler собирает Handler поверх fake-портов с фиксированными realm/service.
-// RegistryLookup — дефолтная пустая fake (тесты, не проверяющие ParentProjectID).
+// RegistryLookup — дефолтная пустая fake (тесты, не проверяющие ParentProjectID);
+// UploadRecorder — дефолтная пустая fake (blob-scope reveal не проверяется).
 func newTestHandler(v TokenVerifier, az Authorizer, be Backend, fw Forwarder, rr RepoRegistrar) *Handler {
-	return newTestHandlerLK(v, az, be, fw, rr, &fakeRegistryLookup{})
+	return newTestHandlerFull(v, az, be, fw, rr, &fakeRegistryLookup{}, &fakeUploadRecorder{})
 }
 
 // newTestHandlerLK — вариант с явной RegistryLookup (проверка project-резолва
 // register-on-first-push).
 func newTestHandlerLK(v TokenVerifier, az Authorizer, be Backend, fw Forwarder, rr RepoRegistrar, lk RegistryLookup) *Handler {
-	return New(v, az, be, fw, rr, lk, "https://api.kacho.local/iam/token", "registry.kacho.local", nil)
+	return newTestHandlerFull(v, az, be, fw, rr, lk, &fakeUploadRecorder{})
+}
+
+// newTestHandlerU — вариант с явной UploadRecorder (REG-33: blob-finalize record +
+// push-time blob-scope reveal).
+func newTestHandlerU(v TokenVerifier, az Authorizer, be Backend, fw Forwarder, rr RepoRegistrar, up UploadRecorder) *Handler {
+	return newTestHandlerFull(v, az, be, fw, rr, &fakeRegistryLookup{}, up)
+}
+
+// newTestHandlerFull — полный конструктор поверх всех fake-портов.
+func newTestHandlerFull(v TokenVerifier, az Authorizer, be Backend, fw Forwarder, rr RepoRegistrar, lk RegistryLookup, up UploadRecorder) *Handler {
+	return New(v, az, be, fw, rr, lk, up, "https://api.kacho.local/iam/token", "registry.kacho.local", nil)
 }

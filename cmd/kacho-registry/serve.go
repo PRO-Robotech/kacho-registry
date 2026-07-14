@@ -121,6 +121,10 @@ func runServe(cfg config.Config) error {
 		projectIAMConn = projectConn
 	}
 	registryRepo := pg.NewRegistryRepo(pool)
+	// pendingBlobRepo — durable per-repo учёт загруженных блобов (registry_pending_blob,
+	// REG-33 Defect A): blob PUT-finalize пишет строку, push-time blob HEAD/GET раскрывает
+	// только-что-загруженный слой ДО появления манифеста (REG-37 сохранён).
+	pendingBlobRepo := pg.NewPendingBlobRepo(pool, cfg.PendingBlobTTL)
 	zotAdapter := zotclient.New(cfg.ZotAddr)
 	iamAdapter := iamclient.New(projectIAMConn)
 
@@ -241,7 +245,7 @@ func runServe(cfg config.Config) error {
 	// InternalIAMService.Check + existence-hiding + stream-proxy. Отдельно от gRPC.
 	var dpServer *http.Server
 	if cfg.DataplaneAddr != "" {
-		dpHandler, dperr := buildDataplaneHandler(cfg, authzConn, registryRepo, zotAdapter, registryRepo, logger)
+		dpHandler, dperr := buildDataplaneHandler(cfg, authzConn, registryRepo, zotAdapter, registryRepo, pendingBlobRepo, logger)
 		if dperr != nil {
 			return fmt.Errorf("build data-plane proxy: %w", dperr)
 		}
@@ -249,6 +253,12 @@ func runServe(cfg config.Config) error {
 			Addr:              cfg.DataplaneAddr,
 			Handler:           dpHandler,
 			ReadHeaderTimeout: 15 * time.Second,
+		}
+		// pending-blob sweeper: подметает протухшие (> PendingBlobTTL) строки
+		// registry_pending_blob (REG-33). Реюзает ctx-lifecycle сервиса; интервал = TTL
+		// (роста таблицы не более двух окон). TTL≤0 → трекинг выключен, sweeper не нужен.
+		if cfg.PendingBlobTTL > 0 {
+			go runPendingBlobSweeper(ctx, pendingBlobRepo, cfg.PendingBlobTTL, logger)
 		}
 	}
 
@@ -319,7 +329,7 @@ func runServe(cfg config.Config) error {
 // JWKS-verify Hydra-issued identity-JWT (RS256/ES256) + per-request
 // InternalIAMService.Check + zot stream-proxy. breakglass → bypass AuthN+AuthZ
 // (аварийный режим, как gRPC-листенеры).
-func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoReg dataplane.RepoRegistrar, backend dataplane.Backend, regLookup dataplane.RegistryLookup, logger *slog.Logger) (http.Handler, error) {
+func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoReg dataplane.RepoRegistrar, backend dataplane.Backend, regLookup dataplane.RegistryLookup, uploads dataplane.UploadRecorder, logger *slog.Logger) (http.Handler, error) {
 	// Plaintext data-plane обязан стоять за внешней TLS-терминацией (bearer
 	// identity-JWT не должны транзитить открытым текстом). В проде — явный ack
 	// оператора; проверяется независимо от breakglass (риск открытого сокета
@@ -354,8 +364,39 @@ func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoRe
 		authorizer = check.NewIAMCheckClient(authzConn)
 	}
 
-	return dataplane.New(verifier, authorizer, backend, forwarder, repoReg, regLookup,
+	return dataplane.New(verifier, authorizer, backend, forwarder, repoReg, regLookup, uploads,
 		cfg.TokenRealm, cfg.ServiceAud, logger), nil
+}
+
+// pendingBlobSweeper — узкий порт TTL-подметания registry_pending_blob (REG-33).
+// Реализуется pg.PendingBlobRepo.
+type pendingBlobSweeper interface {
+	SweepStale(ctx context.Context) (int64, error)
+}
+
+// runPendingBlobSweeper периодически (interval) подметает протухшие pending-blob-строки
+// до отмены ctx (SIGTERM). Ошибка sweep'а логируется и не роняет сервис (гигиена, не
+// критичный путь). Первый тик — через interval (свежий старт таблицы пуст).
+func runPendingBlobSweeper(ctx context.Context, sweeper pendingBlobSweeper, interval time.Duration, logger *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweepCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			n, err := sweeper.SweepStale(sweepCtx)
+			cancel()
+			if err != nil {
+				logger.Warn("pending-blob sweep failed", "err", err)
+				continue
+			}
+			if n > 0 {
+				logger.Info("pending-blob sweep", "deleted", n)
+			}
+		}
+	}
 }
 
 // requireSecureJWKSURL — в production/production-strict JWKS-endpoint (единственный

@@ -84,6 +84,16 @@ type Config struct {
 	// никогда не публично достижим; клиент ходит на cluster-internal endpoint.
 	ZotAddr string `envconfig:"KACHO_REGISTRY_ZOT_ADDR" default:""`
 
+	// PendingBlobTTL — freshness-окно durable per-repo учёта загруженных блобов
+	// (registry_pending_blob, REG-33 Defect A). На blob PUT-finalize пишется строка
+	// (registry_id, repo, digest); push-time blob HEAD/GET раскрывает блоб, если он
+	// загружен в ЭТОТ repo не старше этого TTL (до появления в манифесте — там
+	// BlobInRepo уже true). Достаточно пережить одно push-окно (обычно секунды-минуты);
+	// дефолт 1h щедр даже для больших образов по медленному каналу. Строки старше TTL
+	// подметает sweeper (интервал = TTL). 0 → трекинг фактически выключен (не задавать
+	// в проде — REG-33 не закрыт).
+	PendingBlobTTL time.Duration `envconfig:"KACHO_REGISTRY_PENDING_BLOB_TTL" default:"1h"`
+
 	// ===== data-plane OCI auth-proxy (registry.kacho.local) =====
 
 	// DataplaneAddr — адрес data-plane HTTP-листенера (Docker Registry v2 / OCI).
