@@ -40,6 +40,17 @@ func (f *cancelingForwarder) Forward(w http.ResponseWriter, r *http.Request) int
 	return st
 }
 
+// ForwardCapture — cancelingForwarder не используется на blob-finalize пути, но обязан
+// удовлетворять интерфейсу Forwarder.
+func (f *cancelingForwarder) ForwardCapture(r *http.Request) CapturedResponse {
+	f.calls++
+	st := f.status
+	if st == 0 {
+		st = http.StatusOK
+	}
+	return CapturedResponse{Status: st, Header: http.Header{}}
+}
+
 // REG-14e — register-on-first-push исполняется на пути ответа ПОСЛЕ Forward. Если
 // клиент (single-shot docker/CI push) закрывает соединение сразу за 201, r.Context()
 // отменяется. Durable outbox-write owner/parent FGA-tuple и project-lookup ОБЯЗАНЫ
@@ -268,7 +279,7 @@ func TestDataplane_REG14d_PushNewRepo_ProjectLookupError_EmitsEmptyProject_Logge
 
 	var logbuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	h := New(&fakeVerifier{subject: "sva-ci"}, az, be, fw, rr, lk,
+	h := New(&fakeVerifier{subject: "sva-ci"}, az, be, fw, rr, lk, &fakeUploadRecorder{},
 		"https://api.kacho.local/iam/token", "registry.kacho.local", logger)
 
 	up := doReq(h, http.MethodPost, "/v2/reg-A/app/blobs/uploads/", true)
@@ -314,7 +325,7 @@ func TestDataplane_REG14c_RegisterEmitFailure_PushStill2xx_Logged(t *testing.T) 
 	var logbuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	h := New(&fakeVerifier{subject: "sva-ci"}, az, be, fw, rr,
-		&fakeRegistryLookup{}, "https://api.kacho.local/iam/token", "registry.kacho.local", logger)
+		&fakeRegistryLookup{}, &fakeUploadRecorder{}, "https://api.kacho.local/iam/token", "registry.kacho.local", logger)
 
 	up := doReq(h, http.MethodPost, "/v2/reg-A/app/blobs/uploads/", true)
 	require.Equal(t, 201, up.Code)
@@ -715,6 +726,180 @@ func TestDataplane_REG37_MountBlobScope_NonMember_404(t *testing.T) {
 	hOK := newTestHandler(&fakeVerifier{subject: "sva-ci"}, az, beMember, fwOK, &fakeRepoReg{})
 	require.Equal(t, 201, doReq(hOK, http.MethodPost, mountURL, true).Code)
 	require.Equal(t, 1, fwOK.count(), "member digest mounts")
+}
+
+// REG-33A (#33 Defect A) — push-time blob HEAD/GET только-что-загруженного блоба,
+// которого ещё НЕТ ни в одном манифесте repo (первый push пишет блобы ДО манифеста),
+// НЕ должен отдавать 404. serveBlob гейтит на BlobInRepo (digest ∈ манифест repo), но
+// на первом push repoTags пуст → BlobInRepo=false → раньше отдавал 404 на блоб, который
+// docker только что успешно запушил (201) → docker видит «unknown blob» и рвёт push. Фикс:
+// если BlobInRepo=false, но writer реально загрузил ЭТОТ digest в ЭТОТ repo (durable
+// pending-blob record в пределах TTL) → forward (200), не 404. RED до фикса: 404.
+func TestDataplane_REG33A_BlobHead_UploadedNotYetInManifest_Revealed(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_get registry_repository:reg-A/app": true}}
+	fw := &fakeForwarder{status: 200}
+	be := &fakeBackend{} // блоб ещё НЕ в манифесте repo → BlobInRepo=false
+	// но writer загрузил sha256:fresh именно в reg-A/app (pending-blob record).
+	up := &fakeUploadRecorder{uploaded: map[string]bool{
+		uploadCacheKey("reg-A", "app", "sha256:fresh"): true,
+	}}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:fresh", true).Code,
+		"HEAD только-что-загруженного (но ещё не в манифесте) блоба должен форвардиться, не 404")
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodGet, "/v2/reg-A/app/blobs/sha256:fresh", true).Code,
+		"GET того же блоба тоже форвардится")
+	require.Equal(t, 2, fw.count(), "оба запроса проксированы в zot")
+}
+
+// REG-33A regression-lock (REG-37 сохранён) — блоб, который НЕ загружен в этот repo И
+// НЕ входит в его манифесты, обязан ОСТАВАТЬСЯ 404 (existence-hiding). Это ключевой
+// security-инвариант: pending-reveal не должен превратиться в тот самый cross-tenant
+// blob-leak, ради закрытия которого существует BlobInRepo (zot дедуплицирует блобы
+// глобально — HEAD чужого глобального блоба из любого repo вернул бы 200). Должен быть
+// ЗЕЛЁНЫМ и до, и после фикса.
+func TestDataplane_REG33A_BlobHead_NotUploadedNotInManifest_Still404(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_get registry_repository:reg-A/app": true}}
+	fw := &fakeForwarder{}
+	be := &fakeBackend{}        // не в манифесте
+	up := &fakeUploadRecorder{} // не загружен в этот repo
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:foreign", true).Code)
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodGet, "/v2/reg-A/app/blobs/sha256:foreign", true).Code)
+	require.Equal(t, 0, fw.count(), "чужой блоб не проксируется")
+}
+
+// REG-33A cross-repo regression-lock — pending-record строго per-repo: блоб, загруженный
+// в reg-A/app, НЕ должен раскрываться из ДРУГОГО repo (reg-A/other или reg-B/app), даже
+// если у вызывающего есть v_get на тот другой repo. Иначе pending-reveal стал бы
+// cross-repo blob-oracle. Должен быть ЗЕЛЁНЫМ и до, и после фикса.
+func TestDataplane_REG33A_BlobHead_UploadedToOtherRepo_Still404(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{
+		"v_get registry_repository:reg-A/other": true,
+		"v_get registry_repository:reg-B/app":   true,
+	}}
+	fw := &fakeForwarder{}
+	be := &fakeBackend{}
+	// digest загружен только в reg-A/app.
+	up := &fakeUploadRecorder{uploaded: map[string]bool{
+		uploadCacheKey("reg-A", "app", "sha256:secret"): true,
+	}}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodHead, "/v2/reg-A/other/blobs/sha256:secret", true).Code,
+		"блоб reg-A/app не раскрывается из reg-A/other")
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodHead, "/v2/reg-B/app/blobs/sha256:secret", true).Code,
+		"блоб reg-A/app не раскрывается из reg-B/app")
+	require.Equal(t, 0, fw.count())
+}
+
+// REG-33A — blob PUT-finalize (routeUpload, PUT, ?digest=<d>) с 2xx от zot ОБЯЗАН
+// синхронно записать (registryID, repo, digest) ДО релея 201 клиенту (docker может
+// сделать HEAD сразу за 201 — строка должна закоммититься первой). Запись идёт на
+// detached-контексте (переживает отмену запроса). RED до фикса: finalize идёт
+// стриминговым Forward, RecordUploadedBlob не зовётся → recordedKeys пуст.
+func TestDataplane_REG33A_BlobPutFinalize_RecordsUploadedBlob(t *testing.T) {
+	// finalize нового repo гейтится v_create@namespace; последующий push-time HEAD того
+	// же блоба гейтится v_get@repo (авторизация repo здесь дана — тест изолирует именно
+	// blob-scope reveal, а не materialization per-repo verbs, см. Defect B).
+	az := &fakeAuthz{allow: map[string]bool{
+		"v_create registry_registry:reg-A":    true,
+		"v_get registry_repository:reg-A/app": true,
+	}}
+	fw := &fakeForwarder{status: 201}
+	be := &fakeBackend{exists: map[string]bool{}} // новый repo → verb-map v_create@namespace
+	up := &fakeUploadRecorder{}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	rec := doReq(h, http.MethodPut, "/v2/reg-A/app/blobs/uploads/upl-uuid-1?digest=sha256:layerA", true)
+	require.Equal(t, 201, rec.Code, "blob-finalize 2xx релеится клиенту")
+	require.Equal(t, []uploadKey{{"reg-A", "app", "sha256:layerA"}}, up.recordedKeys(),
+		"finalize записывает (reg,repo,digest) ровно один раз")
+	require.NoError(t, up.observedRecCtxErr(),
+		"durable-запись исполняется на detached-контексте (переживает отмену запроса)")
+
+	// records → последующий HEAD раскрывает блоб (BlobInRepo=false, но pending=true) →
+	// форвардится в zot (fake echoes fw.status), НЕ 404.
+	headCode := doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:layerA", true).Code
+	require.NotEqual(t, http.StatusNotFound, headCode, "записанный блоб раскрывается по HEAD, не 404")
+	require.Less(t, headCode, 400, "HEAD форвардится в zot после записи pending-строки")
+}
+
+// REG-33A — finalize в СУЩЕСТВУЮЩИЙ repo (verb-map v_update) тоже записывает блоб.
+func TestDataplane_REG33A_BlobPutFinalize_ExistingRepo_Records(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_update registry_repository:reg-A/app": true}}
+	fw := &fakeForwarder{status: 201}
+	be := &fakeBackend{exists: map[string]bool{"reg-A/app": true}}
+	up := &fakeUploadRecorder{}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	rec := doReq(h, http.MethodPut, "/v2/reg-A/app/blobs/uploads/upl-2?digest=sha256:layerB", true)
+	require.Equal(t, 201, rec.Code)
+	require.Equal(t, []uploadKey{{"reg-A", "app", "sha256:layerB"}}, up.recordedKeys())
+}
+
+// REG-33A — монолитный blob-upload одним POST /blobs/uploads/?digest=<d> (без mount)
+// тоже финализирует блоб → записывается. (docker/moby идёт POST→PUT, но OCI допускает
+// single-POST; guard не должен зависеть от клиента.)
+func TestDataplane_REG33A_BlobPostMonolithicFinalize_Records(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	fw := &fakeForwarder{status: 201}
+	be := &fakeBackend{exists: map[string]bool{}}
+	up := &fakeUploadRecorder{}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	rec := doReq(h, http.MethodPost, "/v2/reg-A/app/blobs/uploads/?digest=sha256:mono", true)
+	require.Equal(t, 201, rec.Code)
+	require.Equal(t, []uploadKey{{"reg-A", "app", "sha256:mono"}}, up.recordedKeys())
+}
+
+// REG-33A — blob-finalize с НЕ-2xx от zot (напр. 400 digest-invalid: контент не совпал
+// с ?digest) НЕ записывает pending-строку (writer не доказал владение контентом) и
+// релеит ответ zot как есть.
+func TestDataplane_REG33A_BlobPutFinalize_ZotReject_NoRecord(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	fw := &fakeForwarder{status: 400}
+	be := &fakeBackend{exists: map[string]bool{}}
+	up := &fakeUploadRecorder{}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	rec := doReq(h, http.MethodPut, "/v2/reg-A/app/blobs/uploads/upl-3?digest=sha256:bad", true)
+	require.Equal(t, 400, rec.Code, "не-2xx zot релеится как есть")
+	require.Empty(t, up.recordedKeys(), "не-2xx finalize не записывает pending-строку")
+}
+
+// REG-33A — durable-запись blob-finalize упала (транзиентный DB-сбой). Мы НЕ можем
+// безопасно отдать 201, который клиент запомнит, а следующий HEAD вернёт 404 (реинтро
+// Defect A). Fail-closed: 503, 201 НЕ релеится → push ретраится (upload идемпотентен;
+// на ретрае zot уже дедуплицировал блоб). Регресс-гейт против «record fail тихо
+// проглочен, 201 отдан».
+func TestDataplane_REG33A_BlobPutFinalize_RecordError_FailClosed(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	fw := &fakeForwarder{status: 201}
+	be := &fakeBackend{exists: map[string]bool{}}
+	up := &fakeUploadRecorder{recErr: errors.New("pg down")}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	rec := doReq(h, http.MethodPut, "/v2/reg-A/app/blobs/uploads/upl-4?digest=sha256:x", true)
+	require.GreaterOrEqual(t, rec.Code, 500, "record-сбой → fail-closed 5xx, не 201")
+	require.NotEqual(t, 201, rec.Code, "201 не релеится при незакоммиченной pending-строке")
+}
+
+// REG-33A — неавторизованный blob-finalize отклоняется verb-map Check'ом (v_create/
+// v_update) ДО ForwardCapture: 404 (existence-hiding), блоб в zot не уходит, pending не
+// пишется. Записываем ТОЛЬКО после passed-authz.
+func TestDataplane_REG33A_BlobPutFinalize_NoRights_404_NoRecord(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{}} // deny всё
+	fw := &fakeForwarder{status: 201}
+	be := &fakeBackend{exists: map[string]bool{}}
+	up := &fakeUploadRecorder{}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-evil"}, az, be, fw, &fakeRepoReg{}, up)
+
+	rec := doReq(h, http.MethodPut, "/v2/reg-A/app/blobs/uploads/upl-5?digest=sha256:x", true)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, 0, fw.count(), "неавторизованный finalize не проксируется")
+	require.Empty(t, up.recordedKeys(), "неавторизованный finalize не пишет pending-строку")
 }
 
 // helper: убеждаемся, что Authorization без "Bearer " схемы → 401.

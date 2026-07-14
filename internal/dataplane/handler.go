@@ -28,14 +28,18 @@ type Handler struct {
 	forwarder Forwarder
 	repoReg   RepoRegistrar
 	regLookup RegistryLookup
+	uploads   UploadRecorder
 	realm     string // IAM /token realm для WWW-Authenticate
 	service   string // service-audience для WWW-Authenticate
 	logger    *slog.Logger
 }
 
 // New собирает Handler. verifier==nil / authz==nil → breakglass-bypass соответствующей
-// стадии (только аварийный режим); в штатном деплое обе стадии обязательны.
-func New(verifier TokenVerifier, authz Authorizer, backend Backend, forwarder Forwarder, repoReg RepoRegistrar, regLookup RegistryLookup, realm, service string, logger *slog.Logger) *Handler {
+// стадии (только аварийный режим); в штатном деплое обе стадии обязательны. uploads==nil
+// → per-repo upload-tracking выключен (blob-finalize не пишет строку, push-time HEAD
+// только-что-загруженного блоба останется 404 до появления манифеста — REG-33 не
+// закрыт); в штатном деплое uploads обязателен.
+func New(verifier TokenVerifier, authz Authorizer, backend Backend, forwarder Forwarder, repoReg RepoRegistrar, regLookup RegistryLookup, uploads UploadRecorder, realm, service string, logger *slog.Logger) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -52,11 +56,19 @@ func New(verifier TokenVerifier, authz Authorizer, backend Backend, forwarder Fo
 		forwarder: forwarder,
 		repoReg:   repoReg,
 		regLookup: regLookup,
+		uploads:   uploads,
 		realm:     realm,
 		service:   service,
 		logger:    logger,
 	}
 }
+
+// recordUploadTimeout — дедлайн синхронной durable-записи blob-finalize (REG-33).
+// Запись обязана закоммититься ДО релея 2xx клиенту, поэтому исполняется на detached-
+// контексте (WithoutCancel): даже если клиент отвалится, ожидая ответ, строка
+// докоммитится (иначе retry-HEAD за 201 снова упрётся в 404). Собственный дедлайн
+// ограничивает хвост при недоступной БД (fail-closed 503 — push ретраится).
+const recordUploadTimeout = 10 * time.Second
 
 // ServeHTTP реализует http.Handler. Порядок: AuthN (401-challenge fail-closed) →
 // DELETE-блок (405) → parse (traversal → 400) → per-request authz → forward.
@@ -150,10 +162,34 @@ func (h *Handler) serveBlob(w http.ResponseWriter, r *http.Request, p parsed, su
 		return
 	}
 	if !in {
-		writeNotFound(w)
-		return
+		// REG-33 Defect A: блоба ещё нет ни в одном манифесте repo. На первом push
+		// блобы пишутся ДО манифеста, поэтому только-что-загруженный слой не в манифесте,
+		// но docker HEAD'ит его сразу за 201. Раскрываем блоб ⟺ авторизованный writer
+		// реально загрузил ЭТОТ digest в ЭТОТ repo в пределах freshness-TTL (durable
+		// pending-blob record). REG-37 сохранён: zot дедуплицирует блобы глобально, но
+		// раскрываются только блобы, которые writer доказуемо загрузил в этот repo (zot
+		// проверил digest на finalize) — подделать запись под чужой контент нельзя.
+		uploaded, uerr := h.blobUploadedToRepo(r.Context(), p.registryID, p.repo, p.reference)
+		if uerr != nil {
+			h.failClosed(w, "pending blob check failed", uerr)
+			return
+		}
+		if !uploaded {
+			writeNotFound(w)
+			return
+		}
 	}
 	h.forwarder.Forward(w, r)
+}
+
+// blobUploadedToRepo — консультируется с durable pending-blob record (REG-33): был ли
+// <digest> загружен в <registryID>/<repo> в пределах TTL. uploads==nil (upload-tracking
+// выключен) → false (не раскрываем без подтверждённого аплоада).
+func (h *Handler) blobUploadedToRepo(ctx context.Context, registryID, repo, digest string) (bool, error) {
+	if h.uploads == nil {
+		return false, nil
+	}
+	return h.uploads.BlobUploaded(ctx, registryID, repo, digest)
 }
 
 // servePullOnly — read-путь (manifest GET/HEAD, tags/list, referrers): single Check
@@ -206,6 +242,16 @@ func (h *Handler) servePush(w http.ResponseWriter, r *http.Request, p parsed, su
 		return
 	}
 
+	// REG-33 Defect A: blob PUT/POST-finalize (routeUpload с ?digest=<d>) обязан durable-
+	// записать (registryID, repo, digest) ДО релея 2xx клиенту — иначе docker HEAD сразу
+	// за 201 упрётся в 404 (блоб ещё не в манифесте). Буферизуем (пустой) ответ zot,
+	// на 2xx пишем строку, затем релеим. Прочие push-запросы (POST upload-init, PATCH
+	// chunk, manifest PUT) идут прежним стриминговым Forward.
+	if isBlobFinalize(p, r) {
+		h.forwardBlobFinalize(w, r, p)
+		return
+	}
+
 	status := h.forwarder.Forward(w, r)
 
 	// register-on-first-push: repo материализуется как authz-объект на первом
@@ -233,6 +279,47 @@ func (h *Handler) servePush(w http.ResponseWriter, r *http.Request, p parsed, su
 			}
 		}
 	}
+}
+
+// isBlobFinalize распознаёт blob PUT/POST-finalize: routeUpload с непустым ?digest=.
+// Это единственный push-запрос, материализующий блоб в repo (монолитный POST?digest
+// либо PUT?digest после PATCH-чанков). Mount (POST ?mount=&from=) сюда не попадает —
+// он несёт ?mount=, а не ?digest, и перехвачен early-return serveMount выше.
+func isBlobFinalize(p parsed, r *http.Request) bool {
+	if p.route != routeUpload {
+		return false
+	}
+	if r.Method != http.MethodPut && r.Method != http.MethodPost {
+		return false
+	}
+	return r.URL.Query().Get("digest") != ""
+}
+
+// forwardBlobFinalize проксирует blob-finalize БУФЕРИЗОВАННО (ForwardCapture) и на
+// успех (2xx) синхронно durable-записывает (registryID, repo, digest) ДО релея ответа
+// клиенту — чтобы немедленный HEAD за 201 гарантированно нашёл строку (REG-33 Defect A).
+// Запись идёт на detached-контексте (WithoutCancel): даже если клиент отвалится, ожидая
+// ответ, строка докоммитится (не-detached write отменился бы → retry-HEAD снова 404).
+// Сбой записи → fail-closed 503 (201 НЕ релеится): нельзя отдать 2xx, чей блоб мы не
+// можем стабильно раскрыть по HEAD — иначе Defect A вернётся. Push ретраит upload
+// (идемпотентно: zot дедуплицирует блоб). uploads==nil → трекинг выключен, просто релей.
+func (h *Handler) forwardBlobFinalize(w http.ResponseWriter, r *http.Request, p parsed) {
+	digest := r.URL.Query().Get("digest")
+	captured := h.forwarder.ForwardCapture(r)
+
+	twoXX := captured.Status >= 200 && captured.Status < 300
+	if twoXX && h.uploads != nil {
+		recCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), recordUploadTimeout)
+		rerr := h.uploads.RecordUploadedBlob(recCtx, p.registryID, p.repo, digest)
+		cancel()
+		if rerr != nil {
+			// Блоб в zot есть (2xx), но pending-строку записать не удалось. Отдать 201
+			// нельзя: следующий HEAD вернул бы 404 (реинтро Defect A). Fail-closed.
+			h.failClosed(w, "record uploaded blob failed", rerr)
+			return
+		}
+	}
+	writeCaptured(w, captured)
 }
 
 // resolveRegistryProject резолвит owning-project реестра для containment scope
@@ -520,6 +607,24 @@ func bearerToken(r *http.Request) (token string, present bool) {
 // writeNotFound — 404 existence-hiding (deny / несуществующий namespace/repo/блоб).
 func writeNotFound(w http.ResponseWriter) {
 	writeError(w, http.StatusNotFound, "NAME_UNKNOWN", "not found")
+}
+
+// writeCaptured релеит буферизованный ответ zot (ForwardCapture) клиенту: копирует
+// заголовки, пишет статус и тело. Вызывается ПОСЛЕ durable-побочки blob-finalize
+// (RecordUploadedBlob закоммичен) — так немедленный HEAD за 201 гарантированно видит
+// строку (REG-33 Defect A). Заголовки zot (напр. Location/Docker-Content-Digest)
+// сохраняются 1:1 — docker полагается на них при финализации блоба.
+func writeCaptured(w http.ResponseWriter, cr CapturedResponse) {
+	for k, vs := range cr.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	if cr.Status == 0 {
+		cr.Status = http.StatusOK
+	}
+	w.WriteHeader(cr.Status)
+	_, _ = w.Write(cr.Body)
 }
 
 // writeError пишет минимальный OCI-error-body с нужным HTTP-статусом; сырых причин

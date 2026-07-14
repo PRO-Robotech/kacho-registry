@@ -4,6 +4,7 @@
 package dataplane
 
 import (
+	"bytes"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -65,6 +66,58 @@ func (f *ZotForwarder) Forward(w http.ResponseWriter, r *http.Request) int {
 	f.proxy.ServeHTTP(rec, r)
 	return rec.status
 }
+
+// ForwardCapture проксирует запрос в zot, но БУФЕРИЗУЕТ ответ (status+headers+body) в
+// память вместо стриминга клиенту (см. Forwarder.ForwardCapture). Тело ЗАПРОСА при этом
+// по-прежнему стримится в zot (ReverseProxy читает r.Body потоково), поэтому даже
+// монолитный blob-PUT с полным слоем в теле не буферизуется — буферизуется лишь
+// (пустой для blob-finalize) ответ zot. Использует тот же proxy (Rewrite/auth-strip/
+// error-handler), что и Forward.
+func (f *ZotForwarder) ForwardCapture(r *http.Request) CapturedResponse {
+	rec := &bufferingRecorder{status: http.StatusOK}
+	f.proxy.ServeHTTP(rec, r)
+	return CapturedResponse{
+		Status: rec.status,
+		Header: rec.Header(),
+		Body:   rec.body.Bytes(),
+	}
+}
+
+// bufferingRecorder — http.ResponseWriter, накапливающий ответ zot в память
+// (ForwardCapture). Реализует http.Flusher no-op'ом: httputil.ReverseProxy может
+// вызвать Flush, но нам ничего стримить не нужно (буфер отдаётся целиком).
+type bufferingRecorder struct {
+	header  http.Header
+	status  int
+	body    bytes.Buffer
+	written bool
+}
+
+func (b *bufferingRecorder) Header() http.Header {
+	if b.header == nil {
+		b.header = make(http.Header)
+	}
+	return b.header
+}
+
+func (b *bufferingRecorder) WriteHeader(code int) {
+	if !b.written {
+		b.status = code
+		b.written = true
+	}
+}
+
+func (b *bufferingRecorder) Write(p []byte) (int, error) {
+	if !b.written {
+		b.status = http.StatusOK
+		b.written = true
+	}
+	return b.body.Write(p)
+}
+
+// Flush — no-op: буферизующий recorder ничего не стримит (совместимость с
+// ReverseProxy, который может привести writer к http.Flusher).
+func (b *bufferingRecorder) Flush() {}
 
 // statusRecorder перехватывает HTTP-статус, не мешая стримингу тела (Write —
 // pass-through). WriteHeader фиксирует первый записанный код.
