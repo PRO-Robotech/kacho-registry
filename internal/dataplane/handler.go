@@ -146,17 +146,42 @@ func (h *Handler) serveManifest(w http.ResponseWriter, r *http.Request, p parsed
 
 // serveBlob — pull блоба (GET/HEAD): v_get на repo + per-repo blob-scope (REG-37).
 // Push блобов идёт через /blobs/uploads (routeUpload), не сюда.
+//
+// v_get-deny обрабатывается НЕ безусловным 404: на брошенном ещё-не-материализованном
+// repo применяется push-context fallback (REG-33 Defect B, см. pushContextRevealsBlob) —
+// иначе первый push зависает в дедлоке (blob HEAD 404 ⟸ repo не материализован ⟸ манифест
+// не запушен ⟸ blob HEAD 404). На established repo v_get-deny остаётся 404 (existence-hiding).
 func (h *Handler) serveBlob(w http.ResponseWriter, r *http.Request, p parsed, subject string) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeNotFound(w)
 		return
 	}
-	if !h.check(w, r, subject, relVGet, repositoryObject(p.registryID, p.repo)) {
+	ctx := r.Context()
+	allowed, err := h.checkAllowed(ctx, subject, relVGet, repositoryObject(p.registryID, p.repo))
+	if err != nil {
+		h.failClosed(w, "authorization check failed", err)
 		return
 	}
-	// blob-scope existence-hiding: блоб достижим только если входит в манифест(ы)
-	// авторизованного repo (чужой content-addressable блоб → 404).
-	in, err := h.backend.BlobInRepo(r.Context(), p.registryID, p.repo, p.reference)
+	if !allowed {
+		// REG-33 Defect B (deadlock): per-object registry_repository authz материализуется
+		// только на manifest-PUT (register-on-first-push), поэтому на первом push blob
+		// HEAD/GET упирается в v_get-deny ДО манифеста. Раскрываем блоб ⟺ это доказуемо
+		// push-in-progress того же тенанта (см. pushContextRevealsBlob); иначе 404.
+		reveal, ferr := h.pushContextRevealsBlob(ctx, p, subject)
+		if ferr != nil {
+			h.failClosed(w, "push-context blob fallback check failed", ferr)
+			return
+		}
+		if !reveal {
+			writeNotFound(w) // deny + не push-context → 404 (existence-hiding сохранён)
+			return
+		}
+		h.forwarder.Forward(w, r)
+		return
+	}
+	// v_get прошёл (established repo) — blob-scope existence-hiding: блоб достижим только
+	// если входит в манифест(ы) авторизованного repo (чужой content-addressable блоб → 404).
+	in, err := h.backend.BlobInRepo(ctx, p.registryID, p.repo, p.reference)
 	if err != nil {
 		h.failClosed(w, "blob scope check failed", err)
 		return
@@ -169,7 +194,7 @@ func (h *Handler) serveBlob(w http.ResponseWriter, r *http.Request, p parsed, su
 		// pending-blob record). REG-37 сохранён: zot дедуплицирует блобы глобально, но
 		// раскрываются только блобы, которые writer доказуемо загрузил в этот repo (zot
 		// проверил digest на finalize) — подделать запись под чужой контент нельзя.
-		uploaded, uerr := h.blobUploadedToRepo(r.Context(), p.registryID, p.repo, p.reference)
+		uploaded, uerr := h.blobUploadedToRepo(ctx, p.registryID, p.repo, p.reference)
 		if uerr != nil {
 			h.failClosed(w, "pending blob check failed", uerr)
 			return
@@ -180,6 +205,46 @@ func (h *Handler) serveBlob(w http.ResponseWriter, r *http.Request, p parsed, su
 		}
 	}
 	h.forwarder.Forward(w, r)
+}
+
+// pushContextRevealsBlob решает, раскрыть ли blob HEAD/GET на ветке v_get-deny (REG-33
+// Defect B — deadlock-фикс первого push). Возвращает true ТОЛЬКО если ВСЕ три условия
+// выполнены одновременно:
+//
+//	(a) repo ещё НЕ материализован как tagged repo (RepoExists=false) — first-push in
+//	    progress; у established repo v_get уже прошёл бы и сюда бы не зашли, а если
+//	    v_get-deny на established repo — это ЛЕГИТИМНЫЙ deny (revoke/чужой), не дедлок;
+//	(b) caller держит v_create@registry_registry (namespace) — то же право, что
+//	    авторизовало blob-upload в servePush; доказывает push-authority того же
+//	    проекта/тенанта на ЭТОТ registry (cross-tenant caller его не держит);
+//	(c) ЭТОТ digest доказуемо загружен в ЭТОТ repo в пределах TTL (REG-33 durable
+//	    pending-blob record) — writer владеет контентом (zot проверил digest на finalize).
+//
+// Все три вместе раскрывают ТОЛЬКО собственный только-что-загруженный блоб в собственном
+// новом repo. REG-37 сохранён: другой тенант не держит v_create на этот registry →
+// fallback denies → 404 (cross-tenant content-addressable leak невозможен). После
+// manifest-PUT register-on-first-push материализует repo → v_get проходит штатно →
+// fallback больше не нужен (нулевая добавленная стоимость на established pull-пути).
+//
+// Порядок условий short-circuit'ит по возрастанию стоимости и security-строгости: сначала
+// дешёвый RepoExists (established → выход без Check), затем v_create-Check (cross-tenant →
+// выход без pending-запроса), затем pending-record.
+func (h *Handler) pushContextRevealsBlob(ctx context.Context, p parsed, subject string) (bool, error) {
+	exists, err := h.backend.RepoExists(ctx, p.registryID, p.repo)
+	if err != nil {
+		return false, err
+	}
+	if exists {
+		return false, nil // established repo — v_get-deny легитимен (не first-push дедлок)
+	}
+	allowed, err := h.checkAllowed(ctx, subject, relVCreate, registryObject(p.registryID))
+	if err != nil {
+		return false, err
+	}
+	if !allowed {
+		return false, nil // caller не может пушить в этот registry — cross-tenant → 404
+	}
+	return h.blobUploadedToRepo(ctx, p.registryID, p.repo, p.reference)
 }
 
 // blobUploadedToRepo — консультируется с durable pending-blob record (REG-33): был ли

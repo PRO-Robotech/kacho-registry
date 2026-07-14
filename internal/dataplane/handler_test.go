@@ -902,6 +902,152 @@ func TestDataplane_REG33A_BlobPutFinalize_NoRights_404_NoRecord(t *testing.T) {
 	require.Empty(t, up.recordedKeys(), "неавторизованный finalize не пишет pending-строку")
 }
 
+// REG-33B (#33 Defect B — deadlock) — push-time blob HEAD/GET нового repo. На первом
+// push blob-upload гейтится v_create@registry_registry (namespace), но per-object
+// registry_repository authz-объект материализуется ТОЛЬКО на успешном manifest-PUT
+// (register-on-first-push). Docker делает HEAD блоба ДО манифеста → v_get@repo denies
+// (объект ещё не существует) → serveBlob раньше отдавал 404 ДО pending-record проверки →
+// docker рвёт push «unknown blob». Круговой дедлок: repo не материализован ⟸ манифест не
+// запушен ⟸ blob HEAD 404 ⟸ repo не материализован. Фикс: на v_get-deny fallback раскрывает
+// блоб ⟺ (a) repo ещё НЕ материализован (RepoExists=false), (b) caller держит
+// v_create@namespace (то же право, что авторизовало upload), (c) ЭТОТ digest доказуемо
+// загружен в ЭТОТ repo (pending-record). RED до фикса: 404. После фикса: forward (200).
+func TestDataplane_REG33B_BlobHead_NewRepoVGetDenied_PushContextReveals(t *testing.T) {
+	// НОВЫЙ repo: v_get@repo НЕ материализован (denied), но caller держит
+	// v_create@namespace И блоб загружен в этот repo (pending) → deadlock-фикс раскрывает.
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	fw := &fakeForwarder{status: 200}
+	be := &fakeBackend{exists: map[string]bool{}} // repo ещё не материализован (RepoExists=false)
+	up := &fakeUploadRecorder{uploaded: map[string]bool{
+		uploadCacheKey("reg-A", "app", "sha256:fresh"): true,
+	}}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:fresh", true).Code,
+		"push-time HEAD нового repo раскрывается через push-context fallback, не 404")
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodGet, "/v2/reg-A/app/blobs/sha256:fresh", true).Code,
+		"GET того же блоба тоже раскрывается (тот же тенант, свой только-что-загруженный блоб)")
+	require.Equal(t, 2, fw.count(), "оба запроса проксированы в zot через fallback")
+}
+
+// REG-33B cross-tenant regression (REG-37 сохранён) — v_get@repo denied И caller НЕ
+// держит v_create на ЭТОТ registry (право только на ДРУГОЙ реестр). Даже если блоб
+// глобально существует в zot и «в pending» — fallback denies → 404. Ключевой
+// security-инвариант: fallback раскрывает ТОЛЬКО блобы того, кто может пушить в этот
+// registry (v_create = тот же проект/тенант). Cross-tenant caller лишён v_create → 404.
+func TestDataplane_REG33B_BlobHead_CrossTenant_NoVCreate_Still404(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-OTHER": true}}
+	fw := &fakeForwarder{}
+	be := &fakeBackend{exists: map[string]bool{}}
+	up := &fakeUploadRecorder{uploaded: map[string]bool{
+		uploadCacheKey("reg-A", "app", "sha256:fresh"): true, // блоб реально загружен в reg-A/app
+	}}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-evil"}, az, be, fw, &fakeRepoReg{}, up)
+
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:fresh", true).Code,
+		"cross-tenant HEAD без v_create на этот registry → 404 (не раскрываем)")
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodGet, "/v2/reg-A/app/blobs/sha256:fresh", true).Code,
+		"cross-tenant GET тоже 404")
+	require.Equal(t, 0, fw.count(), "cross-tenant блоб не проксируется")
+}
+
+// REG-33B regression — v_get denied, v_create@namespace allowed, но блоб НЕ в pending
+// (writer не загружал ЭТОТ digest в ЭТОТ repo). Fallback denies → 404: право пушить в
+// namespace НЕ раскрывает произвольный глобальный блоб — нужен доказанный upload именно
+// этого контента в этот repo (zot проверил digest на finalize).
+func TestDataplane_REG33B_BlobHead_VCreateAllowed_NotInPending_Still404(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	fw := &fakeForwarder{}
+	be := &fakeBackend{exists: map[string]bool{}}
+	up := &fakeUploadRecorder{} // ничего не загружено → pending=false
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:notmine", true).Code,
+		"v_create есть, но блоб не в pending → 404")
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodGet, "/v2/reg-A/app/blobs/sha256:notmine", true).Code)
+	require.Equal(t, 0, fw.count(), "не-загруженный блоб не раскрывается")
+}
+
+// REG-33B regression — repo УЖЕ материализован (RepoExists=true), но caller лишён v_get
+// (чужой/revoked reader). Fallback НЕ применяется: exists=true → это ЛЕГИТИМНЫЙ deny
+// established repo, а не first-push дедлок. 404 даже при наличии v_create И pending-record
+// (иначе fallback стал бы обходом revoke на established repo).
+func TestDataplane_REG33B_BlobHead_RepoExists_VGetDenied_Still404(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	fw := &fakeForwarder{}
+	be := &fakeBackend{exists: map[string]bool{"reg-A/app": true}} // established repo
+	up := &fakeUploadRecorder{uploaded: map[string]bool{
+		uploadCacheKey("reg-A", "app", "sha256:x"): true,
+	}}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:x", true).Code,
+		"established repo + v_get denied → 404, fallback не применяется (не обход revoke)")
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodGet, "/v2/reg-A/app/blobs/sha256:x", true).Code)
+	require.Equal(t, 0, fw.count())
+}
+
+// REG-33B regression — established repo, v_get ALLOWED → forward штатным путём БЕЗ
+// fallback: ровно один authz-Check (v_get), никаких лишних RepoExists/v_create на
+// hot pull-пути. Локает «нулевая добавленная стоимость на established pull».
+func TestDataplane_REG33B_BlobHead_EstablishedRepo_VGetAllowed_NoFallbackCost(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_get registry_repository:reg-A/app": true}}
+	fw := &fakeForwarder{status: 200}
+	be := &fakeBackend{blobs: map[string]bool{"reg-A/app|sha256:own": true}} // блоб входит в манифест
+	up := &fakeUploadRecorder{}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodGet, "/v2/reg-A/app/blobs/sha256:own", true).Code)
+	require.Equal(t, 1, fw.count())
+	require.Len(t, az.checkedObjects(), 1,
+		"established pull делает ровно один Check (v_get) — fallback не трогается, нулевая добавленная стоимость")
+}
+
+// REG-33B — зависимость fallback недоступна на v_get-deny ветке: RepoExists падает →
+// fail-closed 503 (не гадаем 404/200 при недоступном zot). Exercised именно ветка
+// fallback (v_get denied без az.err, ошибка приходит из RepoExists внутри fallback).
+func TestDataplane_REG33B_BlobHead_FallbackRepoExistsError_FailClosed(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{}} // v_get denied (без az-ошибки)
+	fw := &fakeForwarder{}
+	be := &fakeBackend{existsErr: errors.New("zot down")}
+	up := &fakeUploadRecorder{}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	rec := doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:x", true)
+	require.GreaterOrEqual(t, rec.Code, 500, "fallback RepoExists error → fail-closed 5xx")
+	require.NotEqual(t, http.StatusNotFound, rec.Code, "недоступность зависимости не маскируется под 404")
+	require.Equal(t, 0, fw.count())
+}
+
+// REG-33B — v_create Check внутри fallback падает → fail-closed 503 (не 404/200).
+func TestDataplane_REG33B_BlobHead_FallbackVCreateCheckError_FailClosed(t *testing.T) {
+	// v_get denied через allow-map (Check(v_get)=false, без ошибки), но v_create-Check
+	// падает. fakeAuthz.err применяется ко ВСЕМ Check — поэтому используем backend без
+	// ошибок и специальный authz, который ошибается только на v_create.
+	az := &vCreateErrAuthz{allowGet: false, vCreateErr: errors.New("iam down")}
+	fw := &fakeForwarder{}
+	be := &fakeBackend{exists: map[string]bool{}}
+	up := &fakeUploadRecorder{}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	rec := doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:x", true)
+	require.GreaterOrEqual(t, rec.Code, 500, "fallback v_create Check error → fail-closed 5xx")
+	require.Equal(t, 0, fw.count())
+}
+
+// REG-33B — pending-record проверка внутри fallback падает → fail-closed 503.
+func TestDataplane_REG33B_BlobHead_FallbackPendingError_FailClosed(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	fw := &fakeForwarder{}
+	be := &fakeBackend{exists: map[string]bool{}}
+	up := &fakeUploadRecorder{getErr: errors.New("pg down")}
+	h := newTestHandlerU(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, up)
+
+	rec := doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:x", true)
+	require.GreaterOrEqual(t, rec.Code, 500, "fallback pending-check error → fail-closed 5xx")
+	require.Equal(t, 0, fw.count())
+}
+
 // helper: убеждаемся, что Authorization без "Bearer " схемы → 401.
 func TestDataplane_MalformedAuthHeader_401(t *testing.T) {
 	h := newTestHandler(&fakeVerifier{subject: "sva-ci"}, &fakeAuthz{}, &fakeBackend{}, &fakeForwarder{}, &fakeRepoReg{})
