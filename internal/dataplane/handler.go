@@ -204,7 +204,11 @@ func (h *Handler) serveBlob(w http.ResponseWriter, r *http.Request, p parsed, su
 		h.serveBlobScoped(w, r, p)
 		return
 	}
-	// v_get прошёл (established repo) — blob-scope existence-hiding.
+	// v_get прошёл (established repo) — реальный per-repo authz материализован → снимаем
+	// push-grant-мост (revoke-safety: иначе он раскрывал бы repo после revoke до TTL). Мост
+	// per-repo; снимаем независимо от того, входит ли ЭТОТ блоб в scope (blob-scope — ниже).
+	h.dropPushGrantMaterialized(ctx, p, subject)
+	// blob-scope existence-hiding.
 	h.serveBlobScoped(w, r, p)
 }
 
@@ -317,6 +321,11 @@ func (h *Handler) servePullOnly(w http.ResponseWriter, r *http.Request, p parsed
 			writeNotFound(w) // deny + не push-owner → 404 (existence-hiding сохранён)
 			return
 		}
+		// push-owner мост использован (v_get/v_list ещё не материализован) — grant НЕ снимаем.
+	} else {
+		// Реальный per-repo authz ALLOW'нул (материализовался в FGA) → снимаем push-grant-мост
+		// (revoke-safety: иначе он раскрывал бы repo после revoke до истечения TTL).
+		h.dropPushGrantMaterialized(ctx, p, subject)
 	}
 	h.forwarder.Forward(w, r)
 }
@@ -333,6 +342,40 @@ func (h *Handler) pushOwnerRevealsRepo(ctx context.Context, p parsed, subject st
 		return false, nil
 	}
 	return h.pushGrants.PushGranted(ctx, p.registryID, p.repo, subject)
+}
+
+// deletePushGrantTimeout — дедлайн detached-контекста delete-on-materialized. Работа —
+// fire-and-forget на пути ПОСЛЕ pull-ответа, отвязана от отмены r.Context() (клиент рвёт
+// соединение сразу за pull), собственный дедлайн ограничивает хвост при недоступной БД.
+const deletePushGrantTimeout = 10 * time.Second
+
+// dropPushGrantMaterialized снимает push-grant-мост (registry_push_grant) для (registryID,
+// repo, subject) ПОСЛЕ того, как реальный per-repo v_get/v_list Check на pull ALLOW'нул — т.е.
+// per-repo authz материализовался в FGA и мост больше не нужен. КРИТИЧНО для revoke-safety:
+// без снятия push-grant (в пределах TTL) продолжал бы раскрывать repo и ПОСЛЕ последующего
+// revoke (v_get снова denies, но свежий push-grant → allow) — stale-access leak до истечения
+// TTL. Удаление привязывает время жизни моста к «пока реальный v_get не заработал разок»;
+// TTL-backstop ловит случай, когда pull после материализации так и не случился.
+//
+// Асинхронно (fire-and-forget goroutine на detached-ctx): не добавляет латентности
+// allowed-pull hot-path и переживает разрыв соединения клиентом за pull-ответом. Ошибка →
+// log-and-continue (мост всё равно ограничен TTL-backstop'ом; delete лишь схлопывает окно
+// к ~0). Индексный DELETE без совпадения — дешёвый no-op, поэтому зовём безусловно на
+// allow-ветке (без предварительного PushGranted — нулевая добавленная стоимость на Check-пути).
+// pushGrants==nil → no-op (мост выключен).
+func (h *Handler) dropPushGrantMaterialized(ctx context.Context, p parsed, subject string) {
+	if h.pushGrants == nil {
+		return
+	}
+	bgCtx := context.WithoutCancel(ctx)
+	go func() {
+		dctx, cancel := context.WithTimeout(bgCtx, deletePushGrantTimeout)
+		defer cancel()
+		if err := h.pushGrants.DeletePushGrant(dctx, p.registryID, p.repo, subject); err != nil {
+			h.logger.Error("push-grant delete-on-materialized failed",
+				"repo", p.registryID+"/"+p.repo, "err", err)
+		}
+	}()
 }
 
 // registerPushTimeout — дедлайн detached-контекста register-on-first-push. Работа
@@ -520,7 +563,7 @@ func (h *Handler) serveMount(w http.ResponseWriter, r *http.Request, p parsed, s
 		return
 	}
 	if !allowedSrc || !allowedDst {
-		writeNotFound(w) // exfil-guard: чужой блоб не монтируется (existence-hiding)
+		writeDenied(w) // push-deny (src/dst authz) → 403 DENIED (униформно; blob-scope miss ниже — 404)
 		return
 	}
 	// REG-37 mount blob-scope: v_get(src) доказывает доступ к src-repo, но zot НЕ
@@ -679,9 +722,11 @@ func decodeCatalogCursor(cursor string) int {
 	return off
 }
 
-// check — single per-request Check против repo/namespace-объекта. allow → true
-// (caller форвардит); deny → 404 (existence-hiding); az-error → fail-closed 503.
-// authz==nil (breakglass) → allow. Возвращает false, если ответ уже записан.
+// check — single per-request PUSH-Check против repo/namespace-объекта (servePush verb-map).
+// allow → true (caller форвардит); deny → 403 DENIED (docker-стандарт для push-отказа,
+// existence-hiding сохранён униформностью — см. writeDenied); az-error → fail-closed 503.
+// authz==nil (breakglass) → allow. Возвращает false, если ответ уже записан. ИСПОЛЬЗУЕТСЯ
+// ТОЛЬКО на push-пути — read-путь гейтит checkAllowed напрямую и отдаёт 404 на deny.
 func (h *Handler) check(w http.ResponseWriter, r *http.Request, subject, relation, object string) bool {
 	allowed, err := h.checkAllowed(r.Context(), subject, relation, object)
 	if err != nil {
@@ -689,7 +734,7 @@ func (h *Handler) check(w http.ResponseWriter, r *http.Request, subject, relatio
 		return false
 	}
 	if !allowed {
-		writeNotFound(w) // deny → 404 (не раскрываем существование чужого объекта)
+		writeDenied(w) // push-deny → 403 DENIED (униформно: exists ИЛИ нет — не различить)
 		return false
 	}
 	return true
@@ -751,6 +796,16 @@ func bearerToken(r *http.Request) (token string, present bool) {
 // writeNotFound — 404 existence-hiding (deny / несуществующий namespace/repo/блоб).
 func writeNotFound(w http.ResponseWriter) {
 	writeError(w, http.StatusNotFound, "NAME_UNKNOWN", "not found")
+}
+
+// writeDenied — 403 docker-стандартный отказ доступа на PUSH-пути (servePush / serveMount
+// authz-deny). Отличается от read-side writeNotFound: «name unknown: not found» на push,
+// который caller не вправе писать, путает легитимного-но-неавторизованного/отозванного
+// толкавшего; крупные реестры возвращают именно 403 DENIED. Existence-hiding сохранён
+// УНИФОРМНОСТЬЮ: КАЖДЫЙ push-deny → 403 (repo существует ИЛИ нет — оба 403, не различить),
+// как раньше 404-uniform. Read-путь (v_get/blob-scope) остаётся 404 (content-discovery hiding).
+func writeDenied(w http.ResponseWriter) {
+	writeError(w, http.StatusForbidden, "DENIED", "requested access to the resource is denied")
 }
 
 // writeCaptured релеит буферизованный ответ zot (ForwardCapture) клиенту: копирует

@@ -79,6 +79,24 @@ func (r *PushGrantRepo) PushGranted(ctx context.Context, registryID, repo, subje
 	return exists, nil
 }
 
+// DeletePushGrant удаляет push-grant-строку (registryID, repo, subject) — вызывается на
+// pull-path delete-on-materialized, как только реальный per-repo v_get/v_list ALLOW'нул
+// (мост больше не нужен и обязан перестать раскрывать repo, иначе после revoke он в пределах
+// TTL продолжал бы отдавать доступ). Одиночный индексный DELETE по PK атомарен; удаление
+// несуществующей строки — дешёвый no-op (0 rows, безопасно звать безусловно на allow-ветке).
+func (r *PushGrantRepo) DeletePushGrant(ctx context.Context, registryID, repo, subject string) error {
+	if err := r.ready(); err != nil {
+		return err
+	}
+	q := fmt.Sprintf(`
+		DELETE FROM %s.registry_push_grant
+		 WHERE registry_id = $1 AND repo = $2 AND subject = $3`, schema)
+	if _, err := r.pool.Exec(ctx, q, registryID, repo, subject); err != nil {
+		return wrapPgErr(err, "registry_push_grant", registryID+"/"+repo)
+	}
+	return nil
+}
+
 // SweepStale удаляет push-grant-строки старше ttl (гигиена: после FGA-материализации v_get
 // строка избыточна; без sweep таблица росла бы неограниченно). Возвращает число удалённых
 // строк. Идемпотентна, безопасна к параллельному запуску реплик.

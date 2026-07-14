@@ -116,9 +116,22 @@ type UploadRecorder interface {
 // fallback: v_get denied, НО субъект доказуемо запушил repo → раскрываем (мост на окно
 // материализации). Ключ по SUBJECT — раскрывается ТОЛЬКО собственный только-что-запушенный
 // repo толкавшего; чужой субъект/тенант записи не имеет → остаётся 404 (REG-37 сохранён,
-// не cross-tenant leak). Как только FGA материализует v_get — штатный путь обслуживает repo,
-// а запись протухает по TTL (sweeper). serveBlob дополнительно держит blob-scope (REG-37):
-// push-grant раскрывает repo, но НЕ произвольный глобальный content-addressable блоб.
+// не cross-tenant leak).
+//
+// Revoke-safety (мост живёт ТОЛЬКО окно материализации, НЕ переживает revoke): мост обязан
+// перестать раскрывать repo, как только реальный per-repo authz заработал ИЛИ доступ отозван.
+// Два ограничителя (оба обязательны):
+//   - delete-on-materialized (первичный): как только pull-path v_get/v_list Check ALLOW'нул
+//     (реальный per-repo authz материализовался в FGA), запись (registryID, repo, subject)
+//     удаляется (DeletePushGrant) — мост схлопывается к нулю. Последующий revoke → v_get
+//     denies → записи нет → 404. Без этого push-grant (в пределах TTL) раскрывал бы repo и
+//     ПОСЛЕ revoke — до истечения TTL (stale/cross-tenant-ish access leak).
+//   - TTL-backstop: короткий freshness-TTL (config PushGrantTTL) ограничивает худший случай,
+//     если delete-on-materialized не сработал (толкавший ни разу не пул(нул) после
+//     материализации) — окно обхода revoke ≤ TTL, а не 1h.
+//
+// serveBlob дополнительно держит blob-scope (REG-37): push-grant раскрывает repo, но НЕ
+// произвольный глобальный content-addressable блоб.
 //
 // Реализуется pg.PushGrantRepo. nil → no-op (запись не ведётся, fallback не выдаётся).
 type PushGrantRecorder interface {
@@ -130,6 +143,13 @@ type PushGrantRecorder interface {
 	// PushGranted сообщает, держит ли <subject> свежий push-grant на <registryID>/<repo>
 	// (granted_at в пределах TTL; протухшие игнорируются и подметаются sweeper'ом).
 	PushGranted(ctx context.Context, registryID, repo, subject string) (bool, error)
+	// DeletePushGrant удаляет push-grant-строку (registryID, repo, subject) — вызывается на
+	// pull-path, как только реальный per-repo v_get/v_list Check ALLOW'нул (per-repo authz
+	// материализовался в FGA): мост больше не нужен и обязан ПЕРЕСТАТЬ раскрывать repo, иначе
+	// после последующего revoke он (в пределах TTL) продолжал бы отдавать доступ (stale-access
+	// leak). Привязывает время жизни моста к «пока реальный v_get не заработал разок». Идемпотентен:
+	// DELETE без совпадения — дешёвый индексный no-op (безопасно звать безусловно на allow-ветке).
+	DeletePushGrant(ctx context.Context, registryID, repo, subject string) error
 }
 
 // RepoRegistrar — эмит register-intent нового repo (register-on-first-push):

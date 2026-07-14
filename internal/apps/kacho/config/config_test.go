@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,6 +39,34 @@ func TestConfig_IAMProjectEdge_DefaultAndDistinctFromAuthz(t *testing.T) {
 	// Два ребра обязаны быть разными endpoint'ами (public :9090 ≠ internal :9091).
 	assert.NotEqual(t, c.AuthZIAMGRPCAddr, c.IAMProjectGRPCAddr,
 		"project (public :9090) and authz (internal :9091) edges must be distinct conns")
+}
+
+// TestConfig_PushGrantTTL_DefaultBridge_60s фиксирует revoke-safe дефолт TTL push-ownership
+// моста (registry_push_grant, REG-33 immediate-pull). Мост живёт ТОЛЬКО окно материализации
+// per-repo authz (эмпирически ~10-15s); прежний дефолт 1h позволял отозванному (revoked)
+// субъекту тянуть repo до 1h после revoke (v_get denies, но свежий push-grant раскрывает →
+// stale-access leak). Дефолт = 60s: щедрый буфер над материализацией, но худший обход revoke
+// ограничен ≤60s (а delete-on-materialized схлопывает его к ~0 на первом же allowed-pull).
+func TestConfig_PushGrantTTL_DefaultBridge_60s(t *testing.T) {
+	env := baseEnv()
+
+	var c Config
+	require.NoError(t, LoadInto(&c, env))
+
+	assert.Equal(t, 60*time.Second, c.PushGrantTTL,
+		"push-grant TTL default must be a short 60s bridge (bounds revoke-bypass), not 1h")
+}
+
+// TestConfig_PushGrantTTL_Override — TTL остаётся env-настраиваемым (KACHO_REGISTRY_PUSH_GRANT_TTL).
+func TestConfig_PushGrantTTL_Override(t *testing.T) {
+	env := baseEnv()
+	env["KACHO_REGISTRY_PUSH_GRANT_TTL"] = "90s"
+
+	var c Config
+	require.NoError(t, LoadInto(&c, env))
+
+	assert.Equal(t, 90*time.Second, c.PushGrantTTL,
+		"push-grant TTL must stay env-configurable")
 }
 
 // TestConfig_HydraJWKS_Defaults фиксирует контракт data-plane authN: JWKS-источник
