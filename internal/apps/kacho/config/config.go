@@ -99,13 +99,19 @@ type Config struct {
 	// строка (registry_id, repo, subject); pull-path раскрывает repo толкавшему, если он
 	// запушил его не старше этого TTL, ПОКА async register-on-first-push не материализовал
 	// per-repo v_get в FGA (иначе собственный немедленный `docker pull` толкавшего упрётся
-	// в v_get-deny → 404). Запись лишь мостит окно материализации — как только FGA догнал,
-	// штатный v_get обслуживает repo, а строку подметает sweeper (интервал = TTL). Щедрый
-	// дефолт 1h безопасен: запись повторно даёт доступ ТОЛЬКО толкавшему к ЕГО СОБСТВЕННОМУ
-	// repo (он и так получает его перманентно после материализации), поэтому длинный TTL
-	// безвреден и устойчив к медленной материализации. 0 → fallback выключен (не задавать
-	// в проде — REG-33 immediate-pull не закрыт).
-	PushGrantTTL time.Duration `envconfig:"KACHO_REGISTRY_PUSH_GRANT_TTL" default:"1h"`
+	// в v_get-deny → 404). Запись — лишь мост на окно материализации.
+	//
+	// Revoke-safety — TTL обязан быть КОРОТКИМ: это backstop worst-case-обхода revoke. Пока
+	// строка свежа, pull-path раскрывает repo на КАЖДЫЙ v_get-deny — включая ПОСЛЕ revoke
+	// (v_get denies, но свежий push-grant → allow). Прежний дефолт 1h позволял отозванному
+	// субъекту тянуть repo (и чужой контент, залитый в него другими) до 1h после revoke —
+	// реальный stale/cross-tenant-ish access leak. Первичный ограничитель — delete-on-
+	// materialized (pull-path на первом же реальном v_get-allow удаляет строку → окно ~0);
+	// TTL ловит случай, когда толкавший после материализации ни разу не пул(нул). Дефолт
+	// 60s: щедрый буфер над материализацией (эмпирически ~10-15s), но worst-case обход revoke
+	// ≤60s, а не 1h. Sweeper подметает строки (интервал = TTL). 0 → fallback выключен (не
+	// задавать в проде — REG-33 immediate-pull не закрыт).
+	PushGrantTTL time.Duration `envconfig:"KACHO_REGISTRY_PUSH_GRANT_TTL" default:"60s"`
 
 	// ===== data-plane OCI auth-proxy (registry.kacho.local) =====
 

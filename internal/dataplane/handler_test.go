@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -297,8 +298,9 @@ func TestDataplane_REG14d_PushNewRepo_ProjectLookupError_EmitsEmptyProject_Logge
 }
 
 // REG-18 — push без прав → первый upload-запрос Check(registry_registry:reg-A, v_create)
-// deny → 404 (existence-hiding); блоб не принят, register-intent не эмитится.
-func TestDataplane_REG18_PushNoRights_404(t *testing.T) {
+// deny → 403 DENIED (docker-стандарт push-отказа, existence-hiding униформностью); блоб не
+// принят, register-intent не эмитится.
+func TestDataplane_REG18_PushNoRights_403Denied(t *testing.T) {
 	az := &fakeAuthz{allow: map[string]bool{}} // deny
 	fw := &fakeForwarder{}
 	be := &fakeBackend{exists: map[string]bool{}}
@@ -306,7 +308,8 @@ func TestDataplane_REG18_PushNoRights_404(t *testing.T) {
 	h := newTestHandler(&fakeVerifier{subject: "sva-evil"}, az, be, fw, rr)
 
 	rec := doReq(h, http.MethodPost, "/v2/reg-A/app/blobs/uploads/", true)
-	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, "DENIED", pushDenyCode(t, rec))
 	require.Equal(t, 0, fw.count())
 	require.Empty(t, rr.registered())
 }
@@ -357,16 +360,88 @@ func TestDataplane_REG15_PushExisting_VUpdate(t *testing.T) {
 }
 
 // REG-15 negative — субъект с namespace v_create, но БЕЗ v_update на существующий repo
-// → blob-upload в существующий repo → Check(v_update@repo) deny → 404 (decoupling).
-func TestDataplane_REG15_PushExisting_NoRepoUpdate_404(t *testing.T) {
+// → blob-upload в существующий repo → Check(v_update@repo) deny → 403 DENIED (decoupling;
+// push-deny униформно 403).
+func TestDataplane_REG15_PushExisting_NoRepoUpdate_403Denied(t *testing.T) {
 	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}} // только namespace
 	fw := &fakeForwarder{}
 	be := &fakeBackend{exists: map[string]bool{"reg-A/app": true}}
 	h := newTestHandler(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{})
 
 	rec := doReq(h, http.MethodPost, "/v2/reg-A/app/blobs/uploads/", true)
-	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, "DENIED", pushDenyCode(t, rec))
 	require.Equal(t, 0, fw.count())
+}
+
+// pushDenyBody декодирует OCI-error-body и возвращает первый code (для проверки DENIED).
+func pushDenyCode(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Errors []struct{ Code, Message string } `json:"errors"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Len(t, body.Errors, 1)
+	return body.Errors[0].Code
+}
+
+// REG-DENY — push authz-deny отдаёт docker-стандартный 403 DENIED (а НЕ 404 name-unknown):
+// «name unknown: not found» на push, который caller не вправе писать, путает легитимного-но-
+// неавторизованного/отозванного толкавшего; все крупные реестры возвращают 403 denied. Меняем
+// ТОЛЬКО push-путь (servePush + serveMount deny). Existence-hiding СОХРАНЁН униформностью:
+// КАЖДЫЙ push-deny → 403 (repo существует ИЛИ нет — не различить), точно как было с 404-uniform.
+// RED до фикса: servePush deny отдаёт 404 NAME_UNKNOWN. Pull-deny остаётся 404 (отдельный кейс ниже).
+func TestDataplane_REGDENY_PushAuthzDeny_403Denied_Uniform(t *testing.T) {
+	// (1) blob-upload init в НЕСУЩЕСТВУЮЩИЙ repo, v_create denied → 403 DENIED.
+	azNew := &fakeAuthz{allow: map[string]bool{}} // deny
+	fwNew := &fakeForwarder{}
+	hNew := newTestHandler(&fakeVerifier{subject: "sva-evil"}, azNew, &fakeBackend{exists: map[string]bool{}}, fwNew, &fakeRepoReg{})
+	recNew := doReq(hNew, http.MethodPost, "/v2/reg-A/app/blobs/uploads/", true)
+	require.Equal(t, http.StatusForbidden, recNew.Code, "push-deny нового repo → 403 (не 404)")
+	require.Equal(t, "DENIED", pushDenyCode(t, recNew), "docker-стандартный code DENIED")
+	require.Equal(t, 0, fwNew.count())
+
+	// (2) manifest-PUT в СУЩЕСТВУЮЩИЙ repo, v_update denied → 403 DENIED (та же униформа).
+	azExisting := &fakeAuthz{allow: map[string]bool{}} // deny
+	fwExisting := &fakeForwarder{}
+	hExisting := newTestHandler(&fakeVerifier{subject: "sva-evil"}, azExisting, &fakeBackend{exists: map[string]bool{"reg-A/app": true}}, fwExisting, &fakeRepoReg{})
+	recExisting := doReq(hExisting, http.MethodPut, "/v2/reg-A/app/manifests/v1", true)
+	require.Equal(t, http.StatusForbidden, recExisting.Code, "push-deny существующего repo → 403")
+	require.Equal(t, "DENIED", pushDenyCode(t, recExisting))
+
+	// Униформность existence-hiding: несуществующий (v_create-deny) И существующий (v_update-deny)
+	// дают ОДИНАКОВЫЙ 403 → атакующий не отличает exists-denied от nonexistent (как 404-uniform).
+	require.Equal(t, recNew.Code, recExisting.Code,
+		"exists-denied и nonexistent-denied неразличимы (оба 403) — existence-hiding сохранён")
+}
+
+// REG-DENY — mount authz-deny (src ИЛИ dst) → 403 DENIED (push-путь). Blob-scope miss и
+// traversal остаются на своих кодах (404 / 400) — это НЕ authz-deny.
+func TestDataplane_REGDENY_MountAuthzDeny_403Denied(t *testing.T) {
+	// src deny (v_get на src denied), dst v_create allow → 403 DENIED.
+	az := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
+	fw := &fakeForwarder{}
+	h := newTestHandler(&fakeVerifier{subject: "sva-evil"}, az, &fakeBackend{}, fw, &fakeRepoReg{})
+	rec := doReq(h, http.MethodPost, "/v2/reg-A/dst/blobs/uploads/?mount=sha256:x&from=reg-A/src", true)
+	require.Equal(t, http.StatusForbidden, rec.Code, "mount src-deny → 403 denied")
+	require.Equal(t, "DENIED", pushDenyCode(t, rec))
+	require.Equal(t, 0, fw.count())
+}
+
+// REG-DENY regression — PULL/read authz-deny остаётся 404 NAME_UNKNOWN (read-side
+// existence-hiding для content-discovery не меняется); fail-closed (Check error) → 503.
+func TestDataplane_REGDENY_PullDenyStays404_FailClosed503(t *testing.T) {
+	// pull manifest deny → 404 (не 403): read-путь existence-hiding сохранён.
+	azDeny := &fakeAuthz{allow: map[string]bool{}}
+	h404 := newTestHandler(&fakeVerifier{subject: "sva-evil"}, azDeny, &fakeBackend{exists: map[string]bool{"reg-A/app": true}}, &fakeForwarder{}, &fakeRepoReg{})
+	require.Equal(t, http.StatusNotFound, doReq(h404, http.MethodGet, "/v2/reg-A/app/manifests/v1", true).Code,
+		"pull-deny остаётся 404 NAME_UNKNOWN (read-side existence-hiding)")
+
+	// push Check-error (зависимость недоступна) → fail-closed 503, НЕ 403/404.
+	azErr := &fakeAuthz{err: errors.New("iam down")}
+	rec := doReq(newTestHandler(&fakeVerifier{subject: "sva-ci"}, azErr, &fakeBackend{}, &fakeForwarder{}, &fakeRepoReg{}),
+		http.MethodPost, "/v2/reg-A/app/blobs/uploads/", true)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "push Check-error → fail-closed 503")
 }
 
 // REG-35 — data-plane HTTP-метод DELETE → 405 Method Not Allowed ДО zot (единственный
@@ -570,12 +645,13 @@ func TestDataplane_REG37_NoRepoGet_404(t *testing.T) {
 // dst). v_get(src)=deny → mount 404 (блоб не смонтирован). Оба allow → forward.
 // dst — новый repo (fakeBackend без exists) → dst-verb = v_create@registry_registry.
 func TestDataplane_REG20_CrossRepoMount_ExfilGuard(t *testing.T) {
-	// src deny → 404.
+	// src deny → 403 DENIED (mount — push-путь).
 	azDeny := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
 	fwDeny := &fakeForwarder{}
 	hDeny := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azDeny, &fakeBackend{}, fwDeny, &fakeRepoReg{})
 	rec := doReq(hDeny, http.MethodPost, "/v2/reg-A/dst/blobs/uploads/?mount=sha256:x&from=reg-A/src", true)
-	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, "DENIED", pushDenyCode(t, rec))
 	require.Equal(t, 0, fwDeny.count(), "foreign blob not mounted")
 
 	// оба allow → forward.
@@ -641,12 +717,13 @@ func TestDataplane_REG20_CrossRegistryMount_TwoChecks(t *testing.T) {
 	require.Contains(t, calls, checkCall{"service_account:sva-ci", "v_get", "registry_repository:reg-B/src"})
 	require.Contains(t, calls, checkCall{"service_account:sva-ci", "v_create", "registry_registry:reg-A"})
 
-	// src (reg-B) deny → 404, блоб чужого реестра не смонтирован.
+	// src (reg-B) deny → 403 DENIED, блоб чужого реестра не смонтирован.
 	azDeny := &fakeAuthz{allow: map[string]bool{"v_create registry_registry:reg-A": true}}
 	fwDeny := &fakeForwarder{}
 	hDeny := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azDeny, &fakeBackend{}, fwDeny, &fakeRepoReg{})
 	recDeny := doReq(hDeny, http.MethodPost, "/v2/reg-A/dst/blobs/uploads/?mount=sha256:x&from=reg-B/src", true)
-	require.Equal(t, http.StatusNotFound, recDeny.Code)
+	require.Equal(t, http.StatusForbidden, recDeny.Code)
+	require.Equal(t, "DENIED", pushDenyCode(t, recDeny))
 	require.Equal(t, 0, fwDeny.count(), "cross-registry blob not mounted without src v_get")
 }
 
@@ -690,7 +767,7 @@ func TestDataplane_REG20_MountDst_VerbMapMirrorsPush(t *testing.T) {
 		checkCall{"service_account:sva-ci", "v_update", "registry_repository:reg-A/dst"})
 
 	// verb-mismatch guard: dst СУЩЕСТВУЕТ, принципал держит только namespace v_create
-	// (без v_update на repo) → mount отклонён 404 (нельзя писать в существующий repo
+	// (без v_update на repo) → mount отклонён 403 DENIED (нельзя писать в существующий repo
 	// мимо v_update), несмотря на v_get(src).
 	azMismatch := &fakeAuthz{allow: map[string]bool{
 		"v_get registry_repository:reg-A/src": true,
@@ -698,7 +775,9 @@ func TestDataplane_REG20_MountDst_VerbMapMirrorsPush(t *testing.T) {
 	}}
 	fwMismatch := &fakeForwarder{}
 	hMismatch := newTestHandler(&fakeVerifier{subject: "sva-ci"}, azMismatch, beExisting, fwMismatch, &fakeRepoReg{})
-	require.Equal(t, http.StatusNotFound, doReq(hMismatch, http.MethodPost, mountURL, true).Code)
+	recMismatch := doReq(hMismatch, http.MethodPost, mountURL, true)
+	require.Equal(t, http.StatusForbidden, recMismatch.Code)
+	require.Equal(t, "DENIED", pushDenyCode(t, recMismatch))
 	require.Equal(t, 0, fwMismatch.count(), "v_create-only principal cannot write to an existing repo via mount")
 }
 
@@ -887,9 +966,9 @@ func TestDataplane_REG33A_BlobPutFinalize_RecordError_FailClosed(t *testing.T) {
 }
 
 // REG-33A — неавторизованный blob-finalize отклоняется verb-map Check'ом (v_create/
-// v_update) ДО ForwardCapture: 404 (existence-hiding), блоб в zot не уходит, pending не
-// пишется. Записываем ТОЛЬКО после passed-authz.
-func TestDataplane_REG33A_BlobPutFinalize_NoRights_404_NoRecord(t *testing.T) {
+// v_update) ДО ForwardCapture: 403 DENIED (push-deny униформно), блоб в zot не уходит,
+// pending не пишется. Записываем ТОЛЬКО после passed-authz.
+func TestDataplane_REG33A_BlobPutFinalize_NoRights_403Denied_NoRecord(t *testing.T) {
 	az := &fakeAuthz{allow: map[string]bool{}} // deny всё
 	fw := &fakeForwarder{status: 201}
 	be := &fakeBackend{exists: map[string]bool{}}
@@ -897,7 +976,8 @@ func TestDataplane_REG33A_BlobPutFinalize_NoRights_404_NoRecord(t *testing.T) {
 	h := newTestHandlerU(&fakeVerifier{subject: "sva-evil"}, az, be, fw, &fakeRepoReg{}, up)
 
 	rec := doReq(h, http.MethodPut, "/v2/reg-A/app/blobs/uploads/upl-5?digest=sha256:x", true)
-	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, "DENIED", pushDenyCode(t, rec))
 	require.Equal(t, 0, fw.count(), "неавторизованный finalize не проксируется")
 	require.Empty(t, up.recordedKeys(), "неавторизованный finalize не пишет pending-строку")
 }
@@ -1275,6 +1355,154 @@ func TestDataplane_REG33IP_Blob_PushGrantFallbackError_FailClosed(t *testing.T) 
 	rec := doReq(h, http.MethodHead, "/v2/reg-A/app/blobs/sha256:x", true)
 	require.GreaterOrEqual(t, rec.Code, 500, "serveBlob push-owner fallback error → fail-closed 5xx")
 	require.Equal(t, 0, fw.count())
+}
+
+// ============================================================================
+// REG-33 immediate-pull revoke-safety (#33): push-grant-мост обязан жить ТОЛЬКО окно
+// материализации per-repo authz, а НЕ переживать revoke до истечения TTL. Два ограничителя:
+//   (1) delete-on-materialized — как только pull-path v_get/v_list ALLOW'нул (реальный
+//       per-repo authz материализовался в FGA), push-grant удаляется; последующий revoke →
+//       v_get denies → записи нет → 404;
+//   (2) короткий TTL-backstop (config, отдельные тесты) — ограничивает худший случай.
+// Регресс (до фикса, LIVE на проде): push-grant (TTL=1h) раскрывал repo и ПОСЛЕ revoke до
+// 1h — отозванный субъект тянул образ (в т.ч. чужой контент в том же repo) → stale-access leak.
+// ============================================================================
+
+// waitDelete детерминированно ждёт async delete-on-materialized (goroutine хендлера шлёт ключ
+// в delCh); timeout → чистый провал (не hang). Возвращает удалённый ключ.
+func waitDelete(t *testing.T, ch <-chan pushGrantKey) pushGrantKey {
+	t.Helper()
+	select {
+	case k := <-ch:
+		return k
+	case <-time.After(2 * time.Second):
+		t.Fatal("delete-on-materialized не сработал: DeletePushGrant не вызван на v_get/v_list-allow pull")
+		return pushGrantKey{}
+	}
+}
+
+// REG-33IP revoke-safety (a): pull манифеста с v_get ALLOWED (per-repo authz материализовался)
+// → forward 200 И delete-on-materialized снимает push-grant (reg,repo,subject) на detached-ctx.
+// RED до фикса: allow-ветка servePullOnly не зовёт DeletePushGrant → waitDelete таймаутит.
+func TestDataplane_REG33IP_DeleteOnMaterialized_Manifest_VGetAllowed_DropsPushGrant(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_get registry_repository:reg-A/app": true}} // материализован
+	fw := &fakeForwarder{status: 200}
+	pgr := &fakePushGrantRecorder{
+		granted: map[string]bool{pushGrantCacheKey("reg-A", "app", "service_account:sva-ci"): true},
+		delCh:   make(chan pushGrantKey, 1),
+	}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, &fakeBackend{}, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodGet, "/v2/reg-A/app/manifests/v1", true).Code,
+		"v_get ALLOWED → штатный forward")
+	require.Equal(t, pushGrantKey{"reg-A", "app", "service_account:sva-ci"}, waitDelete(t, pgr.delCh),
+		"v_get-allow снимает push-grant-мост ровно для (reg,repo,subject)")
+	require.NoError(t, pgr.observedDelCtxErr(),
+		"delete идёт на detached-ctx (переживает разрыв соединения клиентом за pull-ответом)")
+	require.Equal(t, []pushGrantKey{{"reg-A", "app", "service_account:sva-ci"}}, pgr.deletedKeys())
+	require.Equal(t, 1, fw.count())
+}
+
+// REG-33IP revoke-safety — blob GET с v_get ALLOWED (member-блоб) тоже снимает push-grant.
+func TestDataplane_REG33IP_DeleteOnMaterialized_Blob_VGetAllowed_DropsPushGrant(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_get registry_repository:reg-A/app": true}}
+	fw := &fakeForwarder{status: 200}
+	be := &fakeBackend{
+		exists: map[string]bool{"reg-A/app": true},
+		blobs:  map[string]bool{"reg-A/app|sha256:own": true},
+	}
+	pgr := &fakePushGrantRecorder{
+		granted: map[string]bool{pushGrantCacheKey("reg-A", "app", "service_account:sva-ci"): true},
+		delCh:   make(chan pushGrantKey, 1),
+	}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodGet, "/v2/reg-A/app/blobs/sha256:own", true).Code)
+	require.Equal(t, pushGrantKey{"reg-A", "app", "service_account:sva-ci"}, waitDelete(t, pgr.delCh),
+		"blob v_get-allow тоже снимает push-grant-мост")
+	require.Equal(t, 1, fw.count())
+}
+
+// REG-33IP revoke-safety — tags/list с v_list ALLOWED снимает push-grant (per-repo authz
+// материализовался — v_list и v_get деривят из одного owner-tuple, мост больше не нужен).
+func TestDataplane_REG33IP_DeleteOnMaterialized_TagsList_VListAllowed_DropsPushGrant(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_list registry_repository:reg-A/app": true}}
+	fw := &fakeForwarder{status: 200}
+	pgr := &fakePushGrantRecorder{
+		granted: map[string]bool{pushGrantCacheKey("reg-A", "app", "service_account:sva-ci"): true},
+		delCh:   make(chan pushGrantKey, 1),
+	}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, &fakeBackend{}, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodGet, "/v2/reg-A/app/tags/list", true).Code)
+	require.Equal(t, pushGrantKey{"reg-A", "app", "service_account:sva-ci"}, waitDelete(t, pgr.delCh),
+		"v_list-allow снимает push-grant-мост")
+}
+
+// REG-33IP revoke-safety (b) — ГЛАВНЫЙ security-регресс: после того как реальный v_get разок
+// ALLOW'нул (delete-on-materialized снял мост), REVOKE (v_get снова DENIED) → pull ОБЯЗАН 404.
+// До фикса push-grant (в пределах TTL) пережил бы revoke и раскрывал repo → stale-access leak.
+// RED до фикса: pull#1 не снимает мост (waitDelete таймаутит); будь мост жив — pull#2 дал бы 200.
+func TestDataplane_REG33IP_RevokeAfterMaterialized_VGetDenied_404(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_get registry_repository:reg-A/app": true}} // сперва материализован
+	fw := &fakeForwarder{status: 200}
+	be := &fakeBackend{exists: map[string]bool{"reg-A/app": true}}
+	pgr := &fakePushGrantRecorder{
+		granted: map[string]bool{pushGrantCacheKey("reg-A", "app", "service_account:sva-ci"): true},
+		delCh:   make(chan pushGrantKey, 1),
+	}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, be, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+
+	// pull#1: v_get ALLOWED (материализовался) → forward + delete-on-materialized снимает мост.
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodGet, "/v2/reg-A/app/manifests/v1", true).Code,
+		"pull#1 (v_get материализован) форвардится")
+	waitDelete(t, pgr.delCh) // дождаться, пока async-delete снимет push-grant
+
+	// admin REVOKES доступ → v_get снова DENIED. Мост уже снят → pull ОБЯЗАН 404 (без обхода).
+	az.setAllow(map[string]bool{})
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodGet, "/v2/reg-A/app/manifests/v1", true).Code,
+		"после материализации+revoke push-grant снят → v_get-deny → 404 (нет 1h stale-bypass)")
+	require.Equal(t, http.StatusNotFound, doReq(h, http.MethodGet, "/v2/reg-A/app/blobs/sha256:own", true).Code,
+		"blob того же repo тоже 404 после revoke (revoked субъект не тянет чужой контент repo)")
+	require.Equal(t, 1, fw.count(), "форвардился только pull#1; после revoke — ни одного forward")
+}
+
+// REG-33IP revoke-safety — сбой delete-on-materialized (транзиентный DB down) НЕ рвёт уже
+// авторизованный pull: DeletePushGrant — фоновое gardening (мост всё равно ограничен TTL),
+// поэтому log-and-continue. Allowed pull остаётся 200; сбой наблюдаемо логируется.
+func TestDataplane_REG33IP_DeleteOnMaterializedFailure_PullStill2xx_Logged(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_get registry_repository:reg-A/app": true}}
+	fw := &fakeForwarder{status: 200}
+	pgr := &fakePushGrantRecorder{
+		granted: map[string]bool{pushGrantCacheKey("reg-A", "app", "service_account:sva-ci"): true},
+		delErr:  errors.New("pg down"),
+	}
+	logbuf := &syncBuffer{} // потокобезопасно: delete-on-materialized логирует из детач-goroutine
+	logger := slog.New(slog.NewTextHandler(logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	h := New(&fakeVerifier{subject: "sva-ci"}, az, &fakeBackend{}, fw, &fakeRepoReg{}, &fakeRegistryLookup{}, &fakeUploadRecorder{}, pgr,
+		"https://api.kacho.local/iam/token", "registry.kacho.local", logger)
+
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodGet, "/v2/reg-A/app/manifests/v1", true).Code,
+		"allowed pull форвардится 200 несмотря на сбой фонового delete-on-materialized")
+	require.Eventually(t, func() bool {
+		return strings.Contains(logbuf.String(), "push-grant delete-on-materialized failed")
+	}, 2*time.Second, 10*time.Millisecond, "сбой delete-on-materialized наблюдаемо логируется")
+}
+
+// REG-33IP revoke-safety regression (keep-green) — на v_get-DENIED pull, обслуженном через
+// push-owner мост (материализация ещё НЕ догнала), push-grant НЕ удаляется: мост ещё нужен.
+// Удаление здесь сломало бы immediate-pull (следующий pull до материализации снова 404).
+func TestDataplane_REG33IP_PushOwnerBridge_VGetDenied_NoDelete(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{}} // v_get denied (ещё не материализован)
+	fw := &fakeForwarder{status: 200}
+	pgr := &fakePushGrantRecorder{granted: map[string]bool{
+		pushGrantCacheKey("reg-A", "app", "service_account:sva-ci"): true,
+	}}
+	h := newTestHandlerPG(&fakeVerifier{subject: "sva-ci"}, az, &fakeBackend{}, fw, &fakeRepoReg{}, &fakeUploadRecorder{}, pgr)
+
+	require.Equal(t, http.StatusOK, doReq(h, http.MethodGet, "/v2/reg-A/app/manifests/v1", true).Code,
+		"immediate-pull толкавшего (v_get denied, свежий push-grant) всё ещё раскрывается")
+	require.Empty(t, pgr.deletedKeys(), "мост НЕ снимается, пока v_get не материализовался (immediate-pull сохранён)")
 }
 
 // helper: убеждаемся, что Authorization без "Bearer " схемы → 401.

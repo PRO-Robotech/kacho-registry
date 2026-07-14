@@ -4,12 +4,33 @@
 package dataplane
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"sync"
 
 	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
+
+// syncBuffer — потокобезопасная обёртка bytes.Buffer для логов, читаемых тестом ПАРАЛЛЕЛЬНО
+// с фоновой goroutine хендлера (delete-on-materialized логирует из детач-goroutine; plain
+// bytes.Buffer не безопасен для конкурентного Write/String → -race флагует).
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // ---- fake TokenVerifier ---------------------------------------------------
 
@@ -42,14 +63,24 @@ type fakeAuthz struct {
 func (a *fakeAuthz) Check(ctx context.Context, subject, relation, object string) (bool, error) {
 	a.mu.Lock()
 	a.calls = append(a.calls, checkCall{subject, relation, object})
+	err := a.err
+	allow := a.allow
 	a.mu.Unlock()
-	if a.err != nil {
-		return false, a.err
+	if err != nil {
+		return false, err
 	}
-	if a.allow == nil {
+	if allow == nil {
 		return true, nil
 	}
-	return a.allow[relation+" "+object], nil
+	return allow[relation+" "+object], nil
+}
+
+// setAllow атомарно подменяет allow-набор (симуляция revoke: allow → deny между двумя
+// pull'ами). Замена ссылки под mutex + чтение ссылки под mutex в Check → race-free.
+func (a *fakeAuthz) setAllow(m map[string]bool) {
+	a.mu.Lock()
+	a.allow = m
+	a.mu.Unlock()
 }
 
 func (a *fakeAuthz) checkedObjects() []checkCall {
@@ -277,12 +308,16 @@ type pushGrantKey struct{ registryID, repo, subject string }
 
 type fakePushGrantRecorder struct {
 	mu        sync.Mutex
-	recorded  []pushGrantKey  // порядок вызовов RecordPushGrant
-	granted   map[string]bool // "reg|repo|subject" → PushGranted возвращает true
-	recErr    error           // RecordPushGrant возвращает эту ошибку
-	getErr    error           // PushGranted возвращает эту ошибку
-	recCtxErr error           // ctx.Err() в момент RecordPushGrant (detach-регресс)
-	getCalls  int             // число вызовов PushGranted (проверка «fallback не трогается»)
+	recorded  []pushGrantKey    // порядок вызовов RecordPushGrant
+	granted   map[string]bool   // "reg|repo|subject" → PushGranted возвращает true
+	deleted   []pushGrantKey    // порядок вызовов DeletePushGrant (delete-on-materialized)
+	delCh     chan pushGrantKey // != nil → DeletePushGrant неблокирующе шлёт сюда ключ (детерм. синхронизация async-delete в тесте)
+	recErr    error             // RecordPushGrant возвращает эту ошибку
+	getErr    error             // PushGranted возвращает эту ошибку
+	delErr    error             // DeletePushGrant возвращает эту ошибку
+	recCtxErr error             // ctx.Err() в момент RecordPushGrant (detach-регресс)
+	delCtxErr error             // ctx.Err() в момент DeletePushGrant (detach-регресс)
+	getCalls  int               // число вызовов PushGranted (проверка «fallback не трогается»)
 }
 
 func pushGrantCacheKey(registryID, repo, subject string) string {
@@ -314,12 +349,56 @@ func (g *fakePushGrantRecorder) PushGranted(ctx context.Context, registryID, rep
 	return g.granted[pushGrantCacheKey(registryID, repo, subject)], nil
 }
 
+// DeletePushGrant фиксирует вызов, убирает ключ из granted (симулирует «мост снят» — так
+// последующий PushGranted вернёт false, как после реального DELETE) и, если задан delCh,
+// неблокирующе сигналит тесту (для детерминированного ожидания async-delete из goroutine
+// хендлера). Ctx.Err() снимается для проверки detach (delete идёт на WithoutCancel-ctx).
+func (g *fakePushGrantRecorder) DeletePushGrant(ctx context.Context, registryID, repo, subject string) error {
+	g.mu.Lock()
+	g.delCtxErr = ctx.Err()
+	if g.delErr != nil {
+		err := g.delErr
+		g.mu.Unlock()
+		return err
+	}
+	key := pushGrantKey{registryID, repo, subject}
+	g.deleted = append(g.deleted, key)
+	if g.granted != nil {
+		delete(g.granted, pushGrantCacheKey(registryID, repo, subject))
+	}
+	ch := g.delCh
+	g.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- key:
+		default: // буфер полон — не блокируем prod-goroutine хендлера
+		}
+	}
+	return nil
+}
+
 func (g *fakePushGrantRecorder) recordedKeys() []pushGrantKey {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	out := make([]pushGrantKey, len(g.recorded))
 	copy(out, g.recorded)
 	return out
+}
+
+func (g *fakePushGrantRecorder) deletedKeys() []pushGrantKey {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]pushGrantKey, len(g.deleted))
+	copy(out, g.deleted)
+	return out
+}
+
+// observedDelCtxErr — состояние ctx.Err() в момент DeletePushGrant. nil ⇒ контекст не был
+// отменён (delete идёт на detached-ctx, переживает разрыв соединения за pull-ответом).
+func (g *fakePushGrantRecorder) observedDelCtxErr() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.delCtxErr
 }
 
 // observedRecCtxErr — состояние ctx.Err() в момент durable-записи push-grant. nil ⇒

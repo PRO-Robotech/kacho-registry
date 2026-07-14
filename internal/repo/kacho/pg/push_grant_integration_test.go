@@ -120,6 +120,53 @@ func TestPushGrant_REG33IP_TTLFreshnessAndSweep(t *testing.T) {
 	require.True(t, freshStill, "свежая строка по-прежнему видна после sweep")
 }
 
+// TestPushGrant_REG33IP_DeleteRemovesExactRow — delete-on-materialized: DeletePushGrant
+// удаляет РОВНО строку (registry_id, repo, subject) и ничего больше. После удаления
+// PushGranted для неё → false (мост снят); соседние строки (другой subject/repo) целы.
+// Локает revoke-safety: как только реальный v_get материализовался и pull снял мост,
+// последующий revoke уже не обходится через push-grant.
+func TestPushGrant_REG33IP_DeleteRemovesExactRow(t *testing.T) {
+	pool := setupTestDB(t)
+	repo := kachopg.NewPushGrantRepo(pool, time.Hour)
+	ctx := context.Background()
+
+	const otherSubject = "service_account:sva22222222222222222"
+	require.NoError(t, repo.RecordPushGrant(ctx, pgReg, pgRepo, pgSubject))
+	require.NoError(t, repo.RecordPushGrant(ctx, pgReg, pgRepo, otherSubject)) // тот же repo, другой subject
+	require.NoError(t, repo.RecordPushGrant(ctx, pgReg, "other", pgSubject))   // тот же subject, другой repo
+
+	// удаляем ровно (pgReg, pgRepo, pgSubject).
+	require.NoError(t, repo.DeletePushGrant(ctx, pgReg, pgRepo, pgSubject))
+
+	gone, err := repo.PushGranted(ctx, pgReg, pgRepo, pgSubject)
+	require.NoError(t, err)
+	require.False(t, gone, "удалённая строка больше не числится (мост снят)")
+
+	// соседи целы.
+	otherSubj, err := repo.PushGranted(ctx, pgReg, pgRepo, otherSubject)
+	require.NoError(t, err)
+	require.True(t, otherSubj, "другой subject на тот же repo НЕ затронут удалением")
+	otherRepo, err := repo.PushGranted(ctx, pgReg, "other", pgSubject)
+	require.NoError(t, err)
+	require.True(t, otherRepo, "тот же subject на другой repo НЕ затронут удалением")
+
+	var n int
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT count(*) FROM kacho_registry.registry_push_grant`).Scan(&n))
+	require.Equal(t, 2, n, "удалена ровно одна строка")
+}
+
+// TestPushGrant_REG33IP_DeleteAbsentRow_NoError — DeletePushGrant несуществующей строки —
+// идемпотентный no-op (0 rows, без ошибки): безопасно звать безусловно на allow-ветке pull.
+func TestPushGrant_REG33IP_DeleteAbsentRow_NoError(t *testing.T) {
+	pool := setupTestDB(t)
+	repo := kachopg.NewPushGrantRepo(pool, time.Hour)
+	ctx := context.Background()
+
+	require.NoError(t, repo.DeletePushGrant(ctx, pgReg, pgRepo, pgSubject),
+		"удаление отсутствующей строки — дешёвый no-op без ошибки")
+}
+
 // TestPushGrant_REG33IP_RepushRefreshesGrant — re-push (повторный Record) освежает granted_at:
 // строка, которая была бы протухшей, снова становится свежей → PushGranted=true. Локает
 // «re-push держит запись свежей всё push-окно».
