@@ -125,6 +125,12 @@ func runServe(cfg config.Config) error {
 	// REG-33 Defect A): blob PUT-finalize пишет строку, push-time blob HEAD/GET раскрывает
 	// только-что-загруженный слой ДО появления манифеста (REG-37 сохранён).
 	pendingBlobRepo := pg.NewPendingBlobRepo(pool, cfg.PendingBlobTTL)
+	// pushGrantRepo — durable per-subject push-ownership кеш (registry_push_grant, REG-33
+	// immediate-pull): успешный manifest-PUT пишет строку, pull-path раскрывает repo
+	// толкавшему, пока async register-on-first-push не материализовал per-repo v_get в FGA
+	// (иначе собственный немедленный pull толкавшего упрётся в v_get-deny → 404). Ключ по
+	// subject → раскрывается только собственный только-что-запушенный repo (REG-37 сохранён).
+	pushGrantRepo := pg.NewPushGrantRepo(pool, cfg.PushGrantTTL)
 	zotAdapter := zotclient.New(cfg.ZotAddr)
 	iamAdapter := iamclient.New(projectIAMConn)
 
@@ -245,7 +251,7 @@ func runServe(cfg config.Config) error {
 	// InternalIAMService.Check + existence-hiding + stream-proxy. Отдельно от gRPC.
 	var dpServer *http.Server
 	if cfg.DataplaneAddr != "" {
-		dpHandler, dperr := buildDataplaneHandler(cfg, authzConn, registryRepo, zotAdapter, registryRepo, pendingBlobRepo, logger)
+		dpHandler, dperr := buildDataplaneHandler(cfg, authzConn, registryRepo, zotAdapter, registryRepo, pendingBlobRepo, pushGrantRepo, logger)
 		if dperr != nil {
 			return fmt.Errorf("build data-plane proxy: %w", dperr)
 		}
@@ -254,11 +260,15 @@ func runServe(cfg config.Config) error {
 			Handler:           dpHandler,
 			ReadHeaderTimeout: 15 * time.Second,
 		}
-		// pending-blob sweeper: подметает протухшие (> PendingBlobTTL) строки
-		// registry_pending_blob (REG-33). Реюзает ctx-lifecycle сервиса; интервал = TTL
-		// (роста таблицы не более двух окон). TTL≤0 → трекинг выключен, sweeper не нужен.
+		// TTL-sweeper'ы REG-33: подметают протухшие строки. Реюзают ctx-lifecycle сервиса;
+		// интервал = TTL (роста таблицы не более двух окон). TTL≤0 → трекинг выключен.
+		//   - pending-blob (> PendingBlobTTL): registry_pending_blob (Defect A).
+		//   - push-grant (> PushGrantTTL):     registry_push_grant (immediate-pull).
 		if cfg.PendingBlobTTL > 0 {
-			go runPendingBlobSweeper(ctx, pendingBlobRepo, cfg.PendingBlobTTL, logger)
+			go runStaleSweeper(ctx, pendingBlobRepo, cfg.PendingBlobTTL, "pending-blob", logger)
+		}
+		if cfg.PushGrantTTL > 0 {
+			go runStaleSweeper(ctx, pushGrantRepo, cfg.PushGrantTTL, "push-grant", logger)
 		}
 	}
 
@@ -329,7 +339,7 @@ func runServe(cfg config.Config) error {
 // JWKS-verify Hydra-issued identity-JWT (RS256/ES256) + per-request
 // InternalIAMService.Check + zot stream-proxy. breakglass → bypass AuthN+AuthZ
 // (аварийный режим, как gRPC-листенеры).
-func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoReg dataplane.RepoRegistrar, backend dataplane.Backend, regLookup dataplane.RegistryLookup, uploads dataplane.UploadRecorder, logger *slog.Logger) (http.Handler, error) {
+func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoReg dataplane.RepoRegistrar, backend dataplane.Backend, regLookup dataplane.RegistryLookup, uploads dataplane.UploadRecorder, pushGrants dataplane.PushGrantRecorder, logger *slog.Logger) (http.Handler, error) {
 	// Plaintext data-plane обязан стоять за внешней TLS-терминацией (bearer
 	// identity-JWT не должны транзитить открытым текстом). В проде — явный ack
 	// оператора; проверяется независимо от breakglass (риск открытого сокета
@@ -364,20 +374,20 @@ func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoRe
 		authorizer = check.NewIAMCheckClient(authzConn)
 	}
 
-	return dataplane.New(verifier, authorizer, backend, forwarder, repoReg, regLookup, uploads,
+	return dataplane.New(verifier, authorizer, backend, forwarder, repoReg, regLookup, uploads, pushGrants,
 		cfg.TokenRealm, cfg.ServiceAud, logger), nil
 }
 
-// pendingBlobSweeper — узкий порт TTL-подметания registry_pending_blob (REG-33).
-// Реализуется pg.PendingBlobRepo.
-type pendingBlobSweeper interface {
+// staleSweeper — узкий порт TTL-подметания durable-таблиц REG-33 (registry_pending_blob,
+// registry_push_grant). Реализуется pg.PendingBlobRepo / pg.PushGrantRepo.
+type staleSweeper interface {
 	SweepStale(ctx context.Context) (int64, error)
 }
 
-// runPendingBlobSweeper периодически (interval) подметает протухшие pending-blob-строки
-// до отмены ctx (SIGTERM). Ошибка sweep'а логируется и не роняет сервис (гигиена, не
+// runStaleSweeper периодически (interval) подметает протухшие строки до отмены ctx
+// (SIGTERM). Ошибка sweep'а логируется под именем name и не роняет сервис (гигиена, не
 // критичный путь). Первый тик — через interval (свежий старт таблицы пуст).
-func runPendingBlobSweeper(ctx context.Context, sweeper pendingBlobSweeper, interval time.Duration, logger *slog.Logger) {
+func runStaleSweeper(ctx context.Context, sweeper staleSweeper, interval time.Duration, name string, logger *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -389,11 +399,11 @@ func runPendingBlobSweeper(ctx context.Context, sweeper pendingBlobSweeper, inte
 			n, err := sweeper.SweepStale(sweepCtx)
 			cancel()
 			if err != nil {
-				logger.Warn("pending-blob sweep failed", "err", err)
+				logger.Warn(name+" sweep failed", "err", err)
 				continue
 			}
 			if n > 0 {
-				logger.Info("pending-blob sweep", "deleted", n)
+				logger.Info(name+" sweep", "deleted", n)
 			}
 		}
 	}
