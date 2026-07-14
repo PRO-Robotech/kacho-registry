@@ -155,6 +155,7 @@ func runServe(cfg config.Config) error {
 		ServiceName: "kacho-registry",
 		IAMConn:     authzConn,
 		Breakglass:  cfg.AuthZBreakglass,
+		CacheTTL:    cfg.AuthZCacheTTL,
 		Logger:      logger,
 	})
 
@@ -184,7 +185,8 @@ func runServe(cfg config.Config) error {
 		} else {
 			logger.Info("authz interceptor enabled",
 				"iam_endpoint", cfg.AuthZIAMGRPCAddr,
-				"listeners", "public+internal")
+				"listeners", "public+internal",
+				"cache_ttl", cfg.AuthZCacheTTL)
 		}
 	case errors.Is(aerr, check.ErrIAMConnNotConfigured):
 		// Недостижимо при штатной конфигурации: validateSecurityConfig уже отказал

@@ -6,6 +6,7 @@ package check
 import (
 	"errors"
 	"log/slog"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -18,6 +19,34 @@ type Options struct {
 	IAMConn     grpc.ClientConnInterface
 	Breakglass  bool
 	Logger      *slog.Logger
+
+	// CacheTTL — TTL positive-кеша authz-Check интерсептора (ОБА листенера).
+	// Ограничивает окно, в течение которого отозванный (revoked) субъект держит
+	// закешированный allow ПОСЛЕ удаления AccessBinding: registry НЕ подписан на
+	// IAM cache-invalidation (InternalAuthzCacheService.InvalidateSubject бьёт
+	// только api-gateway) и db-per-service ⇒ LISTEN/NOTIFY от iam сюда не доходит →
+	// revoke-окно = этот TTL + async fga-drain. Короткий дефолт (2s) держит окно
+	// узким; 0 → positive-кеш выключен (каждый RPC — живой IAM Check). См. #33.
+	CacheTTL time.Duration
+}
+
+// disabledCacheTTL — при CacheTTL<=0 positive-кеш «выключается» минимальным TTL:
+// запись истекает раньше следующего RPC (монотонные часы строго растут между
+// SetAllowed и Get разных запросов), поэтому ни один stale-allow не доживает до
+// следующего Check → каждый RPC делает живой IAM Check (немедленный revoke).
+// corelib authz.Cache не имеет first-class disabled-режима (NewCache(≤0) → 5s
+// дефолт), поэтому «выкл» выражаем так, а не через отдельный no-op тип. См. #33.
+const disabledCacheTTL = time.Nanosecond
+
+// authzCache строит positive-decision кеш интерсептора по TTL:
+//   - ttl > 0  → authz.NewCache(ttl): positive Check-результаты живут ttl
+//     (revoke-окно ≤ ttl + fga-drain).
+//   - ttl <= 0 → positive-кеш выключен (disabledCacheTTL): каждый RPC — живой Check.
+func authzCache(ttl time.Duration) *authz.Cache {
+	if ttl > 0 {
+		return authz.NewCache(ttl)
+	}
+	return authz.NewCache(disabledCacheTTL)
 }
 
 // ErrIAMConnNotConfigured — IAM conn = nil И Breakglass=false.
@@ -36,7 +65,9 @@ func NewInterceptor(opts Options) (*authz.Interceptor, error) {
 	// InterceptorOptions идентичны в обеих ветвях. Тюнинг-кнобы (CheckTimeout /
 	// DenyRateLimitPerSec / AllowSystemPrincipal) оставлены на corelib-дефолтах —
 	// registry их не конфигурирует, поэтому в литерал не вносятся (иначе — мёртвые
-	// pass-through). Cache строится явно (NewCache(0) → corelib TTL-дефолт).
+	// pass-through). Cache строится через authzCache(opts.CacheTTL): короткий TTL
+	// (или 0 → выкл) ограничивает revoke-окно, т.к. registry не подписан на IAM
+	// cache-invalidation (см. authzCache / #33).
 	var client authz.CheckClient
 	if !opts.Breakglass {
 		if opts.IAMConn == nil {
@@ -48,7 +79,7 @@ func NewInterceptor(opts Options) (*authz.Interceptor, error) {
 		ServiceName: opts.ServiceName,
 		Map:         PermissionMap(),
 		Client:      client,
-		Cache:       authz.NewCache(0),
+		Cache:       authzCache(opts.CacheTTL),
 		Logger:      opts.Logger,
 		Breakglass:  opts.Breakglass,
 	}), nil

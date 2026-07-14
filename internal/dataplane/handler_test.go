@@ -151,6 +151,33 @@ func TestDataplane_REG17_PullDeny_404_ExistenceHiding(t *testing.T) {
 	require.Equal(t, 0, fw.count(), "denied pull not forwarded")
 }
 
+// REG-17 revoke — #33: data-plane per-request authz Check НЕ кеширует (Authorizer =
+// прямой check.IAMCheckClient), поэтому revoke энфорсится на СЛЕДУЮЩЕМ /v2/-запросе.
+// Тот же субъект: request-1 при активном grant → forward (200); после revoke
+// (AccessBinding удалён → Check теперь deny) request-2 → 404 (existence-hiding), НЕ
+// forward. Локает «revoke promptly enforced» на data-plane (в отличие от gRPC
+// control-plane, где окно ограничено KACHO_REGISTRY_AUTHZ_CACHE_TTL).
+func TestDataplane_REG17_RevokePromptlyEnforced_404(t *testing.T) {
+	az := &fakeAuthz{allow: map[string]bool{"v_get registry_repository:reg-A/app": true}}
+	fw := &fakeForwarder{status: 200}
+	h := newTestHandler(&fakeVerifier{subject: "sva-ci"}, az, &fakeBackend{}, fw, &fakeRepoReg{})
+
+	// grant активен → pull проксируется в zot.
+	rec := doReq(h, http.MethodGet, "/v2/reg-A/app/manifests/v1", true)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, 1, fw.count())
+
+	// revoke: AccessBinding удалён → Check теперь denies (no stale-allow cache).
+	az.mu.Lock()
+	az.allow = map[string]bool{}
+	az.mu.Unlock()
+
+	// следующий запрос того же субъекта → 404 (existence-hiding), НЕ forwarded.
+	rec = doReq(h, http.MethodGet, "/v2/reg-A/app/manifests/v1", true)
+	require.Equal(t, http.StatusNotFound, rec.Code, "revoked subject denied on next request")
+	require.Equal(t, 1, fw.count(), "revoked pull not forwarded")
+}
+
 // REG-17 edge — iam.Check недоступен → fail-closed (не 2xx, не пропускает pull).
 func TestDataplane_REG17_CheckUnavailable_FailClosed(t *testing.T) {
 	az := &fakeAuthz{err: errors.New("iam down")}
