@@ -75,18 +75,17 @@ service:
     # плейнтекстом (:8080), но публичный 443-VIP не может быть terminated внешним
     # edge на fe3455 → рядом с registry-контейнером поднимается nginx-sidecar
     # (:8443), который терминирует TLS цертом cert-manager (CN/SAN registry.in-cloud.io)
-    # и проксирует: `/` → data-plane 127.0.0.1:8080, `/.well-known/jwks.json` →
-    # Hydra-public JWKS (локальный trust-anchor для верификации identity-JWT),
-    # `/iam/token` → iam registry-token shim (:9096). Когда включён — 443-порт
-    # data-plane LB таргетит sidecar (dp-tls), а registry-контейнер верифицирует
-    # JWKS через локальный https-прокси (SSL_CERT_DIR доверяет internal-CA).
+    # и проксирует: `/` → data-plane 127.0.0.1:8080, `/iam/token` → iam registry-token
+    # shim (:9096). Когда включён — 443-порт data-plane LB таргетит sidecar (dp-tls).
+    # registry-iam-jwks-unify — sidecar БОЛЬШЕ не проксирует JWKS: верификатор тянет
+    # ключи напрямую из cluster-internal kacho-iam JWKS-proxy (:9097, TLS); доверие к
+    # internal-CA — через SSL_CERT_DIR (ca.crt секрета registry-dataplane-tls, тот же
+    # kacho-internal-ca, что подписывает iam-internal leaf).
     # enabled=false (dev/local, без LB/DNS) → sidecar/cert/cm не рендерятся,
     # поведение неизменно.
     tlsSidecar:
       enabled: false
       image: nginxinc/nginx-unprivileged:1.27-alpine
-      # Upstream, куда nginx проксирует `/.well-known/jwks.json` (Hydra-public JWKS).
-      hydraPublicJwksUpstream: kacho-umbrella-hydra-public.kacho.svc.cluster.local:4444
       # Upstream, куда nginx проксирует `/iam/token` (iam registry-token shim :9096).
       iamTokenShimUpstream: kacho-iam.kacho.svc.cluster.local:9096
 
@@ -211,12 +210,20 @@ zot:
       type: RuntimeDefault
 
 # ─── data-plane OCI auth-proxy (registry.kacho.local) ─────────────────────────
+# registry-iam-jwks-unify — JWKS key-distribution moved from Hydra to the cluster-
+# INTERNAL kacho-iam JWKS proxy (:9097). iam serves a byte-for-byte mirror of Hydra's
+# PUBLIC JWKS over one-way server-TLS; Hydra stays the token SIGNER/ISSUER (the
+# issuer-pin below is a SEPARATE knob and is unchanged).
+iam:
+  # IAM_JWKS_URL — cluster-internal kacho-iam JWKS proxy (mirrors Hydra kids), env
+  # KACHO_REGISTRY_IAM_JWKS_URL. production/-strict require https:// (requireSecureJWKSURL);
+  # the registry pod trusts the internal-CA leaf via SSL_CERT_DIR (deployment.yaml).
+  # Dev/local default = plaintext :9097; the prod overlay flips it to https.
+  jwksUrl: "http://kacho-iam-internal.kacho.svc:9097/.well-known/jwks.json"
 hydra:
-  # HYDRA_JWKS_URL — Hydra-public JWKS endpoint verifying data-plane identity-JWT.
-  # production/-strict require https:// (requireSecureJWKSURL).
-  jwksUrl: "http://kacho-umbrella-hydra-public.kacho.svc:4444/.well-known/jwks.json"
-  # HYDRA_ISSUER — expected iss of identity-JWT. production/-strict require it
-  # non-empty (requireIssuerPinned) — else federation-out on any RP sharing JWKS+aud.
+  # HYDRA_ISSUER — expected iss of the identity-JWT (SIGNED by Hydra). production/-strict
+  # require it non-empty (requireIssuerPinned) — else federation-out on any RP sharing
+  # JWKS+aud. Retained on Hydra even though JWKS now comes from iam (decoupled knobs).
   issuer: ""
 
 # DATAPLANE_TLS_TERMINATED_EXTERNALLY — operator ack that the plaintext data-plane

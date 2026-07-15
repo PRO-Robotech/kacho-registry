@@ -1,18 +1,17 @@
 {{/*
 nginx-конфиг data-plane TLS-sidecar. Терминирует TLS на :8443 (server-cert из
 секрета registry-dataplane-tls) и маршрутизирует:
-  - `/.well-known/jwks.json` → Hydra-public JWKS (локальный trust-anchor для верификации
-    identity-JWT; registry-контейнер ходит на https://127.0.0.1:8443/.well-known/jwks.json);
   - `/iam/token` → iam registry-token shim (:9096) — Docker Registry v2 token-endpoint,
     куда docker идёт за Bearer-токеном по WWW-Authenticate realm;
   - `/` → data-plane OCI-прокси registry (127.0.0.1:8080), плейнтекст в том же pod.
-Upstream-хосты Hydra/iam параметризованы через values (tlsSidecar.*Upstream); loopback
-на data-plane фиксирован (один pod). Рендерится только при включённом LB + TLS-sidecar.
+registry-iam-jwks-unify — sidecar БОЛЬШЕ НЕ проксирует `/.well-known/jwks.json`: JWKS-
+верификация тянет ключи напрямую из cluster-internal kacho-iam JWKS-proxy (:9097, TLS),
+доверие к internal-CA — через SSL_CERT_DIR (см. deployment.yaml). Upstream iam-token-shim
+параметризован через values (tlsSidecar.iamTokenShimUpstream); loopback на data-plane
+фиксирован (один pod). Рендерится только при включённом LB + TLS-sidecar.
 */}}
 {{- if and .Values.service.dataplaneLB.enabled .Values.service.dataplaneLB.tlsSidecar.enabled }}
 {{- $s := .Values.service.dataplaneLB.tlsSidecar }}
-{{/* Host-заголовок для JWKS — хост без порта (nginx.conf: proxy_set_header Host <host>). */}}
-{{- $jwksHost := (splitList ":" $s.hydraPublicJwksUpstream) | first }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -32,11 +31,6 @@ data:
       ssl_certificate_key /etc/registry-tls/tls.key;
       client_max_body_size 0;
       chunked_transfer_encoding on;
-      # Hydra JWKS over TLS for the data-plane token-verifier (local trust anchor).
-      location = /.well-known/jwks.json {
-        proxy_pass http://{{ $s.hydraPublicJwksUpstream }}/.well-known/jwks.json;
-        proxy_set_header Host {{ $jwksHost }};
-      }
       # Docker Registry v2 token endpoint → iam registry-token shim (:9096).
       location = /iam/token {
         proxy_pass http://{{ $s.iamTokenShimUpstream }}/iam/token;
