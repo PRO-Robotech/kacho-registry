@@ -92,6 +92,31 @@ func TestConfig_IAMJWKS_Defaults(t *testing.T) {
 	assert.Equal(t, "registry.kacho.local", c.ServiceAud)
 }
 
+// TestConfig_AnonymousSubject_DefaultDisabled (RG-1 D-7) — anonymous public pull is
+// OFF by default (secure-by-default): KACHO_REGISTRY_ANONYMOUS_SUBJECT_ID unset ⇒
+// empty ⇒ the data-plane resolves no token to the FGA wildcard user:* (anon disabled).
+func TestConfig_AnonymousSubject_DefaultDisabled(t *testing.T) {
+	var c Config
+	require.NoError(t, LoadInto(&c, baseEnv()))
+
+	assert.Equal(t, "", c.AnonymousSubjectID,
+		"anonymous pull must be DISABLED by default (empty anon subject id, secure-by-default)")
+}
+
+// TestConfig_AnonymousSubject_Override (RG-1 D-7) — the anon principal id is
+// env-configurable (KACHO_REGISTRY_ANONYMOUS_SUBJECT_ID) and MUST match kacho-iam's
+// AnonymousClientID; the data-plane resolves a token with this sub to user:*.
+func TestConfig_AnonymousSubject_Override(t *testing.T) {
+	env := baseEnv()
+	env["KACHO_REGISTRY_ANONYMOUS_SUBJECT_ID"] = "cid-registry-anon"
+
+	var c Config
+	require.NoError(t, LoadInto(&c, env))
+
+	assert.Equal(t, "cid-registry-anon", c.AnonymousSubjectID,
+		"anon principal id must be env-configurable (matches iam AnonymousClientID)")
+}
+
 // TestConfig_IAMJWKS_Override_OldEnvIgnored (RJU-14) — новый env
 // KACHO_REGISTRY_IAM_JWKS_URL читается в IAMJWKSURL; старый
 // KACHO_REGISTRY_HYDRA_JWKS_URL БОЛЬШЕ НЕ КОНСУЛЬТИРУЕТСЯ (снят с контракта):

@@ -212,6 +212,27 @@ func FGASubjectFromID(principalID string) string {
 	}
 }
 
+// FGASubjectForPrincipalID — resolve a verified data-plane principal id to its FGA
+// subject, honoring the configured anonymous principal id (RG-1 D-7). When
+// anonPrincipalID is non-empty AND principalID equals it, the caller is the public
+// anonymous principal and resolves to FGASubjectPublicWildcard ("user:*"): a valid
+// anon Bearer thus reads only PUBLIC repos (via the repo's `user:* v_get` tuple) and
+// can NEVER write (no wildcard write relation exists) — B03 / B14. Every other
+// principalID resolves by id-prefix via FGASubjectFromID.
+//
+// anonPrincipalID=="" → anonymous pull DISABLED (secure-by-default): a token whose sub
+// happens to equal the anon id resolves as an ordinary principal, never silently
+// gaining the wildcard. The anon principal id is deployment-configured (the iam anon
+// Hydra client id); deploy MUST keep it reserved (no real principal shares it), since
+// a token proving sub==anonPrincipalID can only be minted by holding the anon client's
+// key (the anon flow).
+func FGASubjectForPrincipalID(principalID, anonPrincipalID string) string {
+	if anonPrincipalID != "" && principalID == anonPrincipalID {
+		return FGASubjectPublicWildcard
+	}
+	return FGASubjectFromID(principalID)
+}
+
 // RegisterIntentForCreate — intent на Create реестра: project-tuple ПЕРВЫМ, затем
 // (при аутентифицированном principal) owner-tuple. Несёт labels + parent-project
 // для label-selectable authz-scope в iam-mirror.

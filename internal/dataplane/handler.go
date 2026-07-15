@@ -32,7 +32,12 @@ type Handler struct {
 	pushGrants PushGrantRecorder
 	realm      string // IAM /token realm для WWW-Authenticate
 	service    string // service-audience для WWW-Authenticate
-	logger     *slog.Logger
+	// anonSubjectID — the anonymous principal id (the iam-issued anon Hydra client id)
+	// this data-plane resolves to the FGA wildcard `user:*` (RG-1 D-7). Empty → anon
+	// pull DISABLED (secure-by-default): a token, if any, resolves as an ordinary
+	// principal. Set via WithAnonymousSubject from the composition root.
+	anonSubjectID string
+	logger        *slog.Logger
 }
 
 // New собирает Handler. verifier==nil / authz==nil → breakglass-bypass соответствующей
@@ -67,6 +72,18 @@ func New(verifier TokenVerifier, authz Authorizer, backend Backend, forwarder Fo
 	}
 }
 
+// WithAnonymousSubject configures the anonymous principal id (the iam-issued anon
+// Hydra client id) this data-plane resolves to the FGA wildcard `user:*` — a VALID
+// anon Bearer thus reads only PUBLIC repos and can never write (RG-1 D-7 / B03 / B14).
+// Empty (the default) leaves anonymous pull DISABLED (secure-by-default: an anon token,
+// if any, resolves as an ordinary principal and is denied on PUBLIC-only grants).
+// Returns h for chaining from the composition root. Mirrors the WithClock-style
+// builder used elsewhere in Kachō — keeps the (already wide) New signature stable.
+func (h *Handler) WithAnonymousSubject(anonSubjectID string) *Handler {
+	h.anonSubjectID = anonSubjectID
+	return h
+}
+
 // recordUploadTimeout — дедлайн синхронной durable-записи blob-finalize (REG-33).
 // Запись обязана закоммититься ДО релея 2xx клиенту, поэтому исполняется на detached-
 // контексте (WithoutCancel): даже если клиент отвалится, ожидая ответ, строка
@@ -96,7 +113,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fga := fgaSubject(subject)
+	fga := fgaSubject(subject, h.anonSubjectID)
 	switch p.route {
 	case routePing:
 		h.writePing(w, r)
@@ -120,7 +137,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // authenticate верифицирует Bearer-JWT. Возвращает (subject, invalidToken, ok):
 // ok=false + invalidToken=false — токена нет/не Bearer; ok=false + invalidToken=true
 // — токен есть, но не прошёл JWKS-верификацию (challenge с error="invalid_token").
-// verifier==nil → breakglass bypass.
+// verifier==nil → breakglass bypass. subject — сырой `sub` (Kachō principal id ЛИБО
+// configured anonymous principal id): маппинг в FGA-subject (в т.ч. anon → wildcard
+// "user:*", RG-1 D-7) делает fgaSubject в ServeHTTP. No-Bearer → 401 challenge —
+// анонимность требует ВАЛИДНОГО anon-Bearer (issued IAM /token без Basic-creds), не
+// отсутствия токена.
 func (h *Handler) authenticate(r *http.Request) (subject string, invalidToken bool, ok bool) {
 	if h.verifier == nil {
 		return "bootstrap", false, true

@@ -378,7 +378,10 @@ func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoRe
 	}
 
 	return dataplane.New(verifier, authorizer, backend, forwarder, repoReg, regLookup, uploads, pushGrants,
-		cfg.TokenRealm, cfg.ServiceAud, logger), nil
+		cfg.TokenRealm, cfg.ServiceAud, logger).
+		// Anonymous public pull (RG-1 D-7): resolve the iam-issued anon principal id to
+		// the FGA wildcard user:*. Empty → anon disabled (secure-by-default).
+		WithAnonymousSubject(cfg.AnonymousSubjectID), nil
 }
 
 // staleSweeper — узкий порт TTL-подметания durable-таблиц REG-33 (registry_pending_blob,
