@@ -41,6 +41,16 @@ func (stubZotFP) TriggerGC(context.Context, string) error                 { retu
 func (stubZotFP) Stats(context.Context, string) (*domain.RegistryStats, error) {
 	return &domain.RegistryStats{}, nil
 }
+func (stubZotFP) RepositoryProjection(context.Context, string, string) (*domain.Repository, error) {
+	return nil, nil
+}
+func (stubZotFP) RepositoryEmpty(context.Context, string, string) (bool, error) { return true, nil }
+func (stubZotFP) RenameRepository(context.Context, string, string, string) error {
+	return nil
+}
+func (stubZotFP) ListReferrers(context.Context, string, string, string, string) ([]*domain.Referrer, error) {
+	return nil, nil
+}
 
 // stubIAMFP — project всегда существует (cross-domain precheck проходит).
 type stubIAMFP struct{}
@@ -75,7 +85,7 @@ func TestUseCase_REG01_FullCreatePath_OperationsInsert(t *testing.T) {
 	pool := setupTestDB(t)
 	repo := kachopg.NewRegistryRepo(pool)
 	ops := operations.NewRepo(pool, "kacho_registry")
-	uc := registry.New(repo, repo, stubZotFP{}, stubIAMFP{}, repo, ops, "registry.kacho.local")
+	uc := registry.New(repo, repo, kachopg.NewRepositoryConfigRepo(pool), stubZotFP{}, stubIAMFP{}, repo, ops, "registry.kacho.local")
 
 	op, err := uc.Create(aliceCtxFP(), registry.CreateSpec{
 		ProjectID: "prj-P", Name: "team-images", Description: "CI images",

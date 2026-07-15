@@ -133,9 +133,12 @@ func runServe(cfg config.Config) error {
 	pushGrantRepo := pg.NewPushGrantRepo(pool, cfg.PushGrantTTL)
 	zotAdapter := zotclient.New(cfg.ZotAddr)
 	iamAdapter := iamclient.New(projectIAMConn)
+	// repoConfigRepo — config-overlay Repository (repository_configs, RG-1): durable
+	// overlay-строки (survives-empty) + ACTIVE-guard + transactional-outbox owner/public-grant.
+	repoConfigRepo := pg.NewRepositoryConfigRepo(pool)
 
-	// ── use-case (CQRS repo + zot + iam + repo-registrar + LRO) ──
-	registryUC := registry.New(registryRepo, registryRepo, zotAdapter, iamAdapter, registryRepo, opsRepo, cfg.EndpointBase)
+	// ── use-case (CQRS repo + config-overlay + zot + iam + repo-registrar + LRO) ──
+	registryUC := registry.New(registryRepo, registryRepo, repoConfigRepo, zotAdapter, iamAdapter, registryRepo, opsRepo, cfg.EndpointBase)
 
 	// ── register-drainer: owner-tuple register/unregister intent из registry_outbox
 	// применяется через kacho-iam fga-proxy (:9091, mTLS, идемпотентно, at-least-once,

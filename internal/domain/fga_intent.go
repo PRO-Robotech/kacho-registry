@@ -71,6 +71,17 @@ const (
 	FGARelationVDelete = "v_delete"
 )
 
+// FGARelationAdmin — admin-tier relation на registry_registry. Любой путь, где
+// принципал САМ приводит ресурс к PUBLIC (per-repo flip B02, create-with-PUBLIC B08,
+// default_visibility→PUBLIC B10) требует этого relation (D-6 any-path-to-PUBLIC gate).
+const FGARelationAdmin = "admin"
+
+// FGASubjectPublicWildcard — FGA subject-строка анонимного/публичного принципала
+// ("user:*"). visibility=PUBLIC ⟺ существует tuple "user:* v_get registry_repository:
+// <reg>/<repo>" (D-7): анонимный pull резолвится в этот wildcard subject. Governance —
+// register/unregister по ИТОГОВОМУ visibility overlay-строки (B01/B06/B12).
+const FGASubjectPublicWildcard = FGASubjectTypeUser + ":*"
+
 // FGA subject-type namespaces аутентифицированного principal (parity с kacho-iam
 // FGA-моделью). Разделяемы обоими encoders (FGASubjectFromPrincipal — control-plane
 // по Principal.Type; FGASubjectFromID — data-plane по id-prefix), чтобы тип-строка
@@ -295,6 +306,40 @@ func UnregisterIntentForRepo(registryID, repo string) RegisterIntent {
 		Kind:       "Repository",
 		ResourceID: repoObjectID(registryID, repo),
 		Tuples:     []FGATuple{FGARepoParentTuple(registryID, repo)},
+	}
+}
+
+// FGARepoPublicGetTuple — public-read wildcard tuple репозитория
+// "user:* #v_get @registry_repository:<reg>/<repo>". Существование этого tuple ⟺
+// visibility=PUBLIC (D-7): анонимный (`user:*`) data-plane read проходит Check.
+func FGARepoPublicGetTuple(registryID, repo string) FGATuple {
+	return FGATuple{
+		SubjectID: FGASubjectPublicWildcard,
+		Relation:  FGARelationVGet,
+		Object:    FGAObjectRef(FGAObjectTypeRepository, repoObjectID(registryID, repo)),
+	}
+}
+
+// RegisterIntentForRepoPublicGrant — register-intent public-read wildcard tuple:
+// материализует "user:* v_get" на repo (visibility стал PUBLIC — per-repo flip B01,
+// create-with-PUBLIC B08, inherited-default B12). Идемпотентно at-least-once через
+// outbox: повторный register того же wildcard дедуплицируется iam-side.
+func RegisterIntentForRepoPublicGrant(registryID, repo string) RegisterIntent {
+	return RegisterIntent{
+		Kind:       "RepositoryPublicGrant",
+		ResourceID: repoObjectID(registryID, repo),
+		Tuples:     []FGATuple{FGARepoPublicGetTuple(registryID, repo)},
+	}
+}
+
+// UnregisterIntentForRepoPublicGrant — unregister-intent public-read wildcard tuple:
+// снимает "user:* v_get" (visibility стал PRIVATE — flip B06 — либо repo удалён/
+// переименован). anon pull снова fail-closed 404. Per-subject grants не трогаются.
+func UnregisterIntentForRepoPublicGrant(registryID, repo string) RegisterIntent {
+	return RegisterIntent{
+		Kind:       "RepositoryPublicGrant",
+		ResourceID: repoObjectID(registryID, repo),
+		Tuples:     []FGATuple{FGARepoPublicGetTuple(registryID, repo)},
 	}
 }
 

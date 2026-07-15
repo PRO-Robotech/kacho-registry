@@ -6,6 +6,8 @@ package registry
 import (
 	"github.com/PRO-Robotech/kacho-corelib/ids"
 	corevalidate "github.com/PRO-Robotech/kacho-corelib/validate"
+
+	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
 
 // ValidateRegistryID отсекает malformed registry-id синхронно первым стейтментом
@@ -27,11 +29,13 @@ func validatePageSize(size int64) (int64, error) {
 // известные, но hard-immutable (см. immutableUpdateFields) — их наличие в mask
 // даёт InvalidArgument с каноничным immutable-текстом, а не unknown-field.
 var knownUpdateFields = map[string]struct{}{
-	"name":        {},
-	"project_id":  {},
-	"projectId":   {},
-	"description": {},
-	"labels":      {},
+	"name":               {},
+	"project_id":         {},
+	"projectId":          {},
+	"description":        {},
+	"labels":             {},
+	"default_visibility": {},
+	"defaultVisibility":  {},
 }
 
 // immutableUpdateFields → каноничный immutable-текст (update_mask
@@ -40,6 +44,61 @@ var knownUpdateFields = map[string]struct{}{
 var immutableUpdateFields = map[string]string{
 	"project_id": "projectId is immutable after Registry.Create",
 	"projectId":  "projectId is immutable after Registry.Create",
+}
+
+// knownRepoUpdateFields — whitelist update_mask config-overlay Repository (RG-1).
+// name/registry_id входят как известные, но hard-immutable (см. immutableRepoUpdateFields):
+// их наличие → InvalidArgument с каноничным immutable-текстом (смена имени — только
+// RenameRepository), а не generic unknown-field.
+var knownRepoUpdateFields = map[string]struct{}{
+	"description": {},
+	"labels":      {},
+	"visibility":  {},
+	"name":        {},
+	"registry_id": {},
+	"registryId":  {},
+}
+
+// immutableRepoUpdateFields → каноничный immutable-текст. name — hard-immutable для
+// Update (смена имени только RenameRepository); registry_id — натуральный ключ.
+var immutableRepoUpdateFields = map[string]string{
+	"name":        "name is immutable after Repository.Create",
+	"registry_id": "registryId is immutable after Repository.Create",
+	"registryId":  "registryId is immutable after Repository.Create",
+}
+
+// resolveRepoUpdateMask применяет update_mask discipline к RepositoryConfigUpdate:
+//   - immutable поле (name/registry_id) → InvalidArgument (каноничный immutable-текст,
+//     ДО UpdateMask — иначе known-set отверг бы их как generic unknown, api-conventions.md);
+//   - unknown поле → InvalidArgument (corevalidate.UpdateMask с known-set);
+//   - пустой mask → full-object PATCH (description/labels/visibility);
+//   - mutable поле → соответствующий Apply*-флаг.
+func resolveRepoUpdateMask(spec RepositoryConfigUpdate, mask []string) (RepositoryConfigUpdate, error) {
+	for _, p := range mask {
+		if msg, ok := immutableRepoUpdateFields[p]; ok {
+			return spec, failInvalidArg("%s", msg)
+		}
+	}
+	if err := corevalidate.UpdateMask("update_mask", mask, knownRepoUpdateFields); err != nil {
+		return spec, err
+	}
+	if len(mask) == 0 {
+		spec.ApplyDescription = true
+		spec.ApplyLabels = true
+		spec.ApplyVisibility = true
+		return spec, nil
+	}
+	for _, p := range mask {
+		switch p {
+		case "description":
+			spec.ApplyDescription = true
+		case "labels":
+			spec.ApplyLabels = true
+		case "visibility":
+			spec.ApplyVisibility = true
+		}
+	}
+	return spec, nil
 }
 
 // resolveUpdateMask применяет update_mask discipline к UpdateSpec:
@@ -66,6 +125,10 @@ func resolveUpdateMask(spec UpdateSpec) (UpdateSpec, error) {
 		spec.ApplyName = spec.Name != ""
 		spec.ApplyDescription = true
 		spec.ApplyLabels = true
+		// default_visibility в full-PATCH применяем ТОЛЬКО если задано конкретное
+		// значение (UNSPECIFIED=не передано клиентом → не клобберим сид в 0; parity с
+		// ApplyName). Явный PRIVATE/PUBLIC в теле пустого mask → применяется.
+		spec.ApplyDefaultVisibility = spec.DefaultVisibility != domain.VisibilityUnspecified
 		return spec, nil
 	}
 	for _, p := range spec.Mask {
@@ -76,6 +139,8 @@ func resolveUpdateMask(spec UpdateSpec) (UpdateSpec, error) {
 			spec.ApplyDescription = true
 		case "labels":
 			spec.ApplyLabels = true
+		case "default_visibility", "defaultVisibility":
+			spec.ApplyDefaultVisibility = true
 		}
 	}
 	return spec, nil

@@ -68,6 +68,11 @@ type UpdateSpec struct {
 	ApplyName        bool
 	ApplyDescription bool
 	ApplyLabels      bool
+	// DefaultVisibility — сид visibility для новых repo (RG-1, B10/B11). Mutable через
+	// UpdateRegistry; переход →PUBLIC admin-gated (handler). ApplyDefaultVisibility —
+	// выставляется mask-discipline при "default_visibility" в update_mask.
+	DefaultVisibility      domain.Visibility
+	ApplyDefaultVisibility bool
 }
 
 // ---- Порты (АНКЕРЫ для rpc-implementer; CQRS-разделение read/write) ----------
@@ -125,6 +130,26 @@ type ZotClient interface {
 	TriggerGC(ctx context.Context, registryID string) error
 	// Stats возвращает инфра-статистику namespace (только для Internal-API).
 	Stats(ctx context.Context, registryID string) (*domain.RegistryStats, error)
+
+	// RepositoryProjection возвращает projection-слой одного repo (tag_count/size/
+	// artifact-типы/timestamps) для overlay ⟂ projection LEFT JOIN GetRepository.
+	// Нет проекции (repo без единого тега / ещё не пушился) → (nil, nil) — durable
+	// overlay пережил пустоту (tagCount=0), ephemeral без проекции невидим (handler
+	// existence-hiding). zot недоступен → ErrUnavailable (fail-closed).
+	RepositoryProjection(ctx context.Context, registryID, repository string) (*domain.Repository, error)
+	// RepositoryEmpty сообщает, есть ли у repo ≥1 тег (DeleteRepository reject-if-tags,
+	// D-4: source of truth emptiness = engine). zot недоступен → ErrUnavailable
+	// (fail-closed: overlay не сносим, пока не подтвердили пустоту, A14).
+	RepositoryEmpty(ctx context.Context, registryID, repository string) (bool, error)
+	// RenameRepository re-home'ит теги/манифесты/referrers repo old→new в движке
+	// (многошаговая НЕ-атомарная OCI-операция, D-5). Движок недоступен в середине
+	// remap → ErrUnavailable (fail-closed: без частичного rename, старое имя
+	// по-прежнему резолвится, A21). Целевое имя занято в движке → ErrAlreadyExists.
+	RenameRepository(ctx context.Context, registryID, oldName, newName string) error
+	// ListReferrers возвращает referrer-проекцию subject_digest (bounded full-set, D-8),
+	// опционально отфильтрованную server-side по artifactType facet. Пусто → []
+	// (не ошибка, C03). zot недоступен → ErrUnavailable.
+	ListReferrers(ctx context.Context, registryID, repository, subjectDigest, artifactType string) ([]*domain.Referrer, error)
 }
 
 // IAMClient — порт к kacho-iam: cross-domain валидация project (ProjectService.Get)
@@ -148,11 +173,12 @@ type RepoRegistrar interface {
 	UnregisterRepository(ctx context.Context, intent domain.RegisterIntent) error
 }
 
-// UseCase — бизнес-логика Registry поверх портов (CQRS repo + zot + iam +
-// repo-registrar) и LRO-стека operations.
+// UseCase — бизнес-логика Registry поверх портов (CQRS repo + config-overlay repo +
+// zot + iam + repo-registrar) и LRO-стека operations.
 type UseCase struct {
 	reader       RegistryReader
 	writer       RegistryWriter
+	cfg          RepositoryConfigRepo
 	zot          ZotClient
 	iam          IAMClient
 	repoReg      RepoRegistrar
@@ -161,14 +187,15 @@ type UseCase struct {
 }
 
 // New собирает UseCase. reader/writer — одна pg-реализация (CQRS-разделение на
-// уровне портов); repoReg эмитит repo-tuple intent'ы (register-on-first-push /
-// unregister-on-last-tag); ops — corelib LRO-репозиторий; endpointBase —
+// уровне портов); cfg — config-overlay Repository (RG-1, repository_configs);
+// repoReg эмитит repo-tuple intent'ы (register-on-first-push / unregister-on-last-tag,
+// adopt-owner, public-grant governance); ops — corelib LRO-репозиторий; endpointBase —
 // tenant-facing база для output-only Registry.endpoint ("<base>/<id>").
-func New(reader RegistryReader, writer RegistryWriter, zot ZotClient, iam IAMClient, repoReg RepoRegistrar, ops operations.Repo, endpointBase string) *UseCase {
+func New(reader RegistryReader, writer RegistryWriter, cfg RepositoryConfigRepo, zot ZotClient, iam IAMClient, repoReg RepoRegistrar, ops operations.Repo, endpointBase string) *UseCase {
 	if endpointBase == "" {
 		endpointBase = "registry.kacho.local"
 	}
-	return &UseCase{reader: reader, writer: writer, zot: zot, iam: iam, repoReg: repoReg, ops: ops, endpointBase: endpointBase}
+	return &UseCase{reader: reader, writer: writer, cfg: cfg, zot: zot, iam: iam, repoReg: repoReg, ops: ops, endpointBase: endpointBase}
 }
 
 // EndpointFor возвращает tenant-facing OCI-endpoint реестра ("<base>/<id>").
@@ -184,6 +211,19 @@ func (u *UseCase) EndpointFor(id string) string {
 // Незаполненная зависимость → Unavailable (не паника в prod-path).
 func (u *UseCase) assertWired() error {
 	if u.reader == nil || u.writer == nil || u.zot == nil || u.iam == nil || u.ops == nil {
+		return regerrors.ErrUnavailable
+	}
+	return nil
+}
+
+// assertRepoWired — defensive-гейт config-overlay Repository RPC: cfg-порт обязателен.
+// Отдельно от assertWired, т.к. overlay-порт добавлен позже (RG-1) и старые CRUD-пути
+// реестра его не требуют — незаполненный cfg → Unavailable (не паника в prod-path).
+func (u *UseCase) assertRepoWired() error {
+	if err := u.assertWired(); err != nil {
+		return err
+	}
+	if u.cfg == nil || u.repoReg == nil {
 		return regerrors.ErrUnavailable
 	}
 	return nil
@@ -223,12 +263,62 @@ func (u *UseCase) List(ctx context.Context, q ListQuery) ([]*domain.Registry, st
 	return items, next, nil
 }
 
-// ListRepositories возвращает проекцию repos namespace из zot.
+// ListRepositories возвращает объединение overlay ⊔ projection repos namespace (A20,
+// D-1): projection-окно из zot (offset-пагинация) обогащается overlay-полями
+// (description/labels/visibility/created_at) там, где есть durable-строка; durable-empty
+// репозитории (overlay без единого тега) — переживают пустоту и присутствуют в List
+// (изменённая семантика: раньше пустой repo в List не появлялся). Ephemeral (проекция без
+// overlay) несёт visibility=PRIVATE by default. Per-repo v_list row-filter (existence-
+// hiding: hidden/svc не течёт принципалу без v_list) — В ХЕНДЛЕРЕ ПОСЛЕ union. Durable-only
+// строки добавляются на ПЕРВОЙ странице (page_token==""), чтобы не дублироваться между
+// страницами; их точный tagCount берётся per-row projection-lookup (durable-empty → 0).
 func (u *UseCase) ListRepositories(ctx context.Context, q RepoListQuery) ([]*domain.Repository, string, error) {
-	if err := u.assertWired(); err != nil {
+	if err := u.assertRepoWired(); err != nil {
 		return nil, "", err
 	}
-	return u.zot.ListRepositories(ctx, q)
+	window, next, err := u.zot.ListRepositories(ctx, q)
+	if err != nil {
+		return nil, "", err
+	}
+
+	configs, cerr := u.cfg.ListConfigs(ctx, q.RegistryID)
+	if cerr != nil {
+		return nil, "", mapRepoErr(cerr)
+	}
+	byName := make(map[string]*domain.RepositoryConfig, len(configs))
+	for _, c := range configs {
+		byName[c.Name] = c
+	}
+
+	inWindow := make(map[string]struct{}, len(window))
+	for _, r := range window {
+		inWindow[r.Name] = struct{}{}
+		if c := byName[r.Name]; c != nil { // durable — обогащаем overlay-полями
+			r.Description = c.Description
+			r.Labels = c.Labels
+			r.Visibility = c.Visibility
+			r.CreatedAt = c.CreatedAt
+		} else { // ephemeral — visibility PRIVATE by default (overlay-полей нет)
+			r.Visibility = domain.VisibilityPrivate
+		}
+	}
+
+	// Durable-only строки (не попали в projection-окно — durable-empty либо в другой
+	// projection-странице) добавляем на первой странице. Point-lookup projection даёт
+	// точный tagCount (durable-empty → nil → 0), а не ложный ноль.
+	if q.PageToken == "" {
+		for _, c := range configs {
+			if _, ok := inWindow[c.Name]; ok {
+				continue
+			}
+			proj, perr := u.zot.RepositoryProjection(ctx, q.RegistryID, c.Name)
+			if perr != nil {
+				return nil, "", mapRepoErr(perr)
+			}
+			window = append(window, mergeRepository(q.RegistryID, c.Name, c, proj))
+		}
+	}
+	return window, next, nil
 }
 
 // ListTags возвращает проекцию тегов repo из zot.

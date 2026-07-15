@@ -54,6 +54,11 @@ func (u *UseCase) Update(ctx context.Context, spec UpdateSpec) (*operations.Oper
 			return nil, verr
 		}
 	}
+	if spec.ApplyDefaultVisibility {
+		if verr := spec.DefaultVisibility.Validate(); verr != nil {
+			return nil, failInvalidArg("Illegal argument: %s", verr.Error())
+		}
+	}
 
 	op, err := operations.NewFromContext(ctx,
 		ids.PrefixOperationReg,

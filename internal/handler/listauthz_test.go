@@ -309,7 +309,7 @@ func registryLevelOpH(t *testing.T, id, registryID, desc string) operations.Oper
 }
 
 func newTestHandlerOps(ops operations.Repo, az Authorizer) *RegistryHandler {
-	uc := registry.New(stubRepo{}, stubRepo{}, &fakeZotH{}, stubIAM{}, stubRepo{}, ops, "registry.kacho.local")
+	uc := registry.New(stubRepo{}, stubRepo{}, stubCfg{}, &fakeZotH{}, stubIAM{}, stubRepo{}, ops, "registry.kacho.local")
 	return NewRegistryHandler(uc, az)
 }
 
@@ -395,7 +395,7 @@ func TestHandler_ListOperations_Breakglass_NilAuthorizer_AllVisible(t *testing.T
 // ---- fakes для handler-method тестов --------------------------------------
 
 func newTestHandler(zot registry.ZotClient, az Authorizer) *RegistryHandler {
-	uc := registry.New(stubRepo{}, stubRepo{}, zot, stubIAM{}, stubRepo{}, newMemOpsH(), "registry.kacho.local")
+	uc := registry.New(stubRepo{}, stubRepo{}, stubCfg{}, zot, stubIAM{}, stubRepo{}, newMemOpsH(), "registry.kacho.local")
 	return NewRegistryHandler(uc, az)
 }
 
@@ -448,6 +448,39 @@ func (f *fakeZotH) TriggerGC(context.Context, string) error              { retur
 func (f *fakeZotH) Stats(context.Context, string) (*domain.RegistryStats, error) {
 	return &domain.RegistryStats{}, nil
 }
+func (f *fakeZotH) RepositoryProjection(context.Context, string, string) (*domain.Repository, error) {
+	return nil, nil
+}
+func (f *fakeZotH) RepositoryEmpty(context.Context, string, string) (bool, error) { return true, nil }
+func (f *fakeZotH) RenameRepository(context.Context, string, string, string) error {
+	return nil
+}
+func (f *fakeZotH) ListReferrers(context.Context, string, string, string, string) ([]*domain.Referrer, error) {
+	return nil, nil
+}
+
+// stubCfg — no-op RepositoryConfigRepo для существующих handler-тестов реестра (они не
+// упражняют config-overlay Repository RPC — те тестируются в repository_test.go).
+type stubCfg struct{}
+
+func (stubCfg) GetConfig(context.Context, string, string) (*domain.RepositoryConfig, error) {
+	return nil, regerrors.ErrNotFound
+}
+func (stubCfg) ListConfigs(context.Context, string) ([]*domain.RepositoryConfig, error) {
+	return nil, nil
+}
+func (stubCfg) InsertConfig(context.Context, *domain.RepositoryConfig, ...registry.OutboxIntent) (*domain.RepositoryConfig, error) {
+	return nil, nil
+}
+func (stubCfg) UpdateConfig(context.Context, registry.RepositoryConfigUpdate, ...registry.OutboxIntent) (*domain.RepositoryConfig, error) {
+	return nil, regerrors.ErrNotFound
+}
+func (stubCfg) RekeyConfig(context.Context, string, string, string, ...registry.OutboxIntent) (*domain.RepositoryConfig, error) {
+	return nil, regerrors.ErrNotFound
+}
+func (stubCfg) DeleteConfig(context.Context, string, string, ...registry.OutboxIntent) error {
+	return regerrors.ErrNotFound
+}
 
 // memOpsH — минимальный in-memory operations.Repo для handler-тестов.
 type memOpsH struct {
@@ -456,6 +489,13 @@ type memOpsH struct {
 }
 
 func newMemOpsH() *memOpsH { return &memOpsH{ops: map[string]*operations.Operation{}} }
+
+// count — число персистнутых Operation (проверка «Operation НЕ создана на deny», A15).
+func (m *memOpsH) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.ops)
+}
 
 func (m *memOpsH) put(op operations.Operation) {
 	m.mu.Lock()
@@ -479,6 +519,7 @@ func (m *memOpsH) Get(_ context.Context, id string) (*operations.Operation, erro
 	cp := *op
 	return &cp, nil
 }
+
 // List возвращает сохранённые операции детерминированно (ASC по ID). resource_id-
 // фильтр operations.ListFilter — DB-концерн (денормализованная колонка), в этих
 // authz-юнитах не моделируется: тесты кладут op одного реестра и проверяют per-repo

@@ -20,6 +20,7 @@ import (
 	registryv1 "github.com/PRO-Robotech/kacho-proto/gen/go/kacho/cloud/registry/v1"
 
 	registry "github.com/PRO-Robotech/kacho-registry/internal/apps/kacho/api/registry"
+	"github.com/PRO-Robotech/kacho-registry/internal/domain"
 )
 
 // RegistryHandler реализует registryv1.RegistryServiceServer.
@@ -85,14 +86,26 @@ func (h *RegistryHandler) Create(ctx context.Context, req *registryv1.CreateRegi
 	return operationToProto(op), nil
 }
 
-// Update запускает async-смену mutable-полей (labels/description) и возвращает Operation.
+// Update запускает async-смену mutable-полей (labels/description/default_visibility) и
+// возвращает Operation. Переход default_visibility→PUBLIC требует registry admin (D-6
+// any-path-to-PUBLIC gate, B10/B11): admin-Check В ХЕНДЛЕРЕ при "default_visibility" в
+// mask И target=PUBLIC → не-admin → PERMISSION_DENIED (не ломает editor description-путь).
 func (h *RegistryHandler) Update(ctx context.Context, req *registryv1.UpdateRegistryRequest) (*operationProto, error) {
+	if maskContains(req.GetUpdateMask().GetPaths(), "default_visibility") && req.GetDefaultVisibility() == registryv1.Visibility_PUBLIC {
+		if err := registry.ValidateRegistryID(req.GetRegistryId()); err != nil {
+			return nil, mapErr(err)
+		}
+		if err := h.authz.requireRegistryAdmin(ctx, req.GetRegistryId(), "changing default visibility to public requires registry admin"); err != nil {
+			return nil, err
+		}
+	}
 	op, err := h.uc.Update(ctx, registry.UpdateSpec{
-		RegistryID:  req.GetRegistryId(),
-		Name:        req.GetName(),
-		Description: req.GetDescription(),
-		Labels:      req.GetLabels(),
-		Mask:        req.GetUpdateMask().GetPaths(),
+		RegistryID:        req.GetRegistryId(),
+		Name:              req.GetName(),
+		Description:       req.GetDescription(),
+		Labels:            req.GetLabels(),
+		Mask:              req.GetUpdateMask().GetPaths(),
+		DefaultVisibility: domain.Visibility(req.GetDefaultVisibility()),
 	})
 	if err != nil {
 		return nil, mapErr(err)
