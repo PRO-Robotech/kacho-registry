@@ -71,6 +71,33 @@ matching case-id lands in `cases/registry.py`, `validate-cases.py` passes via th
 
 ---
 
+## 1b. Config-overlay Repository (RG-1) — `cases/registry-repository.py` (PRESENT — 13 cases)
+
+6 новых RegistryService RPC поверх config-overlay `repository_configs`: `GetRepository`/
+`ListReferrers` sync; `CreateRepository`/`UpdateRepository`/`DeleteRepository`/
+`RenameRepository` async (→ `Operation`, prefix `rop`). Repository ключуется натуральным
+ключом `(registryId, name)` (имя несёт `/` → REST wildcard-сегмент). Requires api-gateway
+public-mux registration (отдельный срез) — green after routes wired. Verifies RG-1-<Group><NN>.
+
+| Case id | Classes | Prio | Meaning | Verifies |
+|---|---|---|---|---|
+| `REPO-SETUP` | CRUD | P0 | Setup: create shared overlay registry | RG-1-A01 |
+| `REPO-CR-OK` | CRUD | P0 | CreateRepository durable-empty → Operation → durable, PRIVATE (inherited), tagCount=0, createdAt set | RG-1-A01 |
+| `REPO-CR-NEG-BADNAME` | NEG, VAL | P1 | CreateRepository malformed name → 400 INVALID_ARGUMENT ("invalid repository name") | RG-1-A05 |
+| `REPO-GET-OK` | CRUD | P0 | GetRepository durable-empty → 200 (overlay ⟂ projection, visibility PRIVATE) | RG-1-A07 |
+| `REPO-GET-NEG-ABSENT` | NEG | P1 | GetRepository absent → 404 "repository not found" (existence-hiding) | RG-1-A08 |
+| `REPO-UPD-OK` | CRUD | P1 | UpdateRepository description/labels via updateMask → Operation → Get reflects | RG-1-A09 |
+| `REPO-UPD-NEG-IMMUTABLE` | NEG, VAL | P1 | UpdateRepository `updateMask=name` → 400 ("name is immutable after Repository.Create") | RG-1-A11 |
+| `REPO-DEL-OK` | CRUD, IDEM | P1 | DeleteRepository empty durable → Operation done → Get 404 | RG-1-A13 |
+| `REPO-DEL-NEG-ABSENT` | NEG | P1 | DeleteRepository absent → sync 404 "repository not found" (existence-hiding) | RG-1-A15 |
+| `REPO-REN-OK` | CRUD | P1 | RenameRepository durable old→new → Get(new) 200, Get(old) 404 | RG-1-A16 |
+| `REPO-REN-NEG-NOOP` | NEG, VAL | P1 | RenameRepository `newName==repository` → 400 ("new name must differ from current name") | RG-1-A19 |
+| `REPO-REF-EMPTY` | CRUD | P2 | ListReferrers subject без referrer'ов → `referrers=[]` 200 (not 404) | RG-1-C03 |
+| `REPO-REF-NEG-BADDIGEST` | NEG, VAL | P1 | ListReferrers malformed subject_digest → 400 ("invalid subject digest") | RG-1-C04 |
+| `REPO-CLEANUP` | CRUD | P3 | Cleanup: delete shared overlay registry | RG-1-A01 |
+
+---
+
 ## 2. Control-plane authz — `cases/registry-authz.py` (PENDING — not yet in repo)
 
 > STATUS: **not yet present** in `tests/newman/cases/`. The following are the **intended**

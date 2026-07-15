@@ -30,7 +30,7 @@ import (
 const schema = "kacho_registry"
 
 // registryColumns — канонический порядок SELECT/RETURNING строки реестра.
-const registryColumns = `id, project_id, name, description, labels, status, created_at`
+const registryColumns = `id, project_id, name, description, labels, status, created_at, default_visibility`
 
 // RegistryRepo — реализация registry.RegistryRepo поверх pgxpool.
 type RegistryRepo struct {
@@ -220,8 +220,12 @@ func (r *RegistryRepo) Update(ctx context.Context, spec registry.UpdateSpec, mir
 		}
 		sets = append(sets, fmt.Sprintf("labels = $%d::jsonb", idx))
 		args = append(args, labels)
-		// labels — последнее применяемое поле; idx дальше не читается (финальный
-		// UPDATE строится из sets/args). Инкремент здесь был бы ineffectual.
+		idx++
+	}
+	if spec.ApplyDefaultVisibility {
+		sets = append(sets, fmt.Sprintf("default_visibility = $%d", idx))
+		args = append(args, spec.DefaultVisibility.String())
+		// default_visibility — последнее применяемое поле; idx дальше не читается.
 	}
 
 	tx, err := r.pool.Begin(ctx)
@@ -370,11 +374,12 @@ func (r *RegistryRepo) emitRepoIntent(ctx context.Context, eventType string, int
 // scanRegistry читает строку реестра из pgx.Row/pgx.Rows в domain.Registry.
 func scanRegistry(row pgx.Row) (*domain.Registry, error) {
 	var (
-		reg       domain.Registry
-		labelsRaw []byte
-		statusRaw string
+		reg           domain.Registry
+		labelsRaw     []byte
+		statusRaw     string
+		defaultVisRaw string
 	)
-	if err := row.Scan(&reg.ID, &reg.ProjectID, &reg.Name, &reg.Description, &labelsRaw, &statusRaw, &reg.CreatedAt); err != nil {
+	if err := row.Scan(&reg.ID, &reg.ProjectID, &reg.Name, &reg.Description, &labelsRaw, &statusRaw, &reg.CreatedAt, &defaultVisRaw); err != nil {
 		return nil, err
 	}
 	labels, err := unmarshalLabels(labelsRaw)
@@ -383,6 +388,7 @@ func scanRegistry(row pgx.Row) (*domain.Registry, error) {
 	}
 	reg.Labels = labels
 	reg.Status = statusFromString(statusRaw)
+	reg.DefaultVisibility = domain.VisibilityFromString(defaultVisRaw)
 	return &reg, nil
 }
 

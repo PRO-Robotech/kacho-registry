@@ -151,6 +151,16 @@ type Config struct {
 	// бы токен любого RP, разделяющего JWKS+aud (federation-out).
 	HydraIssuer string `envconfig:"KACHO_REGISTRY_HYDRA_ISSUER" default:""`
 
+	// AnonymousSubjectID — the anonymous principal id (the iam-issued anon Hydra client
+	// id, kacho-iam AnonymousClientID) the data-plane resolves to the FGA wildcard
+	// `user:*` for anonymous public pull (RG-1 D-7). A VALID anon Bearer whose sub
+	// equals this id reads only PUBLIC repos (repo `user:* v_get` tuple) and can never
+	// write (B03/B14). Пусто (default) → anonymous pull DISABLED (secure-by-default:
+	// анонимный /token не сконфигурирован ⇒ никакой токен не резолвится в user:*).
+	// MUST match kacho-iam's configured AnonymousClientID and be a RESERVED id (no real
+	// principal shares it).
+	AnonymousSubjectID string `envconfig:"KACHO_REGISTRY_ANONYMOUS_SUBJECT_ID" default:""`
+
 	// EndpointBase — tenant-facing base OCI-endpoint namespace. Output-only поле
 	// Registry.endpoint = "<EndpointBase>/<id>". Это tenant-facing ingress-host;
 	// инфра-адрес zot наружу не раскрывается (infra-sensitive, не на публичной поверхности).

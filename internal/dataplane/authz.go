@@ -37,8 +37,9 @@ func repositoryObjectFull(fullName string) string {
 }
 
 // fgaSubject — FGA subject-строка из JWT `sub` (Kachō principal id). Делегирует
-// единому domain.FGASubjectFromID (тип по id-prefix — единственный доступный
-// data-plane дискриминатор, согласован с control-plane FGASubjectFromPrincipal).
-func fgaSubject(sub string) string {
-	return domain.FGASubjectFromID(sub)
+// единому domain.FGASubjectForPrincipalID: тип по id-prefix (согласован с control-plane
+// FGASubjectFromPrincipal), КРОМЕ configured anonymous principal id (anonSubjectID),
+// который резолвится в wildcard "user:*" (RG-1 D-7). anonSubjectID=="" → anon disabled.
+func fgaSubject(sub, anonSubjectID string) string {
+	return domain.FGASubjectForPrincipalID(sub, anonSubjectID)
 }

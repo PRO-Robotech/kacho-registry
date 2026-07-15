@@ -49,7 +49,11 @@ type Authorizer interface {
 // dataplane/authz ссылаются на те же domain-константы: drift между planes исключён.
 const (
 	relationVList   = domain.FGARelationVList
+	relationVGet    = domain.FGARelationVGet
+	relationVCreate = domain.FGARelationVCreate
+	relationVUpdate = domain.FGARelationVUpdate
 	relationVDelete = domain.FGARelationVDelete
+	relationAdmin   = domain.FGARelationAdmin
 )
 
 // registryObjectRef — FGA object namespace-реестра "registry_registry:<id>".
@@ -105,6 +109,52 @@ func (a repoAuthz) checkRepo(ctx context.Context, registryID, repository, relati
 	}
 	if !allowed {
 		return errHideExistence()
+	}
+	return nil
+}
+
+// checkRepository — per-repo verb-Check config-overlay Repository RPC (GetRepository
+// v_get / UpdateRepository v_update / DeleteRepository v_delete / RenameRepository
+// v_update / ListReferrers v_get). deny|az-absent → NOT_FOUND "repository not found"
+// (existence-hiding, БАЙТ-В-БАЙТ с use-case failNotFound — unauthorized неотличимо от
+// absent, A08/C02/A15); az-error → UNAVAILABLE (fail-closed).
+func (a repoAuthz) checkRepository(ctx context.Context, registryID, repository, relation string) error {
+	allowed, err := a.check(ctx, relation, repositoryObjectRef(registryID, repository))
+	if err != nil {
+		return errAuthzUnavailable()
+	}
+	if !allowed {
+		return errRepoHideExistence()
+	}
+	return nil
+}
+
+// registryGate — namespace call-gate по заданному verb-relation на registry_registry:
+// <reg> (CreateRepository v_create — невидимый реестр existence-hidden, X04). deny →
+// NOT_FOUND (existence-hiding); az-error → UNAVAILABLE (fail-closed).
+func (a repoAuthz) registryGate(ctx context.Context, registryID, relation string) error {
+	allowed, err := a.check(ctx, relation, registryObjectRef(registryID))
+	if err != nil {
+		return errAuthzUnavailable()
+	}
+	if !allowed {
+		return errHideExistence()
+	}
+	return nil
+}
+
+// requireRegistryAdmin — admin-gate any-path-to-PUBLIC (D-6): subject обязан держать
+// admin на registry_registry:<reg>. НЕ existence-hiding: caller уже доказал доступ к
+// видимому ресурсу (v_create/v_update прошёл ДО этого гейта), поэтому deny честен коду —
+// PERMISSION_DENIED с contract-текстом msg (B02/B08/B10); az-error → UNAVAILABLE.
+// breakglass (nil az) → allow.
+func (a repoAuthz) requireRegistryAdmin(ctx context.Context, registryID, msg string) error {
+	allowed, err := a.check(ctx, relationAdmin, registryObjectRef(registryID))
+	if err != nil {
+		return errAuthzUnavailable()
+	}
+	if !allowed {
+		return status.Error(codes.PermissionDenied, msg)
 	}
 	return nil
 }
@@ -270,6 +320,12 @@ func repositoryOfOperation(op *operations.Operation) (string, bool) {
 // errHideExistence — deny на объект, который caller не вправе видеть: NOT_FOUND
 // (existence-hiding — «есть-но-не-твой» неотличимо от «нет»).
 func errHideExistence() error { return status.Error(codes.NotFound, "not found") }
+
+// errRepoHideExistence — existence-hiding config-overlay Repository RPC: NOT_FOUND
+// "repository not found" — БАЙТ-В-БАЙТ с use-case failNotFound (unauthorized неотличимо
+// от absent; A08/C02/A15). Отдельный текст от errHideExistence (namespace-level "not
+// found"), т.к. Repository-контракт несёт "repository not found".
+func errRepoHideExistence() error { return status.Error(codes.NotFound, "repository not found") }
 
 // errAuthzUnavailable — iam.Check недоступен: fail-closed UNAVAILABLE.
 func errAuthzUnavailable() error {

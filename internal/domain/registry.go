@@ -75,6 +75,11 @@ type Registry struct {
 	Labels      map[string]string
 	Status      RegistryStatus
 	CreatedAt   time.Time
+	// DefaultVisibility — сид visibility для НОВЫХ repo реестра (RG-1, D-6). Mutable
+	// через UpdateRegistry; переход →PUBLIC подчинён any-path-to-PUBLIC admin-gate
+	// (B10/B11). Дефолт PRIVATE (fail-safe). CreateRepository без явного visibility
+	// наследует это значение (B12 gate-at-default).
+	DefaultVisibility Visibility
 }
 
 // Validate проверяет domain-инварианты Registry перед созданием/сохранением:
@@ -93,15 +98,26 @@ func (r Registry) Validate() error {
 	return nil
 }
 
-// Repository — output-only проекция OCI-репозитория из zot (source of truth =
-// zot). Не хранится в БД kacho-registry; читается на request-path и
-// per-repo authz-фильтруется.
+// Repository — публичная проекция OCI-репозитория (RG-1: overlay ⟂ projection).
+// Projection-поля (tag_count/size/artifact-типы/timestamps) — output-only зеркало zot
+// (source of truth = zot). Overlay-поля (Description/Labels/Visibility/CreatedAt) —
+// config-overlay из repository_configs (durable-repo); пусты у ephemeral-repo
+// (проекция без overlay-строки). Get/List отдают LEFT JOIN overlay + projection.
 type Repository struct {
 	RegistryID string
 	Name       string
-	TagCount   int32
-	SizeBytes  int64
-	UpdatedAt  time.Time
+	// Description — overlay-поле (durable). Пусто у ephemeral.
+	Description string
+	// Labels — overlay-поле (durable). Пусто у ephemeral.
+	Labels map[string]string
+	// Visibility — overlay-authoritative (D-6). Дефолт PRIVATE (ephemeral несёт PRIVATE).
+	Visibility Visibility
+	// CreatedAt — момент создания overlay-строки (durable). Нулевой у ephemeral
+	// (проекция без своей строки/created_at).
+	CreatedAt time.Time
+	TagCount  int32
+	SizeBytes int64
+	UpdatedAt time.Time
 	// ArtifactType — доминирующий (первый) тип артефакта репозитория; для обратной
 	// совместимости фильтра. Полный набор — ArtifactTypes.
 	ArtifactType ArtifactType

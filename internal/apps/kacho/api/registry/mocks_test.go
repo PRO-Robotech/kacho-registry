@@ -137,6 +137,17 @@ type mockZot struct {
 	statsResult *domain.RegistryStats
 	statsErr    error
 	statsCalls  []string
+
+	// RG-1 config-overlay Repository projection/engine-порты.
+	projByName   map[string]*domain.Repository
+	projFn       func(registryID, repository string) (*domain.Repository, error)
+	projErr      error
+	empty        bool
+	emptyErr     error
+	renameErr    error
+	renameCalls  [][3]string
+	referrers    []*domain.Referrer
+	referrersErr error
 }
 
 func (z *mockZot) ListRepositories(ctx context.Context, q registry.RepoListQuery) ([]*domain.Repository, string, error) {
@@ -195,6 +206,51 @@ func (z *mockZot) Stats(ctx context.Context, registryID string) (*domain.Registr
 		return z.statsResult, nil
 	}
 	return &domain.RegistryStats{RegistryID: registryID}, nil
+}
+
+// RepositoryProjection — управляемая проекция одного repo (GetRepository / merge). projFn
+// даёт per-key ответ (durable-empty → nil); projErr — инъекция сбоя (fail-closed).
+func (z *mockZot) RepositoryProjection(ctx context.Context, registryID, repository string) (*domain.Repository, error) {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	if z.projErr != nil {
+		return nil, z.projErr
+	}
+	if z.projFn != nil {
+		return z.projFn(registryID, repository)
+	}
+	if p, ok := z.projByName[repository]; ok {
+		return p, nil
+	}
+	return nil, nil
+}
+
+// RepositoryEmpty — управляемая emptiness одного repo (DeleteRepository reject-if-tags).
+func (z *mockZot) RepositoryEmpty(ctx context.Context, registryID, repository string) (bool, error) {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	if z.emptyErr != nil {
+		return false, z.emptyErr
+	}
+	return z.empty, nil
+}
+
+// RenameRepository — записывает engine-remap вызов; renameErr — инъекция сбоя (A21).
+func (z *mockZot) RenameRepository(ctx context.Context, registryID, oldName, newName string) error {
+	z.mu.Lock()
+	z.renameCalls = append(z.renameCalls, [3]string{registryID, oldName, newName})
+	z.mu.Unlock()
+	return z.renameErr
+}
+
+// ListReferrers — управляемый referrer-набор; referrersErr — инъекция сбоя.
+func (z *mockZot) ListReferrers(ctx context.Context, registryID, repository, subjectDigest, artifactType string) ([]*domain.Referrer, error) {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	if z.referrersErr != nil {
+		return nil, z.referrersErr
+	}
+	return z.referrers, nil
 }
 
 // ---- mock IAMClient (ProjectExists) --------------------------------------
@@ -343,7 +399,157 @@ func newUC(repo *mockRepo, zot *mockZot, iam *mockIAM, ops *memOps) *registry.Us
 
 // newUCWithReg — вариант с явным RepoRegistrar (для проверки unregister-on-last-tag).
 func newUCWithReg(repo *mockRepo, zot *mockZot, iam *mockIAM, ops *memOps, reg *mockRepoReg) *registry.UseCase {
-	return registry.New(repo, repo, zot, iam, reg, ops, "registry.kacho.local")
+	return registry.New(repo, repo, newMockCfg(), zot, iam, reg, ops, "registry.kacho.local")
+}
+
+// newUCWithCfg — вариант с явным config-overlay repo (RG-1 Repository RPC-тесты).
+func newUCWithCfg(repo *mockRepo, cfg *mockRepoConfig, zot *mockZot, iam *mockIAM, ops *memOps) *registry.UseCase {
+	return registry.New(repo, repo, cfg, zot, iam, &mockRepoReg{}, ops, "registry.kacho.local")
+}
+
+// ---- mock RepositoryConfigRepo (config-overlay CQRS-порт, RG-1) --------------
+
+// cfgOutboxCall — записанный набор OutboxIntent, поданный writer'у (проверка эмиссии
+// adopt-owner / public-grant governance в той же tx).
+type cfgOutboxCall struct {
+	op      string // insert/update/rekey/delete
+	name    string
+	newName string
+	intents []registry.OutboxIntent
+}
+
+type mockRepoConfig struct {
+	mu sync.Mutex
+
+	byName map[string]*domain.RepositoryConfig
+
+	getFn    func(registryID, name string) (*domain.RepositoryConfig, error)
+	insertFn func(cfg *domain.RepositoryConfig) (*domain.RepositoryConfig, error)
+	updateFn func(spec registry.RepositoryConfigUpdate) (*domain.RepositoryConfig, error)
+	rekeyFn  func(registryID, oldName, newName string) (*domain.RepositoryConfig, error)
+	deleteFn func(registryID, name string) error
+
+	calls []cfgOutboxCall
+}
+
+func newMockCfg() *mockRepoConfig {
+	return &mockRepoConfig{byName: map[string]*domain.RepositoryConfig{}}
+}
+
+func (m *mockRepoConfig) GetConfig(ctx context.Context, registryID, name string) (*domain.RepositoryConfig, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getFn != nil {
+		return m.getFn(registryID, name)
+	}
+	if c, ok := m.byName[name]; ok {
+		return c, nil
+	}
+	return nil, regerrors.ErrNotFound
+}
+
+func (m *mockRepoConfig) ListConfigs(ctx context.Context, registryID string) ([]*domain.RepositoryConfig, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*domain.RepositoryConfig, 0, len(m.byName))
+	for _, c := range m.byName {
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+func (m *mockRepoConfig) InsertConfig(ctx context.Context, cfg *domain.RepositoryConfig, intents ...registry.OutboxIntent) (*domain.RepositoryConfig, error) {
+	m.mu.Lock()
+	m.calls = append(m.calls, cfgOutboxCall{op: "insert", name: cfg.Name, intents: intents})
+	m.mu.Unlock()
+	if m.insertFn != nil {
+		return m.insertFn(cfg)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.byName[cfg.Name]; ok {
+		return nil, regerrors.ErrAlreadyExists
+	}
+	cp := *cfg
+	cp.CreatedAt = time.Now()
+	m.byName[cfg.Name] = &cp
+	return &cp, nil
+}
+
+func (m *mockRepoConfig) UpdateConfig(ctx context.Context, spec registry.RepositoryConfigUpdate, intents ...registry.OutboxIntent) (*domain.RepositoryConfig, error) {
+	m.mu.Lock()
+	m.calls = append(m.calls, cfgOutboxCall{op: "update", name: spec.Name, intents: intents})
+	m.mu.Unlock()
+	if m.updateFn != nil {
+		return m.updateFn(spec)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.byName[spec.Name]
+	if !ok {
+		return nil, regerrors.ErrNotFound
+	}
+	if spec.ApplyDescription {
+		c.Description = spec.Description
+	}
+	if spec.ApplyLabels {
+		c.Labels = spec.Labels
+	}
+	if spec.ApplyVisibility {
+		c.Visibility = spec.Visibility
+	}
+	return c, nil
+}
+
+func (m *mockRepoConfig) RekeyConfig(ctx context.Context, registryID, oldName, newName string, intents ...registry.OutboxIntent) (*domain.RepositoryConfig, error) {
+	m.mu.Lock()
+	m.calls = append(m.calls, cfgOutboxCall{op: "rekey", name: oldName, newName: newName, intents: intents})
+	m.mu.Unlock()
+	if m.rekeyFn != nil {
+		return m.rekeyFn(registryID, oldName, newName)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.byName[oldName]
+	if !ok {
+		return nil, regerrors.ErrNotFound
+	}
+	if _, taken := m.byName[newName]; taken {
+		return nil, regerrors.ErrAlreadyExists
+	}
+	cp := *c
+	cp.Name = newName
+	delete(m.byName, oldName)
+	m.byName[newName] = &cp
+	return &cp, nil
+}
+
+func (m *mockRepoConfig) DeleteConfig(ctx context.Context, registryID, name string, intents ...registry.OutboxIntent) error {
+	m.mu.Lock()
+	m.calls = append(m.calls, cfgOutboxCall{op: "delete", name: name, intents: intents})
+	if m.deleteFn != nil {
+		fn := m.deleteFn
+		m.mu.Unlock()
+		return fn(registryID, name)
+	}
+	defer m.mu.Unlock()
+	if _, ok := m.byName[name]; !ok {
+		return regerrors.ErrNotFound
+	}
+	delete(m.byName, name)
+	return nil
+}
+
+// intentEvents собирает (event, subject, relation, object) всех эмитированных intent'ов
+// по имени операции — для ассертов governance (public-grant / adopt-owner) в той же tx.
+func (m *mockRepoConfig) allIntents() []registry.OutboxIntent {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []registry.OutboxIntent
+	for _, c := range m.calls {
+		out = append(out, c.intents...)
+	}
+	return out
 }
 
 // aliceCtx — ctx с аутентифицированным principal (owner-tuple → user:usr-alice).

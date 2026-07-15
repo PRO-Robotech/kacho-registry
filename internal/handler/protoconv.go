@@ -36,6 +36,10 @@ func toProtoRepository(r *domain.Repository) *registryv1.Repository {
 	return &registryv1.Repository{
 		RegistryId:    r.RegistryID,
 		Name:          r.Name,
+		Description:   r.Description,                       // overlay (durable); пусто у ephemeral
+		Labels:        r.Labels,                            // overlay (durable); пусто у ephemeral
+		Visibility:    registryv1.Visibility(r.Visibility), // overlay-authoritative (PRIVATE default)
+		CreatedAt:     prototime.Truncate(r.CreatedAt),     // overlay created_at; пусто у ephemeral
 		TagCount:      r.TagCount,
 		SizeBytes:     r.SizeBytes,
 		UpdatedAt:     prototime.Truncate(r.UpdatedAt),
