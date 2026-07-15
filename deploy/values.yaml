@@ -88,6 +88,47 @@ service:
       image: nginxinc/nginx-unprivileged:1.27-alpine
       # Upstream, куда nginx проксирует `/iam/token` (iam registry-token shim :9096).
       iamTokenShimUpstream: kacho-iam.kacho.svc.cluster.local:9096
+      # ─── Server-cert для :8443-listener'а sidecar'а ──────────────────────────
+      # Этот серт предъявляется ДОКЕР-КЛИЕНТУ, значит клиент обязан ему ДОВЕРЯТЬ.
+      # Дефолт (kacho-internal-ca) годится только для in-cluster/dev-клиентов, которым
+      # роздан internal-CA. Для ПУБЛИЧНОГО VIP нужен публично-доверенный issuer
+      # (Let's Encrypt), иначе `docker login` падает с
+      #   x509: certificate signed by unknown authority
+      #
+      # Публичный CA НЕ подписывает commonName и ipAddresses (loopback/private-IP),
+      # и навязывает свою keyalg-политику → при внешнем issuer'е выставь эти поля
+      # пустыми: шаблон их опустит (см. registry-dataplane-cert.yaml).
+      #
+      # ВАЖНО (adoption): при переводе на публичный issuer задай `name`/`secretName`,
+      # СОВПАДАЮЩИЕ с уже выпущенным в кластере Certificate/секретом — helm усыновит
+      # существующий объект вместо перевыпуска (LE duplicate-limit: 5/нед на одинаковый
+      # SAN-набор; лишний перевыпуск может упереться в rate-limit и оставить 443 без серта).
+      #
+      # ВАЖНО (trust-anchor): при mtls.enable=true (prod) ca.crt для SSL_CERT_DIR берётся
+      # из mtls.serverSecretName, а НЕ отсюда, — поэтому увод этого серта на публичный CA
+      # не ломает доверие к iam :9097. При mtls.enable=false ca.crt берётся из ЭТОГО
+      # секрета → публичный issuer + mtls=false несовместимы (у LE-секрета ca.crt не тот).
+      cert:
+        name: registry-dataplane-tls
+        secretName: registry-dataplane-tls
+        issuerRef:
+          name: kacho-internal-ca
+          kind: ClusterIssuer
+        duration: 2160h
+        renewBefore: 720h
+        commonName: registry.in-cloud.io
+        dnsNames:
+          - registry.in-cloud.io
+        ipAddresses:
+          - 127.0.0.1
+        privateKey:
+          algorithm: ECDSA
+          size: 256
+        # Пусто → поле не рендерится и cert-manager применяет свои дефолты. Держи пустым
+        # при adoption уже выпущенного серта, у которого usages не задан: явный usages —
+        # это ИЗМЕНЕНИЕ spec'а → cert-manager перевыпустит серт (у LE duplicate-limit 5/нед).
+        usages:
+          - server auth
 
 # ─── Postgres (database-per-service, ban #8) — own pg-registry instance ────────
 # host = bitnami release-name + alias (`kacho-umbrella-pg-registry`). Password via
