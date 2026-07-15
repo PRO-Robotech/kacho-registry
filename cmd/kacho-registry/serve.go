@@ -358,10 +358,10 @@ func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoRe
 	if cfg.AuthZBreakglass {
 		logger.Warn("BREAKGLASS active: data-plane AuthN+AuthZ bypassed (emergency mode)")
 	} else {
-		if cfg.HydraJWKSURL == "" {
-			return nil, errors.New("data-plane requires KACHO_REGISTRY_HYDRA_JWKS_URL (or KACHO_REGISTRY_AUTHZ_BREAKGLASS=true to bypass)")
+		if cfg.IAMJWKSURL == "" {
+			return nil, errors.New("data-plane requires KACHO_REGISTRY_IAM_JWKS_URL (or KACHO_REGISTRY_AUTHZ_BREAKGLASS=true to bypass)")
 		}
-		if err := requireSecureJWKSURL(cfg.AuthMode, cfg.HydraJWKSURL); err != nil {
+		if err := requireSecureJWKSURL(cfg.AuthMode, cfg.IAMJWKSURL); err != nil {
 			return nil, err
 		}
 		if err := requireIssuerPinned(cfg.AuthMode, cfg.HydraIssuer); err != nil {
@@ -370,7 +370,7 @@ func buildDataplaneHandler(cfg config.Config, authzConn *grpc.ClientConn, repoRe
 		if authzConn == nil {
 			return nil, errors.New("data-plane requires authz IAM conn (KACHO_REGISTRY_AUTHZ_IAM_GRPC_ADDR)")
 		}
-		verifier = jwks.New(cfg.HydraJWKSURL, cfg.ServiceAud, cfg.HydraIssuer)
+		verifier = jwks.New(cfg.IAMJWKSURL, cfg.ServiceAud, cfg.HydraIssuer)
 		authorizer = check.NewIAMCheckClient(authzConn)
 	}
 
@@ -412,18 +412,18 @@ func runStaleSweeper(ctx context.Context, sweeper staleSweeper, interval time.Du
 // requireSecureJWKSURL — в production/production-strict JWKS-endpoint (единственный
 // trust-anchor верификации identity-JWT data-plane: jwks.Verifier тянет из него
 // публичные ключи) обязан быть https://. Plaintext-HTTP допускает MITM-подмену
-// JWKS-документа на пути к Hydra → forge-токен под любой subject → полный обход
-// data-plane AuthN. В dev (и breakglass — там verifier не поднимается) http://
-// допустим, симметрично DB sslmode=disable.
+// JWKS-документа на пути к iam-JWKS-эндпоинту → forge-токен под любой subject →
+// полный обход data-plane AuthN. В dev (и breakglass — там verifier не поднимается)
+// http:// допустим, симметрично DB sslmode=disable.
 func requireSecureJWKSURL(authMode, jwksURL string) error {
 	switch authMode {
 	case "production", "production-strict":
 		u, err := url.Parse(jwksURL)
 		if err != nil {
-			return fmt.Errorf("invalid KACHO_REGISTRY_HYDRA_JWKS_URL %q: %w", jwksURL, err)
+			return fmt.Errorf("invalid KACHO_REGISTRY_IAM_JWKS_URL %q: %w", jwksURL, err)
 		}
 		if !strings.EqualFold(u.Scheme, "https") {
-			return fmt.Errorf("AuthMode=%s requires https:// KACHO_REGISTRY_HYDRA_JWKS_URL "+
+			return fmt.Errorf("AuthMode=%s requires https:// KACHO_REGISTRY_IAM_JWKS_URL "+
 				"(JWKS trust anchor must not be fetched over plaintext; got scheme %q)", authMode, u.Scheme)
 		}
 	}
