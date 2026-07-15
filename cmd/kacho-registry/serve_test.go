@@ -6,6 +6,7 @@ package main
 import (
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/PRO-Robotech/kacho-corelib/grpcsrv"
@@ -121,6 +122,9 @@ func TestRequireSecureJWKSURL(t *testing.T) {
 		{"prod-strict-https-ok", "production-strict", "https://hydra.api.kacho.cloud/.well-known/jwks.json", false},
 		{"prod-scheme-uppercase-ok", "production", "HTTPS://hydra.api.kacho.cloud/jwks", false},
 		{"prod-bad-url", "production", "://not a url", true},
+		// iam JWKS proxy URL (post-unify): http:// rejected, https:// accepted in prod.
+		{"prod-iam-http-rejected", "production", "http://kacho-iam-internal.kacho.svc.cluster.local:9097/.well-known/jwks.json", true},
+		{"prod-iam-https-ok", "production", "https://kacho-iam-internal.kacho.svc.cluster.local:9097/.well-known/jwks.json", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -132,6 +136,24 @@ func TestRequireSecureJWKSURL(t *testing.T) {
 				t.Fatalf("want nil, got %v", err)
 			}
 		})
+	}
+}
+
+// TestRequireSecureJWKSURL_ErrorNamesIAMEnv (RJU-14) — после config-rename prod-гард
+// обязан именовать НОВЫЙ env KACHO_REGISTRY_IAM_JWKS_URL (а не старый _HYDRA_JWKS_URL)
+// в тексте отказа. Behaviour-level lock рефактора имени переменной (testing.md APICONV):
+// операторская диагностика указывает на актуальное имя env. Держит и позитивную сторону
+// (упомянут IAM), и негативную (старое имя вычищено).
+func TestRequireSecureJWKSURL_ErrorNamesIAMEnv(t *testing.T) {
+	err := requireSecureJWKSURL("production", "http://kacho-iam-internal.kacho.svc.cluster.local:9097/.well-known/jwks.json")
+	if err == nil {
+		t.Fatalf("want error for http:// iam JWKS URL in production, got nil")
+	}
+	if !strings.Contains(err.Error(), "KACHO_REGISTRY_IAM_JWKS_URL") {
+		t.Fatalf("error must name the renamed env KACHO_REGISTRY_IAM_JWKS_URL, got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "KACHO_REGISTRY_HYDRA_JWKS_URL") {
+		t.Fatalf("error must not reference the old env KACHO_REGISTRY_HYDRA_JWKS_URL, got %q", err.Error())
 	}
 }
 

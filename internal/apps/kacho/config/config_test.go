@@ -69,39 +69,50 @@ func TestConfig_PushGrantTTL_Override(t *testing.T) {
 		"push-grant TTL must stay env-configurable")
 }
 
-// TestConfig_HydraJWKS_Defaults фиксирует контракт data-plane authN: JWKS-источник
-// верификации identity-JWT по умолчанию — cluster-internal Hydra public (:4444);
-// Hydra issuer по умолчанию не задан (iss проверяется только когда сконфигурен);
-// realm WWW-Authenticate остаётся token-шимом (docker идёт в шим, шим ходит в Hydra —
-// data-plane про это не знает).
-func TestConfig_HydraJWKS_Defaults(t *testing.T) {
+// TestConfig_IAMJWKS_Defaults (RJU-14) фиксирует контракт data-plane authN после
+// unify: JWKS-источник верификации identity-JWT по умолчанию — cluster-internal
+// iam JWKS-proxy (https :9097), а НЕ Hydra напрямую (data-plane больше не звонит в
+// Hydra). Hydra issuer по-прежнему НЕ задан по умолчанию (iss проверяется только
+// когда сконфигурен) — issuer-pin остаётся раздельным knob'ом от JWKS-URL. realm
+// WWW-Authenticate остаётся token-шимом (docker идёт в шим, шим ходит в Hydra).
+func TestConfig_IAMJWKS_Defaults(t *testing.T) {
 	env := baseEnv()
 
 	var c Config
 	require.NoError(t, LoadInto(&c, env))
 
 	assert.Equal(t,
-		"http://kacho-umbrella-hydra-public.kacho.svc:4444/.well-known/jwks.json",
-		c.HydraJWKSURL,
-		"data-plane JWKS source must default to cluster-internal Hydra public")
+		"https://kacho-iam-internal.kacho.svc.cluster.local:9097/.well-known/jwks.json",
+		c.IAMJWKSURL,
+		"data-plane JWKS source must default to the cluster-internal iam JWKS proxy (https), not Hydra")
 	assert.Equal(t, "", c.HydraIssuer,
-		"Hydra issuer unset by default (verified only when configured)")
+		"Hydra issuer unset by default (verified only when configured); issuer-pin decoupled from JWKS-URL")
 	assert.Equal(t, "https://api.kacho.local/iam/token", c.TokenRealm,
-		"WWW-Authenticate realm stays the token-shim even though it now brokers to Hydra")
+		"WWW-Authenticate realm stays the token-shim")
 	assert.Equal(t, "registry.kacho.local", c.ServiceAud)
 }
 
-// TestConfig_HydraJWKS_Override — env-override JWKS-источника и Hydra issuer (для S3).
-func TestConfig_HydraJWKS_Override(t *testing.T) {
+// TestConfig_IAMJWKS_Override_OldEnvIgnored (RJU-14) — новый env
+// KACHO_REGISTRY_IAM_JWKS_URL читается в IAMJWKSURL; старый
+// KACHO_REGISTRY_HYDRA_JWKS_URL БОЛЬШЕ НЕ КОНСУЛЬТИРУЕТСЯ (снят с контракта):
+// выставление старого имени не влияет на IAMJWKSURL. Hydra issuer по-прежнему
+// пиннится своим собственным env (issuer-pin остаётся на Hydra, отдельный knob).
+func TestConfig_IAMJWKS_Override_OldEnvIgnored(t *testing.T) {
 	env := baseEnv()
+	env["KACHO_REGISTRY_IAM_JWKS_URL"] = "https://kacho-iam-internal.example:9097/.well-known/jwks.json"
+	// Старый env — умышленно выставлен на другое значение: он не должен ничего менять.
 	env["KACHO_REGISTRY_HYDRA_JWKS_URL"] = "http://hydra.example:4444/.well-known/jwks.json"
 	env["KACHO_REGISTRY_HYDRA_ISSUER"] = "https://hydra.api.kacho.cloud"
 
 	var c Config
 	require.NoError(t, LoadInto(&c, env))
 
-	assert.Equal(t, "http://hydra.example:4444/.well-known/jwks.json", c.HydraJWKSURL)
-	assert.Equal(t, "https://hydra.api.kacho.cloud", c.HydraIssuer)
+	assert.Equal(t, "https://kacho-iam-internal.example:9097/.well-known/jwks.json", c.IAMJWKSURL,
+		"IAMJWKSURL must come from KACHO_REGISTRY_IAM_JWKS_URL")
+	assert.NotEqual(t, "http://hydra.example:4444/.well-known/jwks.json", c.IAMJWKSURL,
+		"the old KACHO_REGISTRY_HYDRA_JWKS_URL must no longer be consulted")
+	assert.Equal(t, "https://hydra.api.kacho.cloud", c.HydraIssuer,
+		"issuer-pin stays on Hydra via its own KACHO_REGISTRY_HYDRA_ISSUER env")
 }
 
 // TestConfig_IAMProjectEdge_Override — env-override addr + отдельные mTLS-creds ребра.

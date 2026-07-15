@@ -118,11 +118,15 @@ type Config struct {
 	// DataplaneAddr — адрес data-plane HTTP-листенера (Docker Registry v2 / OCI).
 	// Отдельный порт от gRPC :9090/:9091. Пусто → data-plane не поднимается.
 	DataplaneAddr string `envconfig:"KACHO_REGISTRY_DATAPLANE_ADDR" default:":8080"`
-	// HydraJWKSURL — Hydra-public JWKS-endpoint для верификации identity-JWT
-	// data-plane. Токен теперь Hydra-issued (client_credentials для docker,
-	// jwt-bearer для k8s); подпись — RS256 (Ory default) либо ES256. Пусто + не
-	// breakglass → data-plane fail-closed на старте.
-	HydraJWKSURL string `envconfig:"KACHO_REGISTRY_HYDRA_JWKS_URL" default:"http://kacho-umbrella-hydra-public.kacho.svc:4444/.well-known/jwks.json"`
+	// IAMJWKSURL — iam internal JWKS proxy (mirrors Hydra keys); data-plane no
+	// longer dials Hydra directly. iam публикует cluster-internal HTTPS
+	// GET /.well-known/jwks.json — короткоживущий кэширующий reverse-proxy
+	// публичного JWKS Hydra (kid/alg байт-в-байт совпадают с Hydra-подписанными
+	// токенами; Hydra остаётся issuer/подписантом, iam ничего не пере-чеканит).
+	// Токен Hydra-issued (client_credentials для docker, jwt-bearer для k8s);
+	// подпись — RS256 (Ory default) либо ES256. issuer-pin (HydraIssuer) — отдельный
+	// knob, остаётся на Hydra. Пусто + не breakglass → data-plane fail-closed на старте.
+	IAMJWKSURL string `envconfig:"KACHO_REGISTRY_IAM_JWKS_URL" default:"https://kacho-iam-internal.kacho.svc.cluster.local:9097/.well-known/jwks.json"`
 	// TokenRealm — realm для WWW-Authenticate; docker сам идёт туда за Bearer-токеном.
 	// Остаётся token-шимом (kacho-iam /iam/token): docker предъявляет SA-key шиму,
 	// шим брокерит токен у Hydra. Для data-plane realm — непрозрачный указатель на
