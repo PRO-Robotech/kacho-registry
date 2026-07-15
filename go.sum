@@ -8,8 +8,8 @@ github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERo
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/PRO-Robotech/kacho-corelib v1.0.3-0.20260705005204-a60a829f8607 h1:vfrSjdp2Ms/HwM7b79h8x/1qz1yaBh5Bt6DSLX051WU=
 github.com/PRO-Robotech/kacho-corelib v1.0.3-0.20260705005204-a60a829f8607/go.mod h1:6VD1FltG2i04ySe5/wh2TSwyWHhVwyoz5yXIf7DImvs=
-github.com/PRO-Robotech/kacho-proto v0.0.0-20260705003346-993d5ebb2e31 h1:RYZP6jF5z6hSSYCXHlSEgQ47D1XeOJ6oEbznJNlfxN8=
-github.com/PRO-Robotech/kacho-proto v0.0.0-20260705003346-993d5ebb2e31/go.mod h1:/WNJsNO9mEN8MGFWOGpz5pcOr6iDEPm9owuFuTxZ25s=
+github.com/PRO-Robotech/kacho-proto v0.0.0-20260715134333-6d591f4c97ed h1:NK+nhSWDmzGUZR8RknN56WcQIX81eNhgyQ1GMAo2AtY=
+github.com/PRO-Robotech/kacho-proto v0.0.0-20260715134333-6d591f4c97ed/go.mod h1:/WNJsNO9mEN8MGFWOGpz5pcOr6iDEPm9owuFuTxZ25s=
 github.com/cenkalti/backoff/v4 v4.3.0 h1:MyRJ/UdXutAwSAT+s3wNd7MfTIcy71VQueUuFK343L8=
 github.com/cenkalti/backoff/v4 v4.3.0/go.mod h1:Y3VNntkOUPxTVeUxJ/G5vcM//AlwfmyYozVcomhLiZE=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
