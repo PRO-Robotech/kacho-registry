@@ -1,41 +1,61 @@
 {{/*
 TLS-серверный cert для data-plane nginx-sidecar. docker требует https для
 non-localhost registry; sidecar терминирует TLS этим цертом на :8443 и проксирует
-в плейнтекстовый data-plane (:8080). Выпускается cert-manager-ом через тот же
-internal-CA ClusterIssuer (kacho-internal-ca), что и остальная mTLS-оснастка стенда.
-CN/SAN — публичный OCI-хост registry.in-cloud.io; ipAddresses 127.0.0.1 покрывает
-loopback-обращение registry-контейнера к локальному JWKS-прокси sidecar-а.
+в плейнтекстовый data-plane (:8080).
+
+Issuer / имена / SAN параметризованы через `service.dataplaneLB.tlsSidecar.cert`: серт
+предъявляется ДОКЕР-КЛИЕНТУ, поэтому публичный VIP требует публично-доверенного issuer'а
+(Let's Encrypt) — дефолтный kacho-internal-ca годится только для in-cluster/dev-клиентов,
+которым роздан internal-CA. Публичный CA не подписывает commonName/ipAddresses и навязывает
+свою keyalg-политику → эти поля рендерятся ТОЛЬКО когда непусты (values.yaml, секция cert).
+
+Секрет (`cert.secretName`) монтируется в sidecar как tls.crt/tls.key. Его ключ ca.crt
+служит registry-контейнеру internal-CA trust-anchor'ом ТОЛЬКО при mtls.enable=false; в prod
+(mtls.enable=true) trust-anchor берётся из mtls.serverSecretName (см. volume internal-ca в
+deployment.yaml) — поэтому увод ЭТОГО серта на публичный CA не ломает JWKS-верификацию
+iam :9097.
+
 Рендерится ТОЛЬКО при включённом data-plane LB + TLS-sidecar (dev/local без LB не
-затрагивается). Секрет registry-dataplane-tls монтируется в sidecar (tls.crt/tls.key)
-и, ключом ca.crt, в registry-контейнер как internal-CA trust-anchor для JWKS-верификации.
+затрагивается).
 */}}
 {{- if and .Values.service.dataplaneLB.enabled .Values.service.dataplaneLB.tlsSidecar.enabled }}
+{{- $c := .Values.service.dataplaneLB.tlsSidecar.cert }}
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: registry-dataplane-tls
+  name: {{ $c.name | quote }}
   namespace: {{ .Release.Namespace | quote }}
   labels:
     app: {{ .Values.name }}
     app.kubernetes.io/component: registry-dataplane-tls
     app.kubernetes.io/managed-by: helm
 spec:
-  secretName: registry-dataplane-tls
-  duration: 2160h
-  renewBefore: 720h
+  secretName: {{ $c.secretName | quote }}
+  duration: {{ $c.duration | quote }}
+  renewBefore: {{ $c.renewBefore | quote }}
   privateKey:
-    algorithm: ECDSA
-    size: 256
+    {{- with $c.privateKey.algorithm }}
+    algorithm: {{ . }}
+    {{- end }}
+    {{- with $c.privateKey.size }}
+    size: {{ . }}
+    {{- end }}
     rotationPolicy: Always
   issuerRef:
-    name: kacho-internal-ca
-    kind: ClusterIssuer
+    name: {{ $c.issuerRef.name | quote }}
+    kind: {{ $c.issuerRef.kind | quote }}
     group: cert-manager.io
-  commonName: registry.in-cloud.io
+  {{- with $c.commonName }}
+  commonName: {{ . | quote }}
+  {{- end }}
   dnsNames:
-    - registry.in-cloud.io
+    {{- toYaml $c.dnsNames | nindent 4 }}
+  {{- with $c.ipAddresses }}
   ipAddresses:
-    - 127.0.0.1
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $c.usages }}
   usages:
-    - server auth
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 {{- end }}

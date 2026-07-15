@@ -264,10 +264,12 @@ spec:
         - name: tmp
           emptyDir: {}
         {{- if and .Values.service.dataplaneLB.enabled .Values.service.dataplaneLB.tlsSidecar.enabled }}
-        # data-plane TLS-sidecar: server-cert + nginx-конфиг.
+        # data-plane TLS-sidecar: server-cert + nginx-конфиг. Имя секрета — из values
+        # (tlsSidecar.cert.secretName): публичный VIP терминируется публично-доверенным
+        # цертом (LE), иначе docker отвергает internal-CA leaf как unknown authority.
         - name: registry-dataplane-tls
           secret:
-            secretName: registry-dataplane-tls
+            secretName: {{ .Values.service.dataplaneLB.tlsSidecar.cert.secretName | quote }}
         - name: registry-dataplane-nginx
           configMap:
             name: registry-dataplane-nginx
@@ -286,11 +288,15 @@ spec:
         # single-file trust store at /etc/registry-ca/internal-ca.crt (SSL_CERT_DIR) so the
         # data-plane trusts the leaf terminating the kacho-iam JWKS proxy (:9097). Source:
         # the registry mTLS server secret when mtls is on (prod), else the data-plane
-        # TLS-sidecar cert — both issued by the same kacho-internal-ca, so ca.crt is
-        # identical. ca.crt-only projection keeps private keys out of the trust dir.
+        # TLS-sidecar cert. ca.crt-only projection keeps private keys out of the trust dir.
+        # NB: the two sources coincide ONLY while the sidecar cert is internal-CA-issued.
+        # A public issuer (tlsSidecar.cert.issuerRef → letsencrypt-*) makes the sidecar
+        # secret's ca.crt a PUBLIC chain, which would not verify the iam :9097 leaf — hence
+        # a public sidecar issuer requires mtls.enable=true (prod), where ca.crt comes from
+        # the mTLS secret instead. See values.yaml (tlsSidecar.cert, trust-anchor note).
         - name: internal-ca
           secret:
-            secretName: {{ if .Values.mtls.enable }}{{ .Values.mtls.serverSecretName | quote }}{{ else }}registry-dataplane-tls{{ end }}
+            secretName: {{ if .Values.mtls.enable }}{{ .Values.mtls.serverSecretName | quote }}{{ else }}{{ .Values.service.dataplaneLB.tlsSidecar.cert.secretName | quote }}{{ end }}
             items:
               - key: ca.crt
                 path: internal-ca.crt
